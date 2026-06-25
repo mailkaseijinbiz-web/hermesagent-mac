@@ -222,6 +222,29 @@ class AppState: ObservableObject {
     // Mobile Server State
     @Published var isMobileServerRunning: Bool = false
 
+    // LINE bridge (bridge.py on :8650) — auto-started with the app so LINE always works.
+    @Published var isLineBridgeRunning: Bool = false
+    @Published var lineBridgeStatus: String = ""
+
+    /// Ensure the LINE bridge is running, then reflect its live state in the UI.
+    func startLineBridge() async {
+        lineBridgeStatus = LineBridge.shared.ensureRunning()
+        try? await Task.sleep(nanoseconds: 1_800_000_000)   // give bridge.py time to bind :8650
+        let up = LineBridge.shared.isPortUp()
+        isLineBridgeRunning = up
+        if up {
+            lineBridgeStatus = "LINEブリッジ稼働中（:\(LineBridge.shared.port)）"
+        } else if LineBridge.shared.isInstalled && !lineBridgeStatus.contains("失敗") {
+            lineBridgeStatus = "起動を試みました（応答待ち / ~/.hermes/line-bridge/bridge.log を確認）"
+        }
+    }
+
+    func restartLineBridge() async {
+        LineBridge.shared.stop()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        await startLineBridge()
+    }
+
     // Mobile Server Auth (Google Sign-In access gate)
     // When enabled, only requests carrying a valid Google ID token whose verified
     // email matches `mobileAllowedEmail` are accepted by MobileServer.
@@ -326,7 +349,7 @@ class AppState: ObservableObject {
     }
     // AI employees ("会社のメタファー"): each has isolated session/persona/model/cwd.
     @Published var employees: [Employee] = AppState.loadEmployees() {
-        didSet { AppState.saveEmployees(employees) }
+        didSet { AppState.saveEmployees(employees); scheduleICloudPush() }
     }
     @Published var activeEmployeeId: String? = UserDefaults.standard.string(forKey: "activeEmployeeId") {
         didSet { UserDefaults.standard.set(activeEmployeeId, forKey: "activeEmployeeId") }
@@ -335,10 +358,10 @@ class AppState: ObservableObject {
 
     // Teams (Phase A) and tasks (Phase B), persisted like employees.
     @Published var teams: [Team] = AppState.loadTeams() {
-        didSet { AppState.saveJSON(teams, "teams") }
+        didSet { AppState.saveJSON(teams, "teams"); scheduleICloudPush() }
     }
     @Published var workTasks: [WorkTask] = AppState.loadTasks() {
-        didSet { AppState.saveJSON(workTasks, "workTasks") }
+        didSet { AppState.saveJSON(workTasks, "workTasks"); scheduleICloudPush() }
     }
     static func loadTeams() -> [Team] { loadJSON("teams") ?? [] }
     static func loadTasks() -> [WorkTask] { loadJSON("workTasks") ?? [] }
@@ -613,6 +636,314 @@ class AppState: ObservableObject {
     @Published var cloudSyncStatus: String = ""
     @Published var isTestingCloud: Bool = false
 
+    // iCloud (CloudKit) — Stage 0 foundation test. Proves the signed build can reach
+    // the private CloudKit DB before we build the real sync on top of it.
+    @Published var icloudStatus: String = ""
+    @Published var isTestingICloud: Bool = false
+
+    /// Write+read+delete one probe record in CloudKit to verify entitlements + account.
+    func testICloud() async {
+        isTestingICloud = true
+        defer { isTestingICloud = false }
+        icloudStatus = "テスト中…"
+        do {
+            icloudStatus = try await CloudKitSync.smokeTest()
+        } catch {
+            icloudStatus = "失敗: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - iCloud roster sync (Stage 1: employees / teams / tasks)
+
+    @Published var icloudSyncEnabled: Bool = UserDefaults.standard.bool(forKey: "icloudSyncEnabled") {
+        didSet {
+            UserDefaults.standard.set(icloudSyncEnabled, forKey: "icloudSyncEnabled")
+            if icloudSyncEnabled { Task { await syncRosterNow() }; startICloudLiveSync() }
+            else { stopICloudLiveSync() }
+        }
+    }
+    @Published var isSyncingICloud: Bool = false
+    /// id → deletion time, so deletes propagate across devices (resurrection guard).
+    @Published var syncTombstones: [String: Double] = AppState.loadJSON("syncTombstones") ?? [:] {
+        didSet { AppState.saveJSON(syncTombstones, "syncTombstones") }
+    }
+    /// Set while applying a remote pull so the array didSets don't echo a push back.
+    private var isApplyingRemote = false
+    private var icloudPushTask: Task<Void, Never>? = nil
+    private var lastPushedRosterSig: Int = 0
+
+    /// Record a delete so it wins over stale copies on other devices.
+    func tombstone(_ id: String) { syncTombstones[id] = Date().timeIntervalSince1970 }
+
+    /// True if `id` was deleted at/after the item's own last edit (so the delete wins).
+    private func tombstoneWins(_ id: String, _ itemUpdated: Double) -> Bool {
+        if let ts = syncTombstones[id], ts >= itemUpdated { return true }
+        return false
+    }
+
+    /// Drop tombstones older than 60 days so the record doesn't grow without bound.
+    private func prunedTombstones() -> [String: Double] {
+        let cutoff = Date().timeIntervalSince1970 - 60 * 24 * 3600
+        return syncTombstones.filter { $0.value >= cutoff }
+    }
+
+    /// Build the shared-fields payload from current local state (call after merge).
+    private func localRosterPayload() -> CloudKitSync.RosterPayload {
+        let emps = employees.map {
+            CloudKitSync.EmployeeShared(
+                id: $0.id, name: $0.name, role: $0.role.rawValue,
+                provider: $0.provider, model: $0.model, mode: $0.mode.rawValue,
+                personaOverride: $0.personaOverride, teamId: $0.teamId,
+                createdAt: $0.createdAt, updatedAt: $0.updatedAt ?? $0.createdAt)
+        }
+        return CloudKitSync.RosterPayload(employees: emps, teams: teams,
+                                          tasks: workTasks, tombstones: prunedTombstones())
+    }
+
+    /// Merge a fetched cloud roster into local state (item-level last-write-wins + tombstones).
+    private func mergeRoster(_ cloud: CloudKitSync.RosterPayload) {
+        isApplyingRemote = true
+        defer { isApplyingRemote = false }
+
+        // Union tombstones (keep the newest deletion time per id).
+        for (id, ts) in cloud.tombstones where (syncTombstones[id] ?? 0) < ts { syncTombstones[id] = ts }
+
+        // Employees — LWW on shared fields; keep device-local fields (avatar/cwd/session).
+        for ce in cloud.employees {
+            guard let role = EmployeeRole(rawValue: ce.role) else { continue }
+            if tombstoneWins(ce.id, ce.updatedAt) { continue }
+            if let idx = employees.firstIndex(where: { $0.id == ce.id }) {
+                let local = employees[idx].updatedAt ?? employees[idx].createdAt
+                if ce.updatedAt > local {
+                    employees[idx].name = ce.name
+                    employees[idx].provider = ce.provider
+                    employees[idx].model = ce.model
+                    employees[idx].mode = AgentMode(rawValue: ce.mode) ?? role.defaultMode
+                    employees[idx].personaOverride = ce.personaOverride
+                    employees[idx].teamId = ce.teamId
+                    employees[idx].updatedAt = ce.updatedAt
+                }
+            } else {
+                var e = Employee(name: ce.name, role: role, provider: ce.provider,
+                                 model: ce.model, mode: AgentMode(rawValue: ce.mode) ?? role.defaultMode)
+                e.id = ce.id
+                e.personaOverride = ce.personaOverride
+                e.teamId = ce.teamId
+                e.createdAt = ce.createdAt
+                e.updatedAt = ce.updatedAt
+                employees.append(e)
+            }
+        }
+        employees.removeAll { tombstoneWins($0.id, $0.updatedAt ?? $0.createdAt) }
+
+        // Teams
+        for ct in cloud.teams {
+            if tombstoneWins(ct.id, ct.updatedAt ?? 0) { continue }
+            if let idx = teams.firstIndex(where: { $0.id == ct.id }) {
+                if (ct.updatedAt ?? 0) > (teams[idx].updatedAt ?? 0) { teams[idx] = ct }
+            } else {
+                teams.append(ct)
+            }
+        }
+        teams.removeAll { tombstoneWins($0.id, $0.updatedAt ?? 0) }
+
+        // Tasks
+        for ck in cloud.tasks {
+            if tombstoneWins(ck.id, ck.updatedAt) { continue }
+            if let idx = workTasks.firstIndex(where: { $0.id == ck.id }) {
+                if ck.updatedAt > workTasks[idx].updatedAt { workTasks[idx] = ck }
+            } else {
+                workTasks.append(ck)
+            }
+        }
+        workTasks.removeAll { tombstoneWins($0.id, $0.updatedAt) }
+    }
+
+    /// Full sync: pull cloud, merge, then push the merged result.
+    func syncRosterNow() async {
+        guard icloudSyncEnabled else { icloudStatus = "iCloud同期がオフです"; return }
+        isSyncingICloud = true
+        defer { isSyncingICloud = false }
+        icloudStatus = "iCloud同期中…"
+        let ws = effectiveCloudWorkspace
+        do {
+            if let cloud = try await CloudKitSync.fetchRoster(workspace: ws) { mergeRoster(cloud) }
+            let payload = localRosterPayload()
+            try await CloudKitSync.pushRoster(payload, workspace: ws)
+            lastPushedRosterSig = rosterSignature(payload)
+            icloudStatus = "iCloud同期完了（社員\(employees.count)・チーム\(teams.count)・タスク\(workTasks.count)）"
+        } catch {
+            icloudStatus = "iCloud同期 失敗: \(error.localizedDescription)"
+        }
+    }
+
+    /// Debounced push triggered by local edits (skips device-local-only churn).
+    func scheduleICloudPush() {
+        guard icloudSyncEnabled, !isApplyingRemote else { return }
+        icloudPushTask?.cancel()
+        icloudPushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled, let self else { return }
+            await self.pushRosterOnly()
+        }
+    }
+
+    private func pushRosterOnly() async {
+        guard icloudSyncEnabled else { return }
+        let payload = localRosterPayload()
+        let sig = rosterSignature(payload)
+        guard sig != lastPushedRosterSig else { return }   // shared fields unchanged → skip
+        do {
+            try await CloudKitSync.pushRoster(payload, workspace: effectiveCloudWorkspace)
+            lastPushedRosterSig = sig
+        } catch {
+            icloudStatus = "iCloud push失敗: \(error.localizedDescription)"
+        }
+    }
+
+    private func rosterSignature(_ p: CloudKitSync.RosterPayload) -> Int {
+        (try? JSONEncoder().encode(p))?.hashValue ?? 0
+    }
+
+    // MARK: - iCloud message mirror (Stage 2: one-way; state.db is CLI-owned / read-only)
+
+    @Published var icloudMirrorMessages: Bool = UserDefaults.standard.bool(forKey: "icloudMirrorMessages") {
+        didSet {
+            UserDefaults.standard.set(icloudMirrorMessages, forKey: "icloudMirrorMessages")
+            if icloudMirrorMessages { Task { await mirrorMessagesNow() } }
+        }
+    }
+    @Published var isMirroringMessages: Bool = false
+    /// sessionId → last message id already mirrored (so only changed sessions re-push).
+    private var mirroredSessionMsgId: [String: Int64] = AppState.loadJSON("mirroredSessionMsgId") ?? [:] {
+        didSet { AppState.saveJSON(mirroredSessionMsgId, "mirroredSessionMsgId") }
+    }
+    private var mirrorPushTask: Task<Void, Never>? = nil
+    /// At most this many session logs per run (bounds latency; rest picked up next pass).
+    private let mirrorLogsPerRun = 40
+
+    /// Cap one session's mirrored messages under CloudKit's ~1MB record limit: keep the
+    /// most recent, dropping oldest until the JSON fits.
+    private func capMessages(_ rows: [StateDB.MessageRow]) -> [CloudKitSync.MessageDTO] {
+        var dtos = rows.suffix(1000).map {
+            CloudKitSync.MessageDTO(id: $0.id, role: $0.role, content: $0.content,
+                                    timestamp: $0.timestamp, tokenCount: $0.tokenCount)
+        }
+        while dtos.count > 1, let data = try? JSONEncoder().encode(dtos), data.count > 950_000 {
+            dtos.removeFirst(max(1, dtos.count / 10))
+        }
+        return dtos
+    }
+
+    /// Mirror sessions + (changed) messages up to CloudKit. One-way — never written back.
+    func mirrorMessagesNow() async {
+        guard icloudSyncEnabled else { icloudStatus = "iCloud同期がオフです"; return }
+        isMirroringMessages = true
+        defer { isMirroringMessages = false }
+        icloudStatus = "メッセージをミラー中…"
+        let ws = effectiveCloudWorkspace
+        let sessions = StateDB.shared.sessions(limit: 500)
+        do {
+            var metas: [CloudKitSync.SessionMeta] = []
+            var pushed = 0, remaining = 0
+            for s in sessions {
+                metas.append(CloudKitSync.SessionMeta(
+                    id: s.id, title: s.title, preview: s.preview, source: s.source,
+                    archived: s.archived, messageCount: s.messageCount,
+                    lastMessageId: s.lastMessageId, updatedAt: s.updatedAt))
+                guard s.lastMessageId > (mirroredSessionMsgId[s.id] ?? -1) else { continue }
+                if pushed >= mirrorLogsPerRun { remaining += 1; continue }
+                let msgs = capMessages(StateDB.shared.messages(sessionId: s.id))
+                try await CloudKitSync.pushSessionLog(ws: ws, sessionId: s.id, messages: msgs)
+                mirroredSessionMsgId[s.id] = s.lastMessageId
+                pushed += 1
+            }
+            try await CloudKitSync.pushSessionIndex(ws: ws, sessions: metas)
+            icloudStatus = remaining > 0
+                ? "メッセージをミラー（セッション\(metas.count)・更新\(pushed)、残り\(remaining)件は次回）"
+                : "メッセージをミラーしました（セッション\(metas.count)・更新\(pushed)）"
+            if remaining > 0 {   // more changed sessions remain → continue shortly
+                mirrorPushTask?.cancel()
+                mirrorPushTask = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    guard !Task.isCancelled, let self else { return }
+                    await self.mirrorMessagesNow()
+                }
+            }
+        } catch {
+            icloudStatus = "メッセージミラー失敗: \(error.localizedDescription)"
+        }
+    }
+
+    /// Debounced auto-mirror, triggered by store changes when the toggle is on.
+    func scheduleMessageMirror() {
+        guard icloudSyncEnabled, icloudMirrorMessages, !isMirroringMessages else { return }
+        mirrorPushTask?.cancel()
+        mirrorPushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            await self.mirrorMessagesNow()
+        }
+    }
+
+    /// Read the mirror back from CloudKit to confirm the one-way round-trip works.
+    func verifyCloudHistory() async {
+        guard icloudSyncEnabled else { icloudStatus = "iCloud同期がオフです"; return }
+        icloudStatus = "クラウド履歴を確認中…"
+        do {
+            let ws = effectiveCloudWorkspace
+            let metas = try await CloudKitSync.fetchSessionIndex(ws: ws)
+            let total = metas.reduce(0) { $0 + $1.messageCount }
+            if let first = metas.first {
+                let log = try await CloudKitSync.fetchSessionLog(ws: ws, sessionId: first.id)
+                icloudStatus = "クラウド履歴: セッション\(metas.count)件・メタ合計\(total)msg（先頭「\(first.title)」のミラー\(log.count)msg）"
+            } else {
+                icloudStatus = "クラウド履歴: セッション0件（まだミラーされていません）"
+            }
+        } catch {
+            icloudStatus = "履歴確認失敗: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - iCloud live sync (Stage 3: near-realtime via lightweight polling)
+    //
+    // The public DB can't use CKDatabaseSubscription (private/shared only), and
+    // CKQuerySubscription would need queryable indexes + a Push entitlement + an
+    // AppDelegate. Polling while the app is open gives ~realtime reflection of other
+    // devices' roster edits with zero extra setup. True APNs push is a later option.
+
+    private var livePollTask: Task<Void, Never>? = nil
+    private let livePollInterval: UInt64 = 20_000_000_000   // 20s
+
+    /// Pull + merge the roster without pushing (live poll / on focus). The
+    /// `isApplyingRemote` guard inside `mergeRoster` prevents an echo push.
+    private func pullRosterOnly() async {
+        guard icloudSyncEnabled else { return }
+        do {
+            if let cloud = try await CloudKitSync.fetchRoster(workspace: effectiveCloudWorkspace) {
+                mergeRoster(cloud)
+            }
+        } catch {
+            // transient (offline / throttled) — the next tick retries
+        }
+    }
+
+    /// Reflect other devices' roster changes in ~realtime while the app is open.
+    func startICloudLiveSync() {
+        livePollTask?.cancel()
+        guard icloudSyncEnabled else { livePollTask = nil; return }
+        let interval = livePollInterval
+        livePollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: interval)
+                guard let self, self.icloudSyncEnabled else { break }
+                await self.pullRosterOnly()
+            }
+        }
+    }
+
+    func stopICloudLiveSync() { livePollTask?.cancel(); livePollTask = nil }
+
     /// The working directory the agent runs in: active employee's workspace, else the
     /// selected GitHub repo, else home.
     var effectiveCwd: String { activeEmployee?.workspacePath ?? selectedRepoPath ?? NSHomeDirectory() }
@@ -679,6 +1010,13 @@ class AppState: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.shutdown() }
         }
+        // Pull other devices' roster edits the moment the app regains focus.
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.icloudSyncEnabled else { return }
+                Task { await self.pullRosterOnly() }
+            }
+        }
         Task {
             await fetchSessions()
             await fetchConfig()
@@ -688,10 +1026,15 @@ class AppState: ObservableObject {
             await fetchAvailableModels()
             setupACPPermissions()
             if cloudSyncEnabled { await syncEmployeesNow() }
+            if icloudSyncEnabled { await syncRosterNow() }
+            startICloudLiveSync()
 
             // Auto-start mobile server for iOS connectivity
             MobileServer.shared.start()
             self.isMobileServerRunning = true
+
+            // Keep the LINE bridge (bridge.py on :8650) running so LINE always works.
+            await startLineBridge()
 
             // Reflect changes made from other devices (iPhone/iPad) or sources (cron).
             startStoreSync()
@@ -722,6 +1065,8 @@ class AppState: ObservableObject {
     func shutdown() {
         activeProcess?.terminate(); activeProcess = nil
         storeSyncTimer?.cancel(); storeSyncTimer = nil
+        livePollTask?.cancel(); livePollTask = nil
+        LineBridge.shared.stop()
         ACPClient.shared.shutdown()
         ACPClient.mobile.shutdown()   // the mobile relay's own hermes acp process
         MobileServer.shared.stop()
@@ -749,6 +1094,7 @@ class AppState: ObservableObject {
                         self.lastStoreToken = d.token
                         await self.refreshFromStore()
                     }
+                    self.scheduleMessageMirror()   // mirror history on store change (toggle-gated)
                 }
                 if d.maxMessageId > self.lastPushedMessageId {
                     self.checkAndPush(currentMaxId: d.maxMessageId)
@@ -1362,11 +1708,15 @@ class AppState: ObservableObject {
     func fireEmployee(_ id: String) {
         guard let removed = employees.first(where: { $0.id == id }) else { return }
         employees.removeAll { $0.id == id }
+        tombstone(id)
         if activeEmployeeId == id { switchEmployee(nil) }
         if cloudSyncEnabled { Task { await deleteCloudEmployee(id) } }
         triggerToast(message: "\(removed.role.title)「\(removed.name)」を解雇しました", actionLabel: "取り消し") { [weak self] in
             guard let self = self, !self.employees.contains(where: { $0.id == removed.id }) else { return }
-            self.employees.append(removed)
+            self.syncTombstones[removed.id] = nil      // undo the delete: clear its tombstone
+            var restored = removed
+            restored.updatedAt = Date().timeIntervalSince1970   // beat any stale tombstone on other devices
+            self.employees.append(restored)
             if self.cloudSyncEnabled { Task { await self.pushEmployees() } }
             self.triggerToast(message: "「\(removed.name)」を戻しました")
         }
@@ -1533,7 +1883,8 @@ class AppState: ObservableObject {
     @discardableResult
     func createTeam(name: String) -> Team {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let t = Team(name: n.isEmpty ? "新しいチーム" : n)
+        var t = Team(name: n.isEmpty ? "新しいチーム" : n)
+        t.updatedAt = Date().timeIntervalSince1970
         teams.append(t)
         return t
     }
@@ -1546,14 +1897,20 @@ class AppState: ObservableObject {
     func setTeamManager(_ teamId: String, managerId: String?) {
         guard let idx = teams.firstIndex(where: { $0.id == teamId }) else { return }
         teams[idx].managerId = managerId
+        teams[idx].updatedAt = Date().timeIntervalSince1970
     }
     func renameTeam(_ teamId: String, name: String) {
         guard let idx = teams.firstIndex(where: { $0.id == teamId }) else { return }
         teams[idx].name = name
+        teams[idx].updatedAt = Date().timeIntervalSince1970
     }
     func deleteTeam(_ teamId: String) {
+        tombstone(teamId)
         teams.removeAll { $0.id == teamId }
-        for i in employees.indices where employees[i].teamId == teamId { employees[i].teamId = nil }
+        for i in employees.indices where employees[i].teamId == teamId {
+            employees[i].teamId = nil
+            employees[i].updatedAt = Date().timeIntervalSince1970
+        }
     }
 
     // MARK: - Tasks (Phase B)
@@ -1573,8 +1930,12 @@ class AppState: ObservableObject {
     func assignTask(_ taskId: String, to assigneeId: String?) {
         guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
         workTasks[idx].assigneeId = assigneeId
+        workTasks[idx].updatedAt = Date().timeIntervalSince1970
     }
-    func deleteTask(_ taskId: String) { workTasks.removeAll { $0.id == taskId } }
+    func deleteTask(_ taskId: String) {
+        tombstone(taskId)
+        workTasks.removeAll { $0.id == taskId }
+    }
     func tasks(status: TaskStatus) -> [WorkTask] { workTasks.filter { $0.status == status } }
 
     /// Phase C — a meeting: ask each participant the topic (in their isolated context),
@@ -1600,6 +1961,22 @@ class AppState: ObservableObject {
             let prompt = "次の会議の各メンバーの意見をまとめ、結論と次のアクションを簡潔に示してください。\n\n\(body)"
             await delegate(to: mgr.id, task: prompt)
         }
+    }
+
+    /// Register an automation (cron) for a specific employee: preset the assignee (and
+    /// optionally the prompt/name) and jump to the Automations screen to set the schedule.
+    func registerAutomationForEmployee(_ employeeId: String, prompt: String? = nil) {
+        newCronAssigneeId = employeeId
+        if let p = prompt?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty {
+            newCronPrompt = p
+        }
+        if let emp = employees.first(where: { $0.id == employeeId }),
+           newCronName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            newCronName = "\(emp.name)の定期タスク"
+        }
+        view = "automations"
+        Task { await fetchCronJobs() }
+        triggerToast(message: "担当者を設定しました。スケジュールと指示を入力して作成してください。")
     }
 
     /// Hand a task to its assignee: switch to that employee, prefill the task as the

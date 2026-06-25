@@ -316,6 +316,9 @@ struct EmployeeCard: View {
                         appState.assignEmployee(employee.id, toTeam: t.id)
                     }
                 } label: { Label("チームに配属", systemImage: "person.3") }
+                Button { appState.registerAutomationForEmployee(employee.id) } label: {
+                    Label("オートメーションに登録", systemImage: "clock.badge.plus")
+                }
                 Button {
                     generating = true
                     Task { await appState.generateAIAvatar(for: employee.id); generating = false }

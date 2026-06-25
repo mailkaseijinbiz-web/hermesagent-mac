@@ -277,6 +277,21 @@ struct SettingsModal: View {
                 }.buttonStyle(.plain)
             }
         )) {
+            HStack(spacing: 8) {
+                Circle().fill(appState.isLineBridgeRunning ? Color.green : Color.orange)
+                    .frame(width: 7, height: 7)
+                Text("LINEブリッジ: \(appState.isLineBridgeRunning ? "稼働中" : "停止中") (:8650)")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                Spacer()
+                Button("再起動") { Task { await appState.restartLineBridge() } }
+                    .font(.system(size: 11)).buttonStyle(.plain).foregroundColor(.blue)
+            }
+            if !appState.lineBridgeStatus.isEmpty {
+                Text(appState.lineBridgeStatus)
+                    .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.7)).lineLimit(nil)
+            }
+            Divider()
+
             if appState.channels.isEmpty {
                 Text("登録済みチャンネルはありません。").font(.system(size: 12)).foregroundColor(.secondary)
             } else {
@@ -297,18 +312,7 @@ struct SettingsModal: View {
                 }
             }
             Divider()
-            fieldLabel("チャンネルを追加")
-            Picker("", selection: $appState.newChannelPlatform) {
-                ForEach(["telegram", "discord", "slack", "signal", "whatsapp", "line", "email", "teams"], id: \.self) { Text($0).tag($0) }
-            }.pickerStyle(.menu)
-            styledField(TextField("チャットID / 宛先 (例: 7928751273)", text: $appState.newChannelId))
-            styledField(TextField("表示名（任意）", text: $appState.newChannelName))
-            Button { appState.addChannel() } label: {
-                HStack { Spacer(); Image(systemName: "plus"); Text("チャンネルを追加"); Spacer() }
-                    .font(.system(size: 12, weight: .medium)).padding(.vertical, 8)
-                    .background(Color.primary.opacity(0.06)).cornerRadius(6)
-            }.buttonStyle(.plain)
-            Text("※ プラットフォーム連携(ボットトークン等)は別途 hermes の設定が必要です。受信したチャットは自動で一覧に追加されます。")
+            Text("※ チャンネルは受信したチャットから自動で一覧に追加されます。プラットフォーム連携（ボットトークン等）は hermes 側の設定が必要です。")
                 .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
         }
     }
@@ -475,6 +479,77 @@ struct SettingsModal: View {
     }
 
     private var cloudSection: some View {
+        // Supabase card is hidden after migrating to iCloud (supabaseCard + its
+        // AppState logic are kept so it can be restored by re-adding it here).
+        icloudCard
+    }
+
+    private var icloudCard: some View {
+        card(title: "クラウド同期 (iCloud · CloudKit)") {
+            Toggle(isOn: $appState.icloudSyncEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("iCloud同期を有効化").font(.system(size: 13, weight: .medium))
+                    Text("社員・チーム・タスクを iCloud (CloudKit) で全端末同期します。編集時に自動同期＋起動時に取得＋他端末の変更を約20秒ごとに自動反映（起動中）。")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+                }
+            }.toggleStyle(.switch)
+
+            HStack(spacing: 10) {
+                Button { Task { await appState.syncRosterNow() } } label: {
+                    HStack(spacing: 4) {
+                        if appState.isSyncingICloud { ProgressView().controlSize(.small) }
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                        Text("iCloudで今すぐ同期")
+                    }.font(.system(size: 12))
+                }.buttonStyle(.borderedProminent)
+                    .disabled(!appState.icloudSyncEnabled || appState.isSyncingICloud)
+
+                Button { Task { await appState.testICloud() } } label: {
+                    HStack(spacing: 4) {
+                        if appState.isTestingICloud { ProgressView().controlSize(.small) }
+                        Image(systemName: "icloud")
+                        Text("接続テスト")
+                    }.font(.system(size: 12))
+                }.buttonStyle(.bordered).disabled(appState.isTestingICloud)
+                Spacer()
+            }
+
+            Divider().padding(.vertical, 2)
+
+            Toggle(isOn: $appState.icloudMirrorMessages) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("メッセージもミラー（一方向）").font(.system(size: 12, weight: .medium))
+                    Text("会話履歴を iCloud にバックアップします。state.db は読み取り専用のため書き戻しはしません（他端末では閲覧用）。")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+                }
+            }.toggleStyle(.switch).disabled(!appState.icloudSyncEnabled)
+
+            HStack(spacing: 10) {
+                Button { Task { await appState.mirrorMessagesNow() } } label: {
+                    HStack(spacing: 4) {
+                        if appState.isMirroringMessages { ProgressView().controlSize(.small) }
+                        Image(systemName: "arrow.up.doc")
+                        Text("メッセージをミラー")
+                    }.font(.system(size: 12))
+                }.buttonStyle(.bordered)
+                    .disabled(!appState.icloudSyncEnabled || appState.isMirroringMessages)
+                Button { Task { await appState.verifyCloudHistory() } } label: {
+                    HStack(spacing: 4) { Image(systemName: "checkmark.icloud"); Text("クラウド履歴を確認") }
+                        .font(.system(size: 12))
+                }.buttonStyle(.bordered).disabled(!appState.icloudSyncEnabled)
+                Spacer()
+            }
+
+            if !appState.icloudStatus.isEmpty {
+                Text(appState.icloudStatus)
+                    .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(nil)
+            }
+            Text("※ コンテナ iCloud.com.custom.hermes / public DB（個人iCloud容量を消費しません）。同期は社員/チーム/タスクの共有項目のみ（アバター・作業フォルダ等は端末ローカル）。Mac がシステム設定で iCloud にサインインしている必要があります。")
+                .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+        }
+    }
+
+    private var supabaseCard: some View {
         card(title: "クラウド同期 (Supabase)") {
             Toggle(isOn: $appState.cloudSyncEnabled) {
                 VStack(alignment: .leading, spacing: 2) {

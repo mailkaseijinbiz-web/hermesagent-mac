@@ -137,6 +137,9 @@ struct Team: Identifiable, Codable, Equatable {
     var id: String = UUID().uuidString
     var name: String
     var managerId: String? = nil   // an employee (role .manager) who leads the team
+    /// Last edit time of the shared fields (for cloud last-write-wins).
+    /// Optional so existing persisted teams decode without it. nil → treated as 0.
+    var updatedAt: Double? = nil
 }
 
 /// Task board status (Phase B).

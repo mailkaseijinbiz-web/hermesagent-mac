@@ -184,6 +184,23 @@ struct ChatView: View {
                         }
                         .buttonStyle(.plain)
 
+                        // When talking to an employee: register the typed request as that
+                        // employee's scheduled automation (jumps to the Automations screen).
+                        if let emp = appState.activeEmployee {
+                            Button {
+                                appState.registerAutomationForEmployee(emp.id, prompt: appState.inputValue)
+                            } label: {
+                                Image(systemName: "clock.badge.plus")
+                                    .font(.system(size: 13))
+                                    .foregroundColor(.primary.opacity(0.7))
+                                    .frame(width: 24, height: 24)
+                                    .background(Color.primary.opacity(0.05))
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                            .help("この依頼を\(emp.name)のオートメーションに登録")
+                        }
+
                         // Manager-only: delegate the typed task to a team member (Phase 2).
                         // Scoped to the manager's team if they lead one, else all members.
                         if appState.activeEmployee?.role == .manager {
