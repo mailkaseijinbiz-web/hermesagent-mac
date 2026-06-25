@@ -6,6 +6,7 @@ struct PluginRow: View {
     @EnvironmentObject var appState: AppState
     let plugin: HermesPlugin
     @State private var isPendingAction = false
+    @State private var showUninstallConfirm = false
 
     var body: some View {
         HStack(spacing: 16) {
@@ -54,13 +55,7 @@ struct PluginRow: View {
                 .toggleStyle(.switch)
                 .labelsHidden()
 
-                Button(action: {
-                    Task {
-                        isPendingAction = true
-                        await appState.handleUninstallPlugin(plugin)
-                        isPendingAction = false
-                    }
-                }) {
+                Button(action: { showUninstallConfirm = true }) {
                     Image(systemName: "trash")
                         .font(.system(size: 13))
                         .foregroundColor(.red.opacity(0.8))
@@ -69,6 +64,19 @@ struct PluginRow: View {
                         .cornerRadius(6)
                 }
                 .buttonStyle(.plain)
+                .confirmationDialog("「\(plugin.name)」をアンインストールしますか？",
+                                    isPresented: $showUninstallConfirm, titleVisibility: .visible) {
+                    Button("アンインストール", role: .destructive) {
+                        Task {
+                            isPendingAction = true
+                            await appState.handleUninstallPlugin(plugin)
+                            isPendingAction = false
+                        }
+                    }
+                    Button("キャンセル", role: .cancel) {}
+                } message: {
+                    Text("この操作は取り消せません。")
+                }
             }
         }
     }

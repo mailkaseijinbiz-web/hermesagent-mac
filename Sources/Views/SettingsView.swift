@@ -10,10 +10,12 @@ struct SettingsModal: View {
     @State private var isLoggingIn = false
     @State private var mgmtTab: ManagementTab = .memory
     @State private var showModelPicker = false
+    @State private var settingsSearch = ""
 
     enum Section: String, CaseIterable, Identifiable {
         case general = "一般"
         case github = "GitHub"
+        case cloud = "クラウド同期"
         case channels = "チャンネル"
         case plugins = "プラグイン"
         case management = "管理"
@@ -23,11 +25,28 @@ struct SettingsModal: View {
             switch self {
             case .general: return "gearshape"
             case .github: return "chevron.left.forwardslash.chevron.right"
+            case .cloud: return "cloud"
             case .channels: return "bubble.left.and.bubble.right"
             case .plugins: return "puzzlepiece.extension"
             case .management: return "brain.head.profile"
             case .experimental: return "flask"
             }
+        }
+        /// Extra search terms so a query like "supabase" or "モデル" finds the right section.
+        var keywords: String {
+            switch self {
+            case .general: return "モデル model プロバイダー provider api キー key 性格 personality 音声 読み上げ tts elevenlabs"
+            case .github: return "github リポジトリ repo ワークスペース clone git 作業フォルダ"
+            case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
+            case .channels: return "チャンネル channel telegram discord slack line whatsapp signal teams メール email"
+            case .plugins: return "プラグイン plugin インストール install 拡張"
+            case .management: return "管理 メモリ memory スキル skill mcp soul"
+            case .experimental: return "実験 experimental acp 転送 承認 自動許可 ツール"
+            }
+        }
+        func matches(_ q: String) -> Bool {
+            let s = q.lowercased()
+            return s.isEmpty || rawValue.lowercased().contains(s) || keywords.lowercased().contains(s)
         }
     }
 
@@ -60,9 +79,27 @@ struct SettingsModal: View {
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.top, 18)
-                    .padding(.bottom, 8)
+                    .padding(.bottom, 6)
 
-                ForEach(Section.allCases) { sec in
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundColor(.secondary)
+                    TextField("設定を検索", text: $settingsSearch).textFieldStyle(.plain).font(.system(size: 12))
+                    if !settingsSearch.isEmpty {
+                        Button { settingsSearch = "" } label: {
+                            Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundColor(.secondary)
+                        }.buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(Color.primary.opacity(0.05)).cornerRadius(7)
+                .padding(.horizontal, 8).padding(.bottom, 6)
+                .onChange(of: settingsSearch) { _, q in
+                    // Keep the selection valid: if it's filtered out, jump to the first match.
+                    let matches = Section.allCases.filter { $0.matches(q) }
+                    if !matches.contains(selected), let first = matches.first { selected = first }
+                }
+
+                ForEach(Section.allCases.filter { $0.matches(settingsSearch) }) { sec in
                     Button { selected = sec } label: {
                         HStack(spacing: 10) {
                             Image(systemName: sec.icon)
@@ -115,6 +152,7 @@ struct SettingsModal: View {
                         switch selected {
                         case .general: generalSection
                         case .github: githubSection
+                        case .cloud: cloudSection
                         case .channels: channelsSection
                         case .plugins: pluginsSection
                         case .management: managementSection
@@ -433,6 +471,45 @@ struct SettingsModal: View {
                         .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
                 }
             }.toggleStyle(.switch)
+        }
+    }
+
+    private var cloudSection: some View {
+        card(title: "クラウド同期 (Supabase)") {
+            Toggle(isOn: $appState.cloudSyncEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("クラウド同期を有効化").font(.system(size: 13, weight: .medium))
+                    Text("社員（今後メッセージも）をSupabaseに保存し、全端末で同期します。")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+                }
+            }.toggleStyle(.switch)
+
+            fieldLabel("Project URL")
+            styledField(TextField("https://xxxx.supabase.co", text: $appState.supabaseURL))
+            fieldLabel("API Key (anon public)")
+            styledField(SecureField("eyJhbGciOi...", text: $appState.supabaseAnonKey))
+            fieldLabel("ワークスペース（端末グループ識別・任意）")
+            styledField(TextField("例: あなたのメール", text: $appState.cloudWorkspace))
+
+            HStack(spacing: 10) {
+                Button { Task { await appState.testCloudConnection() } } label: {
+                    HStack(spacing: 4) {
+                        if appState.isTestingCloud { ProgressView().controlSize(.small) }
+                        Text("接続テスト")
+                    }.font(.system(size: 12))
+                }.buttonStyle(.bordered)
+                Button { Task { await appState.syncEmployeesNow() } } label: {
+                    HStack(spacing: 4) { Image(systemName: "arrow.triangle.2.circlepath"); Text("社員を今すぐ同期") }
+                        .font(.system(size: 12))
+                }.buttonStyle(.bordered).disabled(!appState.cloudSyncEnabled)
+                Spacer()
+            }
+            if !appState.cloudSyncStatus.isEmpty {
+                Text(appState.cloudSyncStatus)
+                    .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(nil)
+            }
+            Text("※ Supabaseでプロジェクト作成 → テーブル作成SQLを実行 → URL と anon キーをここに入力 → 接続テスト。")
+                .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
         }
     }
 

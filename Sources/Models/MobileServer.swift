@@ -203,6 +203,8 @@ class MobileServer {
             handleSessions(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/config"):
             handleConfig(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", "/api/employees"):
+            handleEmployees(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/sync/digest"):
             handleDigest(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/events"):
@@ -423,7 +425,31 @@ class MobileServer {
             }
         }
     }
-    
+
+    /// The AI-employee roster (iOS company parity) — shared fields only.
+    private nonisolated func handleEmployees(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let emps: [[String: Any]] = AppState.shared.employees.map { e in
+                [
+                    "id": e.id,
+                    "name": e.name,
+                    "role": e.role.rawValue,
+                    "roleTitle": e.role.title,
+                    "emoji": e.role.emoji,
+                    "accent": e.role.accentHex,
+                    "model": e.model,
+                    "mode": e.mode.rawValue,
+                    "blurb": e.role.blurb
+                ]
+            }
+            let json: [String: Any] = ["employees": emps]
+            if let data = try? JSONSerialization.data(withJSONObject: json),
+               let str = String(data: data, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+            }
+        }
+    }
+
     private nonisolated func handleChat(connection: NWConnection, body: String, corsHeaders: String) {
         // Parse request body
         guard let data = body.data(using: .utf8),
@@ -436,6 +462,8 @@ class MobileServer {
         let sessionId = json["sessionId"] as? String
         // Chat vs code mode (behavioral). Absent → .code preserves prior behavior.
         let mode = AgentMode(rawValue: (json["mode"] as? String) ?? "") ?? .code
+        // Optional AI employee to talk to (iOS company parity) — wraps with its persona.
+        let employeeId = json["employeeId"] as? String
 
         // Optional image: decode base64 → temp file → pass to the CLI via --image.
         let imagePath: String? = {
@@ -450,10 +478,6 @@ class MobileServer {
         let effectivePrompt = (prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && imagePath != nil)
             ? "添付した画像について説明してください。"
             : prompt
-        // Prepend the mode directive (the iOS bubble shows the user's own text; the
-        // Mac strips this sentinel when reloading from the store).
-        let sentPrompt = mode.wrap(effectivePrompt)
-
         // Send SSE headers
         let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\(corsHeaders)\r\n\r\n"
         sendRaw(connection: connection, text: headers)
@@ -462,6 +486,9 @@ class MobileServer {
             self.activeStreamConnections.append(connection)
             // Run the agent in the selected workspace (GitHub repo) if any, else home.
             let cwd = AppState.shared.effectiveCwd
+            // Wrap with the chosen employee's persona (if any) + mode; the iOS bubble
+            // shows the user's own text and the sentinel is stripped on the Mac.
+            let sentPrompt = AppState.shared.wrapForMobile(effectivePrompt, mode: mode, employeeId: employeeId)
 
             // The client controls its own session: an explicit id resumes it; no id
             // means a NEW session (do NOT fall back to the Mac's currently-open session,

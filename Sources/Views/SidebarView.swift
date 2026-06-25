@@ -6,6 +6,7 @@ struct SidebarView: View {
     @State private var editingSessionId: String? = nil
     @State private var editingSessionText: String = ""
     @State private var isSettingsHovered = false
+    @State private var pendingDeleteSession: Session? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -20,6 +21,9 @@ struct SidebarView: View {
                 }
                 SidebarMenuButton(icon: "person.3", title: "会社（AI社員）") {
                     appState.view = "company"
+                }
+                SidebarMenuButton(icon: "checklist", title: "タスク") {
+                    appState.view = "tasks"
                 }
                 SidebarMenuButton(icon: "clock", title: "オートメーション") {
                     appState.view = "automations"
@@ -52,6 +56,9 @@ struct SidebarView: View {
                                 .foregroundColor(active ? .primary : .secondary)
                                 .lineLimit(1)
                             Spacer()
+                            if appState.isEmployeeBusy(emp.id) {
+                                ProgressView().controlSize(.small).scaleEffect(0.6)
+                            }
                         }
                         .padding(.horizontal, 12).padding(.vertical, 5)
                         .background(active ? Color.primary.opacity(0.08) : Color.clear)
@@ -83,7 +90,7 @@ struct SidebarView: View {
 
             // Sessions Section
             VStack(alignment: .leading, spacing: 4) {
-                Text("チャット")
+                Text(appState.activeEmployee.map { "\($0.name) のチャット" } ?? "チャット")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 16)
@@ -91,7 +98,7 @@ struct SidebarView: View {
 
                 ScrollView {
                     VStack(spacing: 2) {
-                        ForEach(appState.sessions) { session in
+                        ForEach(appState.visibleSessions) { session in
                             let isActive = appState.currentSessionId == session.id
                             HStack {
                                 if editingSessionId == session.id {
@@ -129,9 +136,7 @@ struct SidebarView: View {
 
                                 if hoveredSessionId == session.id {
                                     Button(action: {
-                                        Task {
-                                            await appState.handleDeleteSession(id: session.id)
-                                        }
+                                        pendingDeleteSession = session
                                     }) {
                                         Image(systemName: "trash")
                                             .font(.system(size: 11))
@@ -166,9 +171,7 @@ struct SidebarView: View {
                                 Divider()
                                 
                                 Button(role: .destructive, action: {
-                                    Task {
-                                        await appState.handleDeleteSession(id: session.id)
-                                    }
+                                    pendingDeleteSession = session
                                 }) {
                                     Label("削除", systemImage: "trash")
                                 }
@@ -209,6 +212,22 @@ struct SidebarView: View {
                     NSCursor.pop()
                 }
             }
+        }
+        .confirmationDialog(
+            "「\(pendingDeleteSession?.title ?? "")」を削除しますか？",
+            isPresented: Binding(get: { pendingDeleteSession != nil },
+                                 set: { if !$0 { pendingDeleteSession = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("削除", role: .destructive) {
+                if let s = pendingDeleteSession {
+                    Task { await appState.handleDeleteSession(id: s.id) }
+                }
+                pendingDeleteSession = nil
+            }
+            Button("キャンセル", role: .cancel) { pendingDeleteSession = nil }
+        } message: {
+            Text("この操作は取り消せません。")
         }
     }
 }

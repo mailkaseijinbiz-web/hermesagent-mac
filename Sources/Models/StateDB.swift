@@ -121,6 +121,25 @@ final class StateDB: Sendable {
         return rows
     }
 
+    /// sessionId → summed assistant token_count (for per-employee cost/usage stats).
+    /// Pass `since` (epoch seconds) to count only messages at/after that time (e.g. this month).
+    func tokenTotalsBySession(since: Double? = nil) -> [String: Int] {
+        guard let db = open() else { return [:] }
+        defer { sqlite3_close(db) }
+        var sql = "SELECT session_id, COALESCE(SUM(token_count),0) FROM messages WHERE role='assistant' AND active=1"
+        if since != nil { sql += " AND timestamp >= ?1" }
+        sql += " GROUP BY session_id;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [:] }
+        defer { sqlite3_finalize(stmt) }
+        if let since = since { sqlite3_bind_double(stmt, 1, since) }
+        var out: [String: Int] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out[text(stmt, 0)] = Int(sqlite3_column_int(stmt, 1))
+        }
+        return out
+    }
+
     /// Count of visible (user/assistant) messages — used for shrink detection.
     func visibleMessageCount(sessionId: String) -> Int {
         guard let db = open() else { return 0 }

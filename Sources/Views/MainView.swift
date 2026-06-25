@@ -5,12 +5,18 @@ struct MainView: View {
     @Environment(\.colorScheme) var colorScheme
     @State private var showMobileSyncPopover = false
     @State private var sidebarWidth: CGFloat = 260
+    @State private var resizeHovered = false
     @State private var rightSidebarWidth: CGFloat = 360
     @State private var showModelSelection = false
     
     var body: some View {
         ZStack {
             mainContent
+
+            // Hidden ⌘K trigger for the command palette.
+            Button("") { appState.showCommandPalette.toggle() }
+                .keyboardShortcut("k", modifiers: .command)
+                .opacity(0).frame(width: 0, height: 0)
 
             // Settings modal dialog (dimmed backdrop + centered card).
             if appState.showSettings {
@@ -21,8 +27,21 @@ struct MainView: View {
                     .environmentObject(appState)
                     .transition(.scale(scale: 0.98).combined(with: .opacity))
             }
+
+            // Command palette (⌘K): dimmed backdrop + top-anchored panel.
+            if appState.showCommandPalette {
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea()
+                    .onTapGesture { appState.showCommandPalette = false }
+                CommandPaletteView()
+                    .environmentObject(appState)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 90)
+                    .transition(.scale(scale: 0.98).combined(with: .opacity))
+            }
         }
         .animation(.easeInOut(duration: 0.15), value: appState.showSettings)
+        .animation(.easeInOut(duration: 0.12), value: appState.showCommandPalette)
         .background(WindowConfigurator(dx: 8, dy: 6))   // inset traffic lights (down + right)
         // Toast above everything (including the settings modal) so confirmations show.
         .overlay(alignment: .bottom) {
@@ -42,11 +61,12 @@ struct MainView: View {
                 .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
                 .ignoresSafeArea()
             
-            // Resize handler bar
+            // Resize handler bar — divider line only appears on hover (no faint line at rest).
             Color.clear
                 .frame(width: 5)
                 .contentShape(Rectangle())
                 .onHover { hovering in
+                    resizeHovered = hovering
                     if hovering {
                         NSCursor.resizeLeftRight.push()
                     } else {
@@ -62,11 +82,12 @@ struct MainView: View {
                 )
                 .overlay(
                     Rectangle()
-                        .fill(Color.primary.opacity(0.1))
+                        .fill(Color.primary.opacity(resizeHovered ? 0.15 : 0))
                         .frame(width: 1)
                         .frame(maxHeight: .infinity),
                     alignment: .center
                 )
+                .animation(.easeInOut(duration: 0.15), value: resizeHovered)
             
             HStack(spacing: 0) {
                 ZStack(alignment: .top) {
@@ -82,6 +103,8 @@ struct MainView: View {
                         ChatView()
                     } else if appState.view == "company" {
                         CompanyView()
+                    } else if appState.view == "tasks" {
+                        TasksView()
                     } else if appState.view == "automations" {
                         AutomationsView()
                     } else {
@@ -140,6 +163,7 @@ struct MainView: View {
     private var headerTitle: String {
         switch appState.view {
         case "company": return "会社（AI社員）"
+        case "tasks": return "タスク"
         case "automations": return "オートメーション"
         case "settings": return "設定"
         default:
@@ -168,6 +192,30 @@ struct MainView: View {
                 .padding(.vertical, 2)
                 .background(Color.primary.opacity(0.06))
                 .clipShape(Capsule())
+
+            // Activity indicator — is the agent working right now?
+            HStack(spacing: 5) {
+                if appState.isStreaming {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.6)
+                        .frame(width: 12, height: 12)
+                    Text(appState.activeStatus == "thinking" ? "思考中…" : "応答中…")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.orange)
+                } else {
+                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Text("待機中")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color.primary.opacity(0.05))
+            .clipShape(Capsule())
+            .animation(.easeInOut(duration: 0.2), value: appState.isStreaming)
+            .help(appState.isStreaming ? "エージェントが稼働中です" : "待機中（入力できます）")
 
             Spacer(minLength: 12)
 
@@ -331,23 +379,35 @@ struct MobileSyncView: View {
 }
 
 struct ToastView: View {
+    @EnvironmentObject var appState: AppState
     let message: String
-    
+
     var body: some View {
-        Text(message)
-            .font(.system(size: 13, weight: .medium))
-            .foregroundColor(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(
-                Capsule()
-                    .fill(Color(red: 0.15, green: 0.15, blue: 0.18))
-                    .shadow(color: Color.black.opacity(0.4), radius: 6, x: 0, y: 3)
-            )
-            .overlay(
-                Capsule()
-                    .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
-            )
+        HStack(spacing: 12) {
+            Text(message)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.white)
+            if let label = appState.toastActionLabel {
+                Divider().frame(height: 16).overlay(Color.white.opacity(0.25))
+                Button { appState.performToastAction() } label: {
+                    Text(label)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Color(red: 0.55, green: 0.78, blue: 1.0))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            Capsule()
+                .fill(Color(red: 0.15, green: 0.15, blue: 0.18))
+                .shadow(color: Color.black.opacity(0.4), radius: 6, x: 0, y: 3)
+        )
+        .overlay(
+            Capsule()
+                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+        )
     }
 }
 
