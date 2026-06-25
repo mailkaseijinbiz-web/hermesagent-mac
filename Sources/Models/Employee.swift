@@ -130,6 +130,34 @@ enum EmployeeRole: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Teams & tasks
+
+/// A team/department grouping employees (Phase A — org & teams).
+struct Team: Identifiable, Codable, Equatable {
+    var id: String = UUID().uuidString
+    var name: String
+    var managerId: String? = nil   // an employee (role .manager) who leads the team
+}
+
+/// Task board status (Phase B).
+enum TaskStatus: String, Codable, CaseIterable, Identifiable {
+    case todo, doing, done
+    var id: String { rawValue }
+    var title: String { self == .todo ? "未着手" : (self == .doing ? "対応中" : "完了") }
+    var icon: String { self == .todo ? "tray" : (self == .doing ? "bolt" : "checkmark.circle") }
+}
+
+/// A work item assignable to an employee (Phase B — task board).
+struct WorkTask: Identifiable, Codable, Equatable {
+    var id: String = UUID().uuidString
+    var title: String
+    var detail: String = ""
+    var assigneeId: String? = nil
+    var status: TaskStatus = .todo
+    var createdAt: Double = Date().timeIntervalSince1970
+    var updatedAt: Double = Date().timeIntervalSince1970
+}
+
 // MARK: - Employee
 
 /// A hired AI employee. Holds its own model/persona/mode/workspace and — critically —
@@ -146,9 +174,14 @@ struct Employee: Identifiable, Codable, Equatable {
     var avatarImagePath: String? = nil
     /// Per-employee working folder (cwd). nil → falls back to the app default.
     var workspacePath: String? = nil
+    /// Team membership (Phase A). Optional → existing persisted employees decode fine.
+    var teamId: String? = nil
     /// The employee's current hermes session (context isolation). nil → fresh.
     var sessionId: String? = nil
     var createdAt: Double = Date().timeIntervalSince1970
+    /// Last edit time of the SHARED profile fields (for cloud last-write-wins).
+    /// Optional so existing persisted employees decode without it. nil → use createdAt.
+    var updatedAt: Double? = nil
 
     var persona: String { personaOverride ?? role.persona }
 

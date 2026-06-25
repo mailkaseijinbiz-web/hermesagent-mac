@@ -21,6 +21,30 @@ struct ChatView: View {
         return model
     }
 
+    // First-run / empty-state quick starts.
+    private var quickStartChips: some View {
+        HStack(spacing: 10) {
+            chip("person.badge.plus", "AI社員を採用") { appState.view = "company" }
+            chip("cpu", "モデルを設定") { appState.showSettings = true }
+            chip("chevron.left.forwardslash.chevron.right", "GitHub") { appState.showSettings = true }
+            chip("command", "クイック移動 ⌘K") { appState.showCommandPalette = true }
+        }
+    }
+
+    private func chip(_ icon: String, _ label: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).font(.system(size: 12))
+                Text(label).font(.system(size: 12, weight: .medium))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .foregroundColor(.primary.opacity(0.8))
+            .background(Color.primary.opacity(0.05)).cornerRadius(8)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+    }
+
     var body: some View {
         if appState.messages.isEmpty && !appState.isStreaming {
             // Initial screen: vertically centered
@@ -30,7 +54,10 @@ struct ChatView: View {
                 Text("何を作りましょうか？")
                     .font(.system(size: 32, weight: .light))
                     .foregroundColor(.primary.opacity(0.9))
-                    .padding(.bottom, 32)
+                    .padding(.bottom, 20)
+
+                quickStartChips
+                    .padding(.bottom, 24)
 
                 composerView
                     .frame(maxWidth: contentMaxWidth)
@@ -158,8 +185,13 @@ struct ChatView: View {
                         .buttonStyle(.plain)
 
                         // Manager-only: delegate the typed task to a team member (Phase 2).
+                        // Scoped to the manager's team if they lead one, else all members.
                         if appState.activeEmployee?.role == .manager {
-                            let team = appState.employees.filter { $0.role != .manager }
+                            let mgrId = appState.activeEmployeeId
+                            let ledTeam = appState.teams.first { $0.managerId == mgrId }
+                            let team = (ledTeam.map { appState.employees(inTeam: $0.id) }
+                                        ?? appState.employees.filter { $0.role != .manager })
+                                        .filter { $0.id != mgrId }
                             Menu {
                                 if team.isEmpty {
                                     Text("委譲できる社員がいません")
@@ -374,19 +406,14 @@ struct ChatView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        
+        // Photo picker: show ONLY images in the list (写真のみ).
+        panel.allowedContentTypes = [.image]
+        panel.title = "写真を選択"
+        panel.prompt = "添付"
+
         if panel.runModal() == .OK, let url = panel.url {
-            // Images become an attachment thumbnail; other files append as text.
             if let img = NSImage(contentsOf: url), let data = img.jpegData() {
                 appState.attachedImageData = data
-                return
-            }
-            let filename = url.lastPathComponent
-            if let content = try? String(contentsOf: url, encoding: .utf8) {
-                let attachmentText = "\n\n--- [ファイル添付: \(filename)] ---\n\(content)\n---------------------------------\n"
-                appState.inputValue += attachmentText
-            } else {
-                appState.inputValue += " [添付ファイル: \(url.path)] "
             }
         }
     }
@@ -418,6 +445,7 @@ struct ChatView: View {
 }
 
 struct MessageBlock: View {
+    @EnvironmentObject var appState: AppState
     let msg: Message
 
     /// Render markdown (bold/italic/links/inline code/structure). Falls back to plain.
@@ -476,9 +504,14 @@ struct MessageBlock: View {
                         Text("\(dname)（\(drole.title)）")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(drole.color)
-                        Text("· 委譲を受けて対応")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
+                        if msg.typewriter {
+                            ProgressView().controlSize(.small).scaleEffect(0.55)
+                            Text("· 対応中…").font(.system(size: 10)).foregroundColor(.orange)
+                        } else {
+                            Text("· 委譲を受けて対応")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
                     }
                 } else {
                     Text(msg.role == .user ? "あなた" : "Hermes")
@@ -539,6 +572,20 @@ struct MessageBlock: View {
                                 }
                             }
                         }
+                    }
+
+                    // Retry affordance on a failed/empty reply.
+                    if msg.isError {
+                        Button { appState.retryLastUserMessage() } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("再試行")
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.blue)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(appState.isStreaming)
                     }
                 }
                 .padding(.horizontal, 12)

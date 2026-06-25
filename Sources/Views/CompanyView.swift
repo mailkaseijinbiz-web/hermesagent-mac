@@ -43,9 +43,7 @@ struct CompanyView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) var colorScheme
     @State private var showHire = false
-
-    private var managers: [Employee] { appState.employees.filter { $0.role == .manager } }
-    private var staff: [Employee] { appState.employees.filter { $0.role != .manager } }
+    @State private var showMeeting = false
 
     var body: some View {
         ScrollView {
@@ -55,22 +53,152 @@ struct CompanyView: View {
                 if appState.employees.isEmpty {
                     emptyState
                 } else {
-                    if !managers.isEmpty {
-                        sectionLabel("マネジメント")
-                        VStack(spacing: 8) { ForEach(managers) { EmployeeCard(employee: $0) } }
-                        if !staff.isEmpty {
-                            Rectangle().fill(Color.primary.opacity(0.08)).frame(width: 1, height: 16)
-                                .frame(maxWidth: .infinity)
-                        }
-                    }
-                    sectionLabel("メンバー")
-                    VStack(spacing: 8) { ForEach(staff) { EmployeeCard(employee: $0) } }
+                    usageSummary
+                    teamsSection
                 }
             }
             .padding(.horizontal, 32).padding(.vertical, 24)
             .frame(maxWidth: 820)
         }
         .sheet(isPresented: $showHire) { HireSheet().environmentObject(appState) }
+        .sheet(isPresented: $showMeeting) { MeetingSheet().environmentObject(appState) }
+        .onAppear { appState.refreshUsage() }
+    }
+
+    // MARK: - Org & teams (Phase A)
+
+    private var teamsSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                sectionLabel("チーム")
+                Spacer()
+                Button { _ = appState.createTeam(name: "新しいチーム") } label: {
+                    HStack(spacing: 4) { Image(systemName: "plus"); Text("チームを作成") }.font(.system(size: 11))
+                }.buttonStyle(.plain).foregroundColor(.blue)
+            }
+
+            ForEach(appState.teams) { team in teamGroup(team) }
+
+            let unassigned = appState.unassignedEmployees
+            if !unassigned.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    sectionLabel(appState.teams.isEmpty ? "メンバー" : "未配属")
+                    ForEach(unassigned) { EmployeeCard(employee: $0) }
+                }
+            }
+        }
+    }
+
+    private func teamGroup(_ team: Team) -> some View {
+        let members = appState.employees(inTeam: team.id)
+        let manager = team.managerId.flatMap { mid in appState.employees.first { $0.id == mid } }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "person.3.fill").foregroundColor(.purple).font(.system(size: 12))
+                Text(team.name).font(.system(size: 13, weight: .semibold))
+                if let m = manager {
+                    Text("リーダー: \(m.name)").font(.system(size: 10)).foregroundColor(.secondary)
+                }
+                Text("\(members.count)名").font(.system(size: 10)).foregroundColor(.secondary)
+                Spacer()
+                Menu {
+                    Menu("リーダーを設定") {
+                        Button("なし") { appState.setTeamManager(team.id, managerId: nil) }
+                        ForEach(appState.employees.filter { $0.role == .manager }) { m in
+                            Button(m.name) { appState.setTeamManager(team.id, managerId: m.id) }
+                        }
+                    }
+                    Button(role: .destructive) { appState.deleteTeam(team.id) } label: {
+                        Label("チームを削除", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 12)).foregroundColor(.secondary)
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+            }
+            if members.isEmpty {
+                Text("メンバーがいません（社員カードの … →「チームに配属」）")
+                    .font(.system(size: 10)).foregroundColor(.secondary).padding(.leading, 4)
+            } else {
+                ForEach(members) { EmployeeCard(employee: $0) }
+            }
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.02)).cornerRadius(12)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
+    }
+
+    // MARK: - Usage / cost summary (Phase 3)
+
+    private var budgetColor: Color {
+        appState.budgetState == 2 ? .red : (appState.budgetState == 1 ? .orange : .green)
+    }
+
+    private var usageSummary: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 0) {
+                statBox("今月のトークン", CompanyFmt.tokens(appState.totalTokens))
+                Divider().frame(height: 34)
+                statBox("今月の概算コスト", CompanyFmt.cost(appState.totalCostUSD))
+                Divider().frame(height: 34)
+                statBox("社員数", "\(appState.employees.count)")
+                Spacer()
+                Button { appState.refreshUsage() } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 12)).foregroundColor(.secondary)
+                }.buttonStyle(.plain).padding(.trailing, 4)
+            }
+
+            HStack(spacing: 10) {
+                Menu {
+                    Button("予算なし") { appState.monthlyBudgetUSD = 0 }
+                    ForEach([5.0, 10, 20, 50, 100, 200], id: \.self) { v in
+                        Button("$\(Int(v)) / 月") { appState.monthlyBudgetUSD = v }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "target").font(.system(size: 10))
+                        Text(appState.monthlyBudgetUSD > 0 ? "予算 $\(Int(appState.monthlyBudgetUSD))/月" : "月予算を設定")
+                            .font(.system(size: 11))
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
+                    }
+                    .foregroundColor(.secondary)
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+
+                if appState.monthlyBudgetUSD > 0 {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.primary.opacity(0.08))
+                            Capsule().fill(budgetColor)
+                                .frame(width: max(4, geo.size.width * appState.budgetFraction))
+                        }
+                    }
+                    .frame(height: 8)
+                    Text("\(Int((appState.budgetRatio * 100).rounded()))%")
+                        .font(.system(size: 11, weight: .semibold)).foregroundColor(budgetColor)
+                }
+            }
+
+            if appState.budgetState == 2 {
+                Text("⚠️ 今月の概算コストが予算を超えています（\(CompanyFmt.cost(appState.totalCostUSD)) / $\(Int(appState.monthlyBudgetUSD))）。安価なモデルへの切替を検討してください。")
+                    .font(.system(size: 10)).foregroundColor(.red).lineLimit(nil)
+            } else if appState.budgetState == 1 {
+                Text("予算の80%以上を使用しています。")
+                    .font(.system(size: 10)).foregroundColor(.orange)
+            }
+        }
+        .padding(.vertical, 12).padding(.horizontal, 16)
+        .background(Color.primary.opacity(0.03))
+        .cornerRadius(12)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
+    }
+
+    private func statBox(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.system(size: 10)).foregroundColor(.secondary)
+            Text(value).font(.system(size: 17, weight: .bold))
+        }
+        .padding(.trailing, 22)
     }
 
     private var header: some View {
@@ -81,6 +209,14 @@ struct CompanyView: View {
                     .font(.system(size: 12)).foregroundColor(.secondary)
             }
             Spacer()
+            if appState.employees.count >= 2 {
+                Button { showMeeting = true } label: {
+                    HStack(spacing: 6) { Image(systemName: "person.2.wave.2"); Text("会議") }
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(Color.purple.opacity(0.15)).foregroundColor(.purple).cornerRadius(8)
+                }.buttonStyle(.plain)
+            }
             Button { showHire = true } label: {
                 HStack(spacing: 6) { Image(systemName: "person.badge.plus"); Text("採用") }
                     .font(.system(size: 12, weight: .semibold))
@@ -145,17 +281,41 @@ struct EmployeeCard: View {
                 }
                 Text("\(shortModel) ・ \(employee.mode == .code ? "コード" : "チャット")")
                     .font(.system(size: 11)).foregroundColor(.secondary)
+                if let u = appState.usageByEmployee[employee.id], u.tokens > 0 {
+                    Text("\(CompanyFmt.tokens(u.tokens)) tok ・ \(CompanyFmt.cost(u.costUSD))")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8))
+                }
             }
 
             Spacer()
 
-            if isActive {
-                Text("対応中").font(.system(size: 11, weight: .semibold)).foregroundColor(.purple)
+            if appState.isEmployeeBusy(employee.id) {
+                HStack(spacing: 4) {
+                    ProgressView().controlSize(.small)
+                    Text("対応中").font(.system(size: 11, weight: .semibold)).foregroundColor(.purple)
+                }
+            } else if isActive {
+                Text("選択中").font(.system(size: 11, weight: .semibold)).foregroundColor(.purple)
             }
             if generating { ProgressView().controlSize(.small) }
 
             Menu {
                 Button { appState.switchEmployee(employee.id) } label: { Label("この社員と話す", systemImage: "bubble.left") }
+                Menu {
+                    Button { appState.assignEmployee(employee.id, toTeam: nil) } label: {
+                        Label("未配属", systemImage: employee.teamId == nil ? "checkmark" : "minus")
+                    }
+                    ForEach(appState.teams) { t in
+                        Button { appState.assignEmployee(employee.id, toTeam: t.id) } label: {
+                            Label(t.name, systemImage: employee.teamId == t.id ? "checkmark" : "person.3")
+                        }
+                    }
+                    Divider()
+                    Button("新規チームへ") {
+                        let t = appState.createTeam(name: "新しいチーム")
+                        appState.assignEmployee(employee.id, toTeam: t.id)
+                    }
+                } label: { Label("チームに配属", systemImage: "person.3") }
                 Button {
                     generating = true
                     Task { await appState.generateAIAvatar(for: employee.id); generating = false }
@@ -228,6 +388,90 @@ struct HireSheet: View {
         }
         .padding(24)
         .frame(width: 520)
+    }
+}
+
+/// Compact formatting for usage/cost figures.
+enum CompanyFmt {
+    static func tokens(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
+        return "\(n)"
+    }
+    static func cost(_ usd: Double) -> String {
+        if usd <= 0 { return "$0" }
+        if usd < 0.01 { return "<$0.01" }
+        let yen = Int((usd * 150).rounded())
+        return String(format: "$%.2f (¥%d)", usd, yen)
+    }
+}
+
+// MARK: - Meeting (Phase C)
+
+struct MeetingSheet: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) var dismiss
+    @Environment(\.colorScheme) var colorScheme
+    @State private var topic = ""
+    @State private var selected: Set<String> = []
+    @State private var synthesize = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("会議を開く").font(.system(size: 18, weight: .bold))
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("議題").font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
+                TextField("例: 新機能の設計方針について意見を出して", text: $topic)
+                    .textFieldStyle(.plain).padding(8)
+                    .background(Color.primary.opacity(0.05)).cornerRadius(6)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+            }
+
+            Text("参加者").font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach(appState.employees) { e in
+                        Button {
+                            if selected.contains(e.id) { selected.remove(e.id) } else { selected.insert(e.id) }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: selected.contains(e.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundColor(selected.contains(e.id) ? .purple : .secondary)
+                                Text("\(e.role.emoji) \(e.name)").font(.system(size: 13))
+                                Text(e.role.title).font(.system(size: 10)).foregroundColor(.secondary)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .background(selected.contains(e.id) ? Color.purple.opacity(0.08) : Color.clear)
+                            .cornerRadius(6).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }.frame(maxHeight: 220)
+
+            Toggle(isOn: $synthesize) {
+                Text("マネージャーが結論をまとめる").font(.system(size: 12))
+            }.toggleStyle(.switch).controlSize(.small)
+
+            HStack {
+                Spacer()
+                Button("キャンセル") { dismiss() }.buttonStyle(.plain).foregroundColor(.secondary)
+                Button {
+                    let ids = appState.employees.map { $0.id }.filter { selected.contains($0) }
+                    let t = topic
+                    dismiss()
+                    Task { await appState.holdMeeting(topic: t, participantIds: ids, synthesize: synthesize) }
+                } label: {
+                    Text("開催する").font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 18).padding(.vertical, 9)
+                        .background(colorScheme == .dark ? Color.white : Color.black)
+                        .foregroundColor(colorScheme == .dark ? .black : .white).cornerRadius(7)
+                }.buttonStyle(.plain)
+                .disabled(topic.trimmingCharacters(in: .whitespaces).isEmpty || selected.isEmpty)
+            }
+        }
+        .padding(24).frame(width: 480)
     }
 }
 

@@ -136,11 +136,31 @@ struct AutomationsView: View {
                         }
                         
                         HStack {
+                            if !appState.employees.isEmpty {
+                                Menu {
+                                    Button { appState.newCronAssigneeId = nil } label: {
+                                        Label("担当なし", systemImage: appState.newCronAssigneeId == nil ? "checkmark" : "")
+                                    }
+                                    ForEach(appState.employees) { e in
+                                        Button { appState.newCronAssigneeId = e.id } label: {
+                                            Label("\(e.role.emoji) \(e.name)", systemImage: appState.newCronAssigneeId == e.id ? "checkmark" : "")
+                                        }
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "person.crop.circle").font(.system(size: 11))
+                                        Text(appState.employees.first { $0.id == appState.newCronAssigneeId }?.name ?? "担当社員")
+                                            .font(.system(size: 11))
+                                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
+                                    }.foregroundColor(.secondary)
+                                }.menuStyle(.borderlessButton).fixedSize()
+                            }
+
                             Toggle("LLMを介さずスクリプトを直接実行 (--no-agent)", isOn: $appState.newCronNoAgent)
                                 .toggleStyle(.checkbox)
                                 .font(.system(size: 12))
                                 .foregroundColor(.secondary)
-                            
+
                             Spacer()
                             
                             Button(action: {
