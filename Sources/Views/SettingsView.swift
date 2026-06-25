@@ -14,6 +14,7 @@ struct SettingsModal: View {
 
     enum Section: String, CaseIterable, Identifiable {
         case general = "一般"
+        case model = "モデル"
         case github = "GitHub"
         case cloud = "クラウド同期"
         case channels = "チャンネル"
@@ -24,6 +25,7 @@ struct SettingsModal: View {
         var icon: String {
             switch self {
             case .general: return "gearshape"
+            case .model: return "cpu"
             case .github: return "chevron.left.forwardslash.chevron.right"
             case .cloud: return "cloud"
             case .channels: return "bubble.left.and.bubble.right"
@@ -35,7 +37,8 @@ struct SettingsModal: View {
         /// Extra search terms so a query like "supabase" or "モデル" finds the right section.
         var keywords: String {
             switch self {
-            case .general: return "モデル model プロバイダー provider api キー key 性格 personality 音声 読み上げ tts elevenlabs"
+            case .general: return "一般 general 性格 personality 音声 読み上げ tts elevenlabs voice"
+            case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter"
             case .github: return "github リポジトリ repo ワークスペース clone git 作業フォルダ"
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
             case .channels: return "チャンネル channel telegram discord slack line whatsapp signal teams メール email"
@@ -151,6 +154,7 @@ struct SettingsModal: View {
                     VStack(alignment: .leading, spacing: 18) {
                         switch selected {
                         case .general: generalSection
+                        case .model: modelSection
                         case .github: githubSection
                         case .cloud: cloudSection
                         case .channels: channelsSection
@@ -158,7 +162,7 @@ struct SettingsModal: View {
                         case .management: managementSection
                         case .experimental: experimentalSection
                         }
-                        if selected == .general || selected == .experimental { saveButton }
+                        if selected == .general || selected == .model || selected == .experimental { saveButton }
                     }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 24)
@@ -179,53 +183,55 @@ struct SettingsModal: View {
 
     // MARK: - Sections
 
+    private var modelSection: some View {
+        card(title: "プロバイダーとモデル") {
+            fieldLabel("Inference Provider")
+            Picker("", selection: $appState.provider) {
+                ForEach(providers, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .pickerStyle(.menu)
+            .onChange(of: appState.provider) { _, v in appState.handleProviderChange(v) }
+
+            fieldLabel("モデル")
+            Button { showModelPicker = true } label: {
+                HStack {
+                    Text(appState.defaultModel.isEmpty ? "モデルを選択…" : appState.defaultModel)
+                        .font(.system(size: 13))
+                        .foregroundColor(appState.defaultModel.isEmpty ? .secondary : .primary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundColor(.secondary)
+                }
+                .padding(8)
+                .background(Color.primary.opacity(0.05)).cornerRadius(6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+            Text("検索・テストして選べます。動作しないモデルは一覧から隠せます。")
+                .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8))
+
+            if ["nous", "xai-oauth", "openai-codex"].contains(appState.provider) {
+                fieldLabel("OAuth Authentication")
+                Button {
+                    Task { isLoggingIn = true; await appState.triggerOAuthLogin(); isLoggingIn = false }
+                } label: {
+                    HStack { Spacer()
+                        if isLoggingIn { ProgressView().controlSize(.small).padding(.trailing, 6); Text("認証中...") }
+                        else { Text("OAuth認証でログインする") }
+                        Spacer() }
+                    .padding(.vertical, 8)
+                    .background(Color.purple.opacity(0.2)).foregroundColor(.purple).cornerRadius(6)
+                }
+                .buttonStyle(.plain).disabled(isLoggingIn)
+            } else {
+                fieldLabel("API Key for \(appState.provider)")
+                styledField(SecureField("Enter API Key", text: $appState.apiKey))
+            }
+        }
+    }
+
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 18) {
-            card(title: "プロバイダーとモデル") {
-                fieldLabel("Inference Provider")
-                Picker("", selection: $appState.provider) {
-                    ForEach(providers, id: \.0) { Text($0.1).tag($0.0) }
-                }
-                .pickerStyle(.menu)
-                .onChange(of: appState.provider) { _, v in appState.handleProviderChange(v) }
-
-                fieldLabel("モデル")
-                Button { showModelPicker = true } label: {
-                    HStack {
-                        Text(appState.defaultModel.isEmpty ? "モデルを選択…" : appState.defaultModel)
-                            .font(.system(size: 13))
-                            .foregroundColor(appState.defaultModel.isEmpty ? .secondary : .primary)
-                            .lineLimit(1).truncationMode(.middle)
-                        Spacer()
-                        Image(systemName: "chevron.right").font(.system(size: 11)).foregroundColor(.secondary)
-                    }
-                    .padding(8)
-                    .background(Color.primary.opacity(0.05)).cornerRadius(6)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
-                }
-                .buttonStyle(.plain)
-                Text("検索・テストして選べます。動作しないモデルは一覧から隠せます。")
-                    .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8))
-
-                if ["nous", "xai-oauth", "openai-codex"].contains(appState.provider) {
-                    fieldLabel("OAuth Authentication")
-                    Button {
-                        Task { isLoggingIn = true; await appState.triggerOAuthLogin(); isLoggingIn = false }
-                    } label: {
-                        HStack { Spacer()
-                            if isLoggingIn { ProgressView().controlSize(.small).padding(.trailing, 6); Text("認証中...") }
-                            else { Text("OAuth認証でログインする") }
-                            Spacer() }
-                        .padding(.vertical, 8)
-                        .background(Color.purple.opacity(0.2)).foregroundColor(.purple).cornerRadius(6)
-                    }
-                    .buttonStyle(.plain).disabled(isLoggingIn)
-                } else {
-                    fieldLabel("API Key for \(appState.provider)")
-                    styledField(SecureField("Enter API Key", text: $appState.apiKey))
-                }
-            }
-
             card(title: "エージェント性格") {
                 fieldLabel("Personality Persona")
                 Picker("", selection: $appState.personality) {
