@@ -1,0 +1,18 @@
+# Swift Package Manager build artifacts
+.build/
+release/
+
+# macOS / Xcode system files
+.DS_Store
+.swiftpm/
+Packages/
+*.xcodeproj/
+
+# Logs
+logs
+*.log
+
+# Node (leftover from template) and local tooling
+node_modules/
+.claude/
+.vscode/
