@@ -4,8 +4,28 @@ import Foundation
 class HermesCLI {
     static let shared = HermesCLI()
     
-    let hermesPath = "/Users/keitayasui/.local/bin/hermes"
+    /// Resolved once at init: common install dirs, then PATH via the login shell, with
+    /// the conventional `~/.local/bin/hermes` as the final fallback. Avoids hardcoding a
+    /// machine-specific absolute path so the app is portable across users/installs.
+    let hermesPath = HermesCLI.resolveHermesBinary()
     let envPath = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".hermes/.env")
+
+    nonisolated static func resolveHermesBinary() -> String {
+        let home = NSHomeDirectory()
+        let fallback = "\(home)/.local/bin/hermes"
+        let candidates = [fallback, "/opt/homebrew/bin/hermes", "/usr/local/bin/hermes"]
+        if let hit = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) { return hit }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = ["-lc", "command -v hermes"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run(); p.waitUntilExit() } catch { return fallback }
+        let out = (String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (!out.isEmpty && FileManager.default.isExecutableFile(atPath: out)) ? out : fallback
+    }
     
     // Merged environment variables from shell and .env
     var mergedEnvironment: [String: String] = [:]
@@ -367,35 +387,34 @@ class HermesCLI {
         let errPipe = Pipe()
         process.standardOutput = outPipe
         process.standardError = errPipe
-        
+
+        // Carry partial bytes across reads: pipe boundaries split multi-byte UTF-8 chars
+        // (Japanese = 3 bytes), and decoding a fragment alone would drop the whole chunk.
+        let outBuf = UTF8StreamBuffer()
+        let errBuf = UTF8StreamBuffer()
+
         outPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
-                onData(text)
-            }
+            guard !data.isEmpty else { return }
+            if let text = outBuf.append(data) { onData(text) }
         }
-        
+
         errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
-                onStderr(text)
-            }
+            guard !data.isEmpty else { return }
+            if let text = errBuf.append(data) { onStderr(text) }
         }
-        
+
         process.terminationHandler = { proc in
             outPipe.fileHandleForReading.readabilityHandler = nil
             errPipe.fileHandleForReading.readabilityHandler = nil
-            
-            let remainingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
-            if !remainingOut.isEmpty, let text = String(data: remainingOut, encoding: .utf8) {
+
+            if let text = outBuf.flush(outPipe.fileHandleForReading.readDataToEndOfFile()) {
                 onData(text)
             }
-            
-            let remainingErr = errPipe.fileHandleForReading.readDataToEndOfFile()
-            if !remainingErr.isEmpty, let text = String(data: remainingErr, encoding: .utf8) {
+            if let text = errBuf.flush(errPipe.fileHandleForReading.readDataToEndOfFile()) {
                 onStderr(text)
             }
-            
             onEnd(proc.terminationStatus)
         }
         

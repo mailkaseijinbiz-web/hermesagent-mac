@@ -305,19 +305,26 @@ class MobileServer {
         // Read the sessions table directly (covers cli/slack/whatsapp/cron uniformly,
         // and avoids the fragile CLI column-scraping used by the Mac UI).
         let rows = StateDB.shared.sessions()
+        let agy = AgyStore.shared.sessions()
         let iso = ISO8601DateFormatter()
-        let sessionsArray = rows.map { r -> [String: Any] in
+        // Union Hermes + agy sessions (agy turns aren't in the read-only state.db), newest first.
+        let hermesItems = rows.map { r -> (dict: [String: Any], updatedAt: Double) in
             let title = r.title.isEmpty ? (r.preview.isEmpty ? "(無題)" : String(r.preview.prefix(40))) : r.title
-            return [
-                "id": r.id,
-                "title": title,
-                "preview": String(r.preview.prefix(80)),
+            return ([
+                "id": r.id, "title": title, "preview": String(r.preview.prefix(80)),
                 "lastActive": iso.string(from: Date(timeIntervalSince1970: r.updatedAt)),
-                "source": r.source,
-                "messageCount": r.messageCount,
-                "lastMessageId": r.lastMessageId
-            ]
+                "source": r.source, "messageCount": r.messageCount, "lastMessageId": r.lastMessageId
+            ], r.updatedAt)
         }
+        let agyItems = agy.map { s -> (dict: [String: Any], updatedAt: Double) in
+            let preview = s.messages.last?.content ?? ""
+            return ([
+                "id": s.id, "title": s.title.isEmpty ? "(無題)" : s.title, "preview": String(preview.prefix(80)),
+                "lastActive": iso.string(from: Date(timeIntervalSince1970: s.updatedAt)),
+                "source": "antigravity", "messageCount": s.messages.count, "lastMessageId": 0
+            ], s.updatedAt)
+        }
+        let sessionsArray = (hermesItems + agyItems).sorted { $0.updatedAt > $1.updatedAt }.map { $0.dict }
         Task { @MainActor in
             let json: [String: Any] = [
                 "sessions": sessionsArray,
@@ -339,6 +346,22 @@ class MobileServer {
             sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid session id\"}", corsHeaders: corsHeaders)
             return
         }
+        // agy sessions: serve from the AgyStore with synthetic incrementing ids (full
+        // history each time; `after` deltas don't apply to the JSON store).
+        if AgyStore.isAgySession(sessionId) {
+            let stored = AgyStore.shared.messages(sessionId)
+            let msgs = stored.enumerated().map { (i, m) -> [String: Any] in
+                ["id": i + 1, "role": m.role, "content": m.content, "timestamp": m.ts]
+            }
+            let json: [String: Any] = ["sessionId": sessionId, "messages": msgs, "messageCount": stored.count]
+            if let data = try? JSONSerialization.data(withJSONObject: json),
+               let str = String(data: data, encoding: .utf8) {
+                sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+            } else {
+                sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+            return
+        }
         let rows = StateDB.shared.messages(sessionId: sessionId, after: after)
         let totalCount = StateDB.shared.visibleMessageCount(sessionId: sessionId)
         let msgs = rows.map { r -> [String: Any] in
@@ -353,10 +376,16 @@ class MobileServer {
         }
     }
 
+    /// Combined change token: Hermes state.db digest + agy store version, so agy turns
+    /// (which never touch state.db) still nudge clients to re-pull.
+    nonisolated func changeToken() -> String {
+        StateDB.shared.digest().token + "~" + AgyStore.shared.version()
+    }
+
     /// Cheap change-detection token for clients to decide whether to pull.
     private nonisolated func handleDigest(connection: NWConnection, corsHeaders: String) {
         let d = StateDB.shared.digest()
-        let json: [String: Any] = ["maxMessageId": d.maxMessageId, "sessionCount": d.sessionCount, "token": d.token]
+        let json: [String: Any] = ["maxMessageId": d.maxMessageId, "sessionCount": d.sessionCount, "token": changeToken()]
         if let data = try? JSONSerialization.data(withJSONObject: json),
            let str = String(data: data, encoding: .utf8) {
             sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
@@ -367,7 +396,7 @@ class MobileServer {
     private nonisolated func handleEvents(connection: NWConnection, corsHeaders: String) {
         let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\(corsHeaders)\r\n\r\n"
         sendRaw(connection: connection, text: headers)
-        let token = StateDB.shared.digest().token
+        let token = changeToken()
         sendRaw(connection: connection, text: "data: {\"type\":\"changed\",\"token\":\"\(token)\"}\n\n")
 
         connection.stateUpdateHandler = { [weak self] state in
@@ -399,7 +428,7 @@ class MobileServer {
     @MainActor
     private func tickEvents() {
         guard !eventConnections.isEmpty else { return }
-        let token = StateDB.shared.digest().token
+        let token = changeToken()
         if token != lastBroadcastToken {
             lastBroadcastToken = token
             let msg = "data: {\"type\":\"changed\",\"token\":\"\(token)\"}\n\n"
@@ -429,7 +458,7 @@ class MobileServer {
     /// The AI-employee roster (iOS company parity) — shared fields only.
     private nonisolated func handleEmployees(connection: NWConnection, corsHeaders: String) {
         Task { @MainActor in
-            let emps: [[String: Any]] = AppState.shared.employees.map { e in
+            let emps: [[String: Any]] = AppState.shared.sortedEmployees.map { e in
                 [
                     "id": e.id,
                     "name": e.name,
@@ -495,81 +524,86 @@ class MobileServer {
             // which would merge a phone's new chat into whatever the Mac has open).
             let effectiveSessionId: String? = (sessionId?.isEmpty == false) ? sessionId : nil
 
-            // Structured ACP relay: stream typed events (text/thought/tool activity)
-            // to the phone so it gets the same rich experience as the Mac (H1完遂).
-            if AppState.shared.useACPTransport {
-                let (tokens, ok) = await ACPClient.mobile.prompt(
-                    sentPrompt,
-                    imagePath: imagePath,
-                    cwd: cwd,
-                    resumeHermesSessionId: effectiveSessionId,
-                    startFresh: effectiveSessionId == nil,   // no id → a brand-new chat
-                    onChunk: { [weak self] text in
-                        self?.writeSSEJSON(connection: connection, ["type": "chunk", "content": text])
-                    },
-                    onThought: { [weak self] text in
-                        self?.writeSSEJSON(connection: connection, ["type": "thought", "content": text])
-                    },
-                    onToolActivity: { [weak self] calls in
-                        self?.writeSSEJSON(connection: connection, ["type": "tool_activity", "calls": calls.map { $0.sseDict }])
-                    }
-                )
-                if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
-                if !ok { self.writeSSEJSON(connection: connection, ["type": "error", "content": "ACP応答に失敗しました"]) }
-                self.writeSSEJSON(connection: connection, ["type": "done", "tokens": tokens ?? 0])
+            // Backend routing (provider→backend) via the shared AgentBackend abstraction.
+            // The relay uses ACPClient.mobile; per-kind bookkeeping (agy image guard +
+            // AgyStore, ACP tokens, CLI session reconcile) stays here.
+            let mobileEmployee = employeeId.flatMap { id in AppState.shared.employees.first { $0.id == id } }
+            let kind = BackendRouter.selectKind(provider: AppState.shared.provider,
+                                                useACP: AppState.shared.useACPTransport)
+            let rawText = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Close the SSE connection after a brief flush delay (shared across kinds).
+            func teardown() {
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
                     connection.cancel()
                     Task { @MainActor in self.activeStreamConnections.removeAll { $0 === connection } }
                 }
-                await AppState.shared.fetchSessions()
-                return
             }
 
-            let process = HermesCLI.shared.streamPrompt(
-                prompt: sentPrompt,
-                sessionId: effectiveSessionId,
-                imagePath: imagePath,
-                cwd: cwd,
-                onData: { [weak self] text in
-                    // Send raw chunk to iOS client
-                    let sseData = "data: {\"type\":\"chunk\",\"content\":\(self?.jsonEscape(text) ?? "\"\"")}\n\n"
-                    self?.sendRaw(connection: connection, text: sseData)
-                },
-                onStderr: { _ in },
-                onEnd: { [weak self] _ in
-                    // Clean up the temp image file.
-                    if let imagePath = imagePath {
-                        try? FileManager.default.removeItem(atPath: imagePath)
-                    }
-                    // Send done event
-                    let sseData = "data: {\"type\":\"done\"}\n\n"
-                    self?.sendRaw(connection: connection, text: sseData)
-
-                    // Close connection after a brief delay
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-                        connection.cancel()
-                        Task { @MainActor in
-                            self?.activeStreamConnections.removeAll { $0 === connection }
-                        }
-                    }
-                    
-                    // Refresh sessions
-                    Task { @MainActor in
-                        await AppState.shared.fetchSessions()
-                        if AppState.shared.currentSessionId == nil {
-                            if let first = AppState.shared.sessions.first {
-                                AppState.shared.currentSessionId = first.id
-                            }
-                        }
-                    }
+            // agy is text-only: handle its image guard / install check / persona prompt here
+            // (it shapes the user text and surfaces errors before the backend runs).
+            var agyPrompt = ""
+            if kind == .antigravity {
+                if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
+                if rawText.isEmpty {
+                    self.writeSSEJSON(connection: connection, ["type": "error", "content": "Antigravity CLI (agy) は画像入力に対応していません。テキストで指定してください。"])
+                    self.writeSSEJSON(connection: connection, ["type": "done", "tokens": 0]); teardown(); return
                 }
-            )
-            
-            if process == nil {
-                let errorSSE = "data: {\"type\":\"error\",\"content\":\"Failed to start chat process\"}\n\n"
-                self.sendRaw(connection: connection, text: errorSSE)
-                connection.cancel()
+                guard await AntigravityCLI.shared.resolveBinaryAsync() != nil else {
+                    self.writeSSEJSON(connection: connection, ["type": "error", "content": AntigravityCLI.installHint])
+                    self.writeSSEJSON(connection: connection, ["type": "done", "tokens": 0]); teardown(); return
+                }
+                let userText = imagePath != nil ? rawText + "\n\n（注: 添付画像は Antigravity CLI では無視されます）" : rawText
+                agyPrompt = AppState.shared.antigravityPrompt(userText, employee: mobileEmployee, mode: mode)
             }
+
+            let req = AgentRequest(
+                prompt: sentPrompt, agyPrompt: agyPrompt,
+                imagePath: (kind == .antigravity ? nil : imagePath),   // agy already cleaned the temp image
+                cwd: cwd, sessionId: effectiveSessionId, startFresh: effectiveSessionId == nil,
+                agyModel: AppState.shared.modelForFixedProvider(mobileEmployee))
+
+            let backend = BackendRouter.make(kind, acp: .mobile)
+            let agyAcc = AgyStore.ReplyAccumulator()
+
+            let result = await backend.send(req, onStart: { _ in }) { [weak self] event in
+                guard let self = self else { return }
+                switch event {
+                case .chunk(let t):
+                    if kind == .antigravity { agyAcc.append(t) }   // raw; client strips ANSI/noise
+                    self.writeSSEJSON(connection: connection, ["type": "chunk", "content": t])
+                case .thought(let t):
+                    self.writeSSEJSON(connection: connection, ["type": "thought", "content": t])
+                case .toolActivity(let calls):
+                    self.writeSSEJSON(connection: connection, ["type": "tool_activity", "calls": calls.map { $0.sseDict }])
+                }
+            }
+
+            // Per-kind terminal handling (persistence / session reconcile / errors).
+            switch kind {
+            case .antigravity:
+                let reply = AntigravityCLI.clean(agyAcc.value)
+                if !reply.isEmpty {
+                    _ = AgyStore.shared.record(sessionId: effectiveSessionId, employeeId: employeeId,
+                                               userText: rawText, assistantText: reply,
+                                               timestamp: Date().timeIntervalSince1970)
+                }
+                self.writeSSEJSON(connection: connection, ["type": "done", "tokens": 0])
+            case .acp:
+                if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
+                if !result.ok { self.writeSSEJSON(connection: connection, ["type": "error", "content": "ACP応答に失敗しました"]) }
+                self.writeSSEJSON(connection: connection, ["type": "done", "tokens": result.tokens ?? 0])
+                await AppState.shared.fetchSessions()
+            case .hermesCLI:
+                if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
+                if !result.ok { self.writeSSEJSON(connection: connection, ["type": "error", "content": "Failed to start chat process"]) }
+                self.writeSSEJSON(connection: connection, ["type": "done"])
+                await AppState.shared.fetchSessions()
+                if AppState.shared.currentSessionId == nil, let first = AppState.shared.sessions.first {
+                    AppState.shared.currentSessionId = first.id
+                }
+            }
+            teardown()
         }
     }
     

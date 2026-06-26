@@ -141,7 +141,7 @@ struct AutomationsView: View {
                                     Button { appState.newCronAssigneeId = nil } label: {
                                         Label("担当なし", systemImage: appState.newCronAssigneeId == nil ? "checkmark" : "")
                                     }
-                                    ForEach(appState.employees) { e in
+                                    ForEach(appState.sortedEmployees) { e in
                                         Button { appState.newCronAssigneeId = e.id } label: {
                                             Label("\(e.role.emoji) \(e.name)", systemImage: appState.newCronAssigneeId == e.id ? "checkmark" : "")
                                         }

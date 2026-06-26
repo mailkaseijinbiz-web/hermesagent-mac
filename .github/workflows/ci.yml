@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Build & unit tests (SPM)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The SwiftPM package builds the Mac app in Swift 5 language mode (matching the
+      # shipping config) and runs the pure-logic unit tests in Tests/.
+      - name: Swift version
+        run: swift --version
+
+      # Stray extended attributes can break xctest-bundle codesign; clear them.
+      - name: Clear extended attributes
+        run: xattr -cr . || true
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test

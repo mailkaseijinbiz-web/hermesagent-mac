@@ -33,6 +33,10 @@ echo "▸ Copying to release/HermesCustom.app…"
 rm -rf release && mkdir -p release
 cp -R "$APP" release/HermesCustom.app
 
+# Record the built commit/branch so the in-app updater can compare against the remote.
+git rev-parse HEAD > release/.build-commit 2>/dev/null || true
+git rev-parse --abbrev-ref HEAD > release/.build-branch 2>/dev/null || true
+
 echo ""
 echo "▸ Embedded entitlements (expect the two iCloud keys below):"
 codesign -d --entitlements :- release/HermesCustom.app 2>/dev/null | grep -iE "icloud" || \

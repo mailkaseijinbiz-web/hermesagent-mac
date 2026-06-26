@@ -28,7 +28,7 @@ struct CommandPaletteView: View {
         })
         out.append(Item(title: "設定を開く", subtitle: "移動", icon: "gearshape") { appState.showSettings = true })
 
-        for e in appState.employees {
+        for e in appState.sortedEmployees {
             out.append(Item(title: "\(e.role.emoji) \(e.name)", subtitle: "社員 ・ \(e.role.title)", icon: "person.crop.circle") {
                 appState.switchEmployee(e.id)
             })
@@ -45,10 +45,19 @@ struct CommandPaletteView: View {
             })
         }
 
-        for m in AppState.modelPresets {
-            out.append(Item(title: m.label, subtitle: "モデル", icon: "cpu") {
-                Task { await appState.setModel(provider: m.provider, model: m.model) }
-            })
+        // Models within the FIXED provider (provider is changed only in Settings).
+        if appState.provider == AntigravityCLI.providerId {
+            for m in AntigravityCLI.presetModels {
+                out.append(Item(title: m, subtitle: "モデル", icon: "cpu") {
+                    Task { await appState.setModel(m) }
+                })
+            }
+        } else {
+            for m in AppState.modelPresets {
+                out.append(Item(title: m.label, subtitle: "モデル", icon: "cpu") {
+                    Task { await appState.setModel(m.model) }
+                })
+            }
         }
         return out
     }

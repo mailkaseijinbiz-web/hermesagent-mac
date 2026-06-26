@@ -312,8 +312,14 @@ class AppState: ObservableObject {
     private var lastPushedMessageId: Int64 = 0
     
     // Settings Form State
-    @Published var provider: String = "openrouter"
-    @Published var defaultModel: String = "nvidia/nemotron-3-super-120b-a12b:free"
+    // Persisted to UserDefaults so a global Antigravity selection (deliberately never
+    // written to the Hermes config) survives a restart instead of reverting to Hermes.
+    @Published var provider: String = UserDefaults.standard.string(forKey: "globalProvider") ?? "openrouter" {
+        didSet { UserDefaults.standard.set(provider, forKey: "globalProvider") }
+    }
+    @Published var defaultModel: String = UserDefaults.standard.string(forKey: "globalDefaultModel") ?? "nvidia/nemotron-3-super-120b-a12b:free" {
+        didSet { UserDefaults.standard.set(defaultModel, forKey: "globalDefaultModel") }
+    }
     @Published var apiKey: String = ""
     @Published var personality: String = "kawaii"
     @Published var isSavingSettings: Bool = false
@@ -1227,6 +1233,15 @@ class AppState: ObservableObject {
     /// Map persisted (user/assistant) messages from state.db to the UI model,
     /// attaching token count and elapsed time (vs the preceding message) to replies.
     func messagesFromStore(_ sessionId: String) -> [Message] {
+        // agy sessions live in the writable AgyStore, not the read-only Hermes state.db.
+        if AgyStore.isAgySession(sessionId) {
+            return AgyStore.shared.messages(sessionId).compactMap { m in
+                let role: MessageRole = m.role == "user" ? .user : .assistant
+                let content = role == .assistant ? stripNoiseLines(m.content) : m.content
+                guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return Message(role: role, content: content)
+            }
+        }
         let rows = StateDB.shared.messages(sessionId: sessionId)
         var result: [Message] = []
         var prevTimestamp: Double? = nil
@@ -1257,16 +1272,24 @@ class AppState: ObservableObject {
     // leading digit → "Session not found"). The store gives exact IDs.
     func fetchSessions() async {
         let rows = StateDB.shared.sessions()
+        let agy = AgyStore.shared.sessions()
         // Keep the existing list on a transient empty read (e.g. DB momentarily locked),
         // rather than clearing the sidebar.
-        guard !rows.isEmpty || sessions.isEmpty else { return }
-        self.sessions = rows.map { r in
-            // Defensive: strip any mode-directive sentinel that leaked into title/preview.
+        guard !rows.isEmpty || !agy.isEmpty || sessions.isEmpty else { return }
+        // Union Hermes + agy sessions, newest first by last-updated.
+        let hermesItems: [(id: String, title: String, preview: String, updatedAt: Double)] = rows.map { r in
             let cleanTitle = AgentMode.strip(r.title)
             let cleanPreview = AgentMode.strip(r.preview)
             let title = cleanTitle.isEmpty ? (cleanPreview.isEmpty ? "(無題)" : String(cleanPreview.prefix(30))) : cleanTitle
-            return Session(id: r.id, title: title, preview: String(cleanPreview.prefix(60)), lastActive: "")
+            return (r.id, title, String(cleanPreview.prefix(60)), r.updatedAt)
         }
+        let agyItems: [(id: String, title: String, preview: String, updatedAt: Double)] = agy.map { s in
+            let preview = s.messages.last?.content ?? ""
+            return (s.id, s.title.isEmpty ? "(無題)" : s.title, String(preview.prefix(60)), s.updatedAt)
+        }
+        self.sessions = (hermesItems + agyItems)
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .map { Session(id: $0.id, title: $0.title, preview: $0.preview, lastActive: "") }
     }
     
     // Fetch configuration
@@ -1281,10 +1304,12 @@ class AppState: ObservableObject {
                         .replacingOccurrences(of: "'", with: "\"")
                     if let data = jsonStr.data(using: .utf8),
                        let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        if let prov = dict["provider"] as? String {
-                            self.provider = prov
-                        }
-                        if let def = dict["default"] as? String {
+                        // The provider is a Settings-only, fixed value — never overwrite it
+                        // from the Hermes config. Only pick up a model change when the config
+                        // still matches the fixed provider (so it can't apply a stale model
+                        // from a different provider).
+                        let cfgProvider = dict["provider"] as? String
+                        if let def = dict["default"] as? String, cfgProvider == self.provider {
                             self.defaultModel = def
                         }
                     }
@@ -1355,6 +1380,13 @@ class AppState: ObservableObject {
     }
     
     func handleDeleteSession(id: String) async {
+        // agy sessions live in the AgyStore, not the Hermes CLI's store.
+        if AgyStore.isAgySession(id) {
+            AgyStore.shared.delete(id)
+            if self.currentSessionId == id { handleNewChat() }
+            await fetchSessions()
+            return
+        }
         let res = await HermesCLI.shared.exec(args: ["sessions", "delete", "--yes", id])
         if res.success {
             if self.currentSessionId == id {
@@ -1369,6 +1401,13 @@ class AppState: ObservableObject {
         return parseResponseText(raw)
     }
     
+    /// Send a tapped quick-reply choice as the next message (from the choice chips).
+    func sendQuickReply(_ text: String) {
+        guard !isStreaming, !text.isEmpty else { return }
+        inputValue = text
+        handleSendMessage()
+    }
+
     func handleSendMessage() {
         let text = inputValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let imgData = attachedImageData
@@ -1392,132 +1431,132 @@ class AppState: ObservableObject {
         let effectivePrompt = (text.isEmpty && imagePath != nil) ? "添付した画像について説明してください。" : text
         // Append the active employee's persona + chat/code mode directive (sentinel-stripped from display).
         let sentPrompt = wrapForSend(effectivePrompt)
+        let kind = BackendRouter.selectKind(provider: provider, useACP: useACPTransport)
 
-        // H1: structured ACP transport (clean text + tokens, foundation for tool viz).
-        if useACPTransport {
-            sendViaACP(assistantId: assistantId, prompt: sentPrompt, imagePath: imagePath)
-            return
+        // agy is text-only: image guard + sentinel-free persona prompt at the call site.
+        var agyPrompt = ""
+        if kind == .antigravity {
+            if imagePath != nil && text.trimmingCharacters(in: .whitespaces).isEmpty {
+                finishSendError(assistantId, imagePath, "Antigravity CLI (agy) は画像入力に対応していません。テキストで指定してください。")
+                return
+            }
+            var userText = text
+            if imagePath != nil { userText += "\n\n（注: 添付画像は Antigravity CLI では無視されます）" }
+            agyPrompt = antigravityPrompt(userText, employee: activeEmployee, mode: agentMode)
         }
 
-        self.activeProcess = HermesCLI.shared.streamPrompt(
-            prompt: sentPrompt,
-            sessionId: currentSessionId,
-            imagePath: imagePath,
-            cwd: effectiveCwd,
-            onData: { [weak self] chunk in
-                guard let self = self else { return }
-                DispatchQueue.main.async {
-                    self.streamText += chunk
-                    let cleaned = self.parseResponseText(self.streamText)
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        self.messages[idx].content = cleaned
-                    }
-                }
-            },
-            onStderr: { chunk in
-                print("CLI stderr: \(chunk)")
-            },
-            onEnd: { [weak self] code in
-                guard let self = self else { return }
-                DispatchQueue.main.async {
-                    self.isStreaming = false
-                    self.activeStatus = "online"
-                    self.activeProcess = nil
+        let req = AgentRequest(
+            prompt: sentPrompt, agyPrompt: agyPrompt,
+            imagePath: (kind == .antigravity ? nil : imagePath),   // agy ignores images
+            cwd: effectiveCwd, sessionId: currentSessionId, startFresh: currentSessionId == nil,
+            agyModel: modelForFixedProvider(activeEmployee))
+        let userText = text
+        let started = Date()
 
-                    let cleaned = self.parseResponseText(self.streamText)
-                    self.streamText = ""
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        if cleaned.isEmpty {
-                            // Empty reply → show a clear error + retry (was silently dropped).
-                            self.messages[idx].content = "応答がありませんでした。モデルが応答していない可能性があります（モデルを確認）。"
-                            self.messages[idx].isError = true
-                            self.messages[idx].typewriter = false
-                        } else {
-                            self.messages[idx].content = cleaned
-                        }
-                    }
-                    if let imagePath = imagePath {
-                        try? FileManager.default.removeItem(atPath: imagePath)
-                    }
-
-                    Task {
-                        await self.fetchSessions()
-
-                        // If it was a new session, auto-resume the latest one (exact id from the store)
-                        if self.currentSessionId == nil {
-                            try? await Task.sleep(nanoseconds: 1_000_000_000)
-                            await self.fetchSessions()
-                            if let first = self.sessions.first {
-                                self.currentSessionId = first.id
-                            }
-                        }
-                        self.bindCurrentSessionToActiveEmployee()
-                    }
-                }
+        Task { @MainActor in
+            // Apply the active employee's model config before a Hermes/ACP session starts.
+            if kind != .antigravity { await self.modelApplyTask?.value }
+            // agy install check (clear hint) at the call site.
+            if kind == .antigravity, await AntigravityCLI.shared.resolveBinaryAsync() == nil {
+                self.finishSendError(assistantId, imagePath, AntigravityCLI.installHint)
+                return
             }
-        )
-    }
-    
-    /// H1 thin slice: stream a reply via the ACP transport (structured, clean text + tokens).
-    private func sendViaACP(assistantId: UUID, prompt: String, imagePath: String?) {
-        Task { [weak self] in
-            guard let self = self else { return }
-            // Ensure the active employee's model config is applied before the session starts.
-            await self.modelApplyTask?.value
-            var acc = ""
-            let (tokens, ok) = await ACPClient.shared.prompt(
-                prompt,
-                imagePath: imagePath,
-                cwd: effectiveCwd,
-                // Resume the active session (employee/selected) so context isn't lost;
-                // no id → a brand-new session.
-                resumeHermesSessionId: currentSessionId,
-                startFresh: currentSessionId == nil,
-                onChunk: { [weak self] chunk in
+
+            let backend = BackendRouter.make(kind, acp: .shared)
+            let result = await backend.send(
+                req,
+                onStart: { [weak self] proc in self?.activeProcess = proc },
+                onEvent: { [weak self] event in
                     guard let self = self else { return }
-                    acc += chunk
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        self.messages[idx].content = acc   // ACP text is already clean (no banner/ANSI)
+                    DispatchQueue.main.async {
+                        guard let idx = self.messages.firstIndex(where: { $0.id == assistantId }) else { return }
+                        switch event {
+                        case .chunk(let t):
+                            self.streamText += t
+                            switch kind {
+                            case .hermesCLI:   self.messages[idx].content = self.parseResponseText(self.streamText)
+                            case .antigravity: self.messages[idx].content = AntigravityCLI.clean(self.streamText)
+                            case .acp:         self.messages[idx].content = self.streamText   // already clean
+                            }
+                        case .thought(let t):           self.messages[idx].thinking += t
+                        case .toolActivity(let calls):  self.messages[idx].toolCalls = calls
+                        }
                     }
-                },
-                onThought: { [weak self] t in
-                    guard let self = self else { return }
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        self.messages[idx].thinking += t
-                    }
-                },
-                onToolActivity: { [weak self] calls in
-                    guard let self = self else { return }
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        self.messages[idx].toolCalls = calls
-                    }
-                }
-            )
+                })
+
+            // Terminal: finalize content, persist, reconcile session — per kind. The sink's
+            // main-queue blocks run before this resumption (FIFO), so streamText is complete.
             self.isStreaming = false
             self.activeStatus = "online"
-            if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
-
+            self.activeProcess = nil
+            let final: String
+            switch kind {
+            case .hermesCLI:   final = self.parseResponseText(self.streamText)
+            case .antigravity: final = AntigravityCLI.clean(self.streamText)
+            case .acp:         final = self.streamText
+            }
+            self.streamText = ""
             if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                if acc.isEmpty {
-                    // Empty reply (failed or model returned nothing) → show a clear error + retry.
-                    self.messages[idx].content = ok
-                        ? "応答がありませんでした。モデルが応答していない可能性があります（モデルを確認）。"
-                        : "応答に失敗しました。接続やモデル設定を確認してください。"
+                self.messages[idx].elapsed = Date().timeIntervalSince(started)
+                if final.isEmpty {
+                    switch kind {
+                    case .acp:
+                        self.messages[idx].content = result.ok
+                            ? "応答がありませんでした。モデルが応答していない可能性があります（モデルを確認）。"
+                            : "応答に失敗しました。接続やモデル設定を確認してください。"
+                    case .antigravity:
+                        self.messages[idx].content = "応答がありませんでした（Antigravity CLI / `agy` を確認してください）。"
+                    case .hermesCLI:
+                        self.messages[idx].content = "応答がありませんでした。モデルが応答していない可能性があります（モデルを確認）。"
+                    }
                     self.messages[idx].isError = true
                     self.messages[idx].typewriter = false
                 } else {
-                    self.messages[idx].content = acc
-                    self.messages[idx].tokens = tokens
+                    self.messages[idx].content = final
+                    if kind == .acp { self.messages[idx].tokens = result.tokens }
+                    if kind == .antigravity {
+                        // One-shot agy bypasses the Hermes store — persist for history/sync.
+                        let sid = AgyStore.shared.record(sessionId: self.currentSessionId, employeeId: self.activeEmployeeId,
+                                                         userText: userText, assistantText: final, timestamp: Date().timeIntervalSince1970)
+                        self.currentSessionId = sid
+                    }
                 }
             }
-            // Reconcile to the session ACP actually used (new or resumed) so the UI and
-            // the employee record both follow it — not a stale id.
-            if let hsid = ACPClient.shared.hermesSessionId {
-                self.currentSessionId = hsid
+            if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
+
+            // Session reconcile per kind.
+            switch kind {
+            case .acp:
+                if let hsid = ACPClient.shared.hermesSessionId { self.currentSessionId = hsid }
+                self.bindCurrentSessionToActiveEmployee()
+                await self.fetchSessions()
+            case .antigravity:
+                if !final.isEmpty {
+                    self.bindCurrentSessionToActiveEmployee()
+                    await self.fetchSessions()
+                }
+            case .hermesCLI:
+                await self.fetchSessions()
+                if self.currentSessionId == nil {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    await self.fetchSessions()
+                    if let first = self.sessions.first { self.currentSessionId = first.id }
+                }
+                self.bindCurrentSessionToActiveEmployee()
             }
-            self.bindCurrentSessionToActiveEmployee()
-            await self.fetchSessions()
         }
+    }
+
+    /// Finalize a send turn with an error bubble (agy image-only / not-installed pre-checks).
+    private func finishSendError(_ assistantId: UUID, _ imagePath: String?, _ msg: String) {
+        if let idx = messages.firstIndex(where: { $0.id == assistantId }) {
+            messages[idx].content = msg
+            messages[idx].isError = true
+            messages[idx].typewriter = false
+        }
+        isStreaming = false
+        activeStatus = "online"
+        if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
     }
 
     func cancelStreaming() {
@@ -1748,7 +1787,10 @@ class AppState: ObservableObject {
             agentMode = emp.mode
             currentSessionId = emp.sessionId
             messages = emp.sessionId.map { messagesFromStore($0) } ?? []
-            modelApplyTask = Task { await applyModelSilently(provider: emp.provider, model: emp.model) }
+            // Provider stays fixed (Settings-only); apply the employee's model only if it
+            // belongs to the fixed provider, else the global default.
+            let m = modelForFixedProvider(emp)
+            modelApplyTask = Task { await applyModelSilently(model: m) }
         } else {
             currentSessionId = nil
             messages = []
@@ -1789,86 +1831,120 @@ class AppState: ObservableObject {
         let directive = "あなたは「\(target.name)」という名前の\(target.role.title)です。\(target.persona) \(target.mode.directive)"
         let wrapped = "\(trimmed)\n\n\(AgentMode.sentinelOpen)\(directive)\(AgentMode.sentinelClose)"
         let cwd = target.workspacePath ?? effectiveCwd
+        let kind = BackendRouter.selectKind(provider: provider, useACP: useACPTransport)
+
+        func finishDelegate() {
+            busyEmployeeIds.remove(employeeId)
+            isStreaming = false
+            activeStatus = "online"
+        }
+
+        // agy install check (clear hint) at the call site.
+        if kind == .antigravity, await AntigravityCLI.shared.resolveBinaryAsync() == nil {
+            if let i = messages.firstIndex(where: { $0.id == msgId }) {
+                messages[i].content = AntigravityCLI.installHint; messages[i].isError = true; messages[i].typewriter = false
+            }
+            finishDelegate(); await fetchSessions(); return
+        }
+
+        // Run on the specialist's MODEL (provider fixed), then restore the manager's —
+        // Hermes/ACP only (agy carries its model in the request, no Hermes config swap).
+        var swapModel = false
+        var mgrModel = defaultModel
+        if kind != .antigravity {
+            await modelApplyTask?.value
+            mgrModel = defaultModel
+            let targetModel = modelForFixedProvider(target)
+            swapModel = (targetModel != mgrModel)
+            if swapModel { await setHermesModelConfig(model: targetModel) }
+        }
+
+        let req = AgentRequest(
+            prompt: wrapped,
+            agyPrompt: antigravityPrompt(trimmed, employee: target, mode: target.mode),
+            imagePath: nil, cwd: cwd,
+            sessionId: target.sessionId, startFresh: target.sessionId == nil,
+            agyModel: modelForFixedProvider(target))
+
         var acc = ""
-
-        // Run the delegated task on the specialist's own model, then restore the
-        // manager's. Best-effort: a resumed ACP session may keep its original model.
-        await modelApplyTask?.value
-        let mgrProvider = provider, mgrModel = defaultModel
-        let swapModel = (target.provider != mgrProvider || target.model != mgrModel)
-        if swapModel { await setHermesModelConfig(provider: target.provider, model: target.model) }
-
-        if useACPTransport {
-            let (delTokens, ok) = await ACPClient.shared.prompt(
-                wrapped, cwd: cwd,
-                resumeHermesSessionId: target.sessionId,
-                startFresh: target.sessionId == nil,
-                onChunk: { [weak self] chunk in
-                    guard let self = self else { return }
-                    acc += chunk
-                    if let i = self.messages.firstIndex(where: { $0.id == msgId }) { self.messages[i].content = acc }
+        let backend = BackendRouter.make(kind, acp: .shared)
+        let result = await backend.send(
+            req,
+            onStart: { [weak self] proc in self?.activeProcess = proc },
+            onEvent: { [weak self] event in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    guard case .chunk(let t) = event,
+                          let i = self.messages.firstIndex(where: { $0.id == msgId }) else { return }
+                    acc += t
+                    switch kind {       // delegation UI shows only the reply (no reasoning/tool cards)
+                    case .hermesCLI:   self.messages[i].content = self.parseResponseText(acc)
+                    case .antigravity: self.messages[i].content = AntigravityCLI.clean(acc)
+                    case .acp:         self.messages[i].content = acc
+                    }
                 }
-            )
-            // Only adopt a brand-new specialist session; never overwrite an existing id
-            // (a silently-forked failed session/load must not orphan the real session).
-            if target.sessionId == nil,
-               let ti = employees.firstIndex(where: { $0.id == employeeId }),
-               let hsid = ACPClient.shared.hermesSessionId {
-                employees[ti].sessionId = hsid
-                recordSessionOwner(hsid, employeeId)
-            }
-            if let i = messages.firstIndex(where: { $0.id == msgId }) {
-                messages[i].typewriter = false
-                messages[i].elapsed = Date().timeIntervalSince(started)
-                if let t = delTokens { messages[i].tokens = t }
-                if acc.isEmpty { messages[i].content = ok ? "(空の応答)" : "委譲に失敗しました"; messages[i].isError = !ok }
-            }
-            // The shared ACP client now holds the specialist's session; reset so the
-            // manager's next message resumes the manager's session.
-            ACPClient.shared.resetSession()
-        } else {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                _ = HermesCLI.shared.streamPrompt(
-                    prompt: wrapped, sessionId: target.sessionId, cwd: cwd,
-                    onData: { [weak self] chunk in
-                        DispatchQueue.main.async {
-                            guard let self = self else { return }
-                            acc += chunk
-                            if let i = self.messages.firstIndex(where: { $0.id == msgId }) {
-                                self.messages[i].content = self.parseResponseText(acc)
-                            }
-                        }
-                    },
-                    onStderr: { _ in },
-                    onEnd: { _ in DispatchQueue.main.async { cont.resume() } }
-                )
-            }
-            if target.sessionId == nil {
-                await fetchSessions()
-                if let ti = employees.firstIndex(where: { $0.id == employeeId }), let first = sessions.first {
-                    employees[ti].sessionId = first.id
-                    recordSessionOwner(first.id, employeeId)
+            })
+
+        self.activeProcess = nil
+        let final: String
+        switch kind {
+        case .hermesCLI:   final = parseResponseText(acc)
+        case .antigravity: final = AntigravityCLI.clean(acc)
+        case .acp:         final = acc
+        }
+        if let i = messages.firstIndex(where: { $0.id == msgId }) {
+            messages[i].typewriter = false
+            messages[i].elapsed = Date().timeIntervalSince(started)
+            if kind == .acp, let t = result.tokens { messages[i].tokens = t }
+            if final.isEmpty {
+                if kind == .acp {
+                    messages[i].content = result.ok ? "(空の応答)" : "委譲に失敗しました"; messages[i].isError = !result.ok
+                } else {
+                    messages[i].content = "委譲に失敗しました"; messages[i].isError = true
                 }
-            }
-            if let i = messages.firstIndex(where: { $0.id == msgId }) {
-                messages[i].typewriter = false
-                messages[i].elapsed = Date().timeIntervalSince(started)
-                let cleaned = parseResponseText(acc)
-                if cleaned.isEmpty { messages[i].content = "委譲に失敗しました"; messages[i].isError = true }
-                else { messages[i].content = cleaned }
+            } else {
+                messages[i].content = final
             }
         }
 
-        if swapModel { await setHermesModelConfig(provider: mgrProvider, model: mgrModel) }
-        busyEmployeeIds.remove(employeeId)
-        isStreaming = false
-        activeStatus = "online"
+        // Per-kind specialist-session adoption.
+        switch kind {
+        case .antigravity:
+            if !final.isEmpty {
+                let sid = AgyStore.shared.record(sessionId: target.sessionId, employeeId: employeeId,
+                                                 userText: trimmed, assistantText: final, timestamp: Date().timeIntervalSince1970)
+                if let ti = employees.firstIndex(where: { $0.id == employeeId }) {
+                    employees[ti].sessionId = sid; recordSessionOwner(sid, employeeId)
+                }
+            }
+        case .acp:
+            // Only adopt a brand-new specialist session; never overwrite an existing id.
+            if target.sessionId == nil, let ti = employees.firstIndex(where: { $0.id == employeeId }),
+               let hsid = result.hermesSessionId {
+                employees[ti].sessionId = hsid; recordSessionOwner(hsid, employeeId)
+            }
+            // Reset the shared ACP client so the manager's next message resumes their session.
+            ACPClient.shared.resetSession()
+        case .hermesCLI:
+            if target.sessionId == nil {
+                await fetchSessions()
+                if let ti = employees.firstIndex(where: { $0.id == employeeId }), let first = sessions.first {
+                    employees[ti].sessionId = first.id; recordSessionOwner(first.id, employeeId)
+                }
+            }
+        }
+
+        if swapModel { await setHermesModelConfig(model: mgrModel) }
+        finishDelegate()
         await fetchSessions()
     }
 
-    /// Set the hermes model config WITHOUT touching the published provider/defaultModel
-    /// (used to temporarily run a delegated task on a specialist's model, then restore).
-    private func setHermesModelConfig(provider: String, model: String) async {
+    /// Temporarily set the hermes MODEL (provider is fixed) WITHOUT touching the published
+    /// provider/defaultModel — used to run a delegated task on a specialist's model, then
+    /// restore the manager's.
+    private func setHermesModelConfig(model: String) async {
+        // Antigravity isn't a Hermes provider — it runs via `agy`, not the Hermes config.
+        guard provider != AntigravityCLI.providerId else { return }
         _ = await HermesCLI.shared.exec(args: ["config", "set", "model.provider", provider])
         _ = await HermesCLI.shared.exec(args: ["config", "set", "model.default", model])
         let baseUrl = provider == "openrouter" ? "https://openrouter.ai/api/v1" : ""
@@ -1877,8 +1953,18 @@ class AppState: ObservableObject {
 
     // MARK: - Teams (Phase A)
 
-    func employees(inTeam teamId: String) -> [Employee] { employees.filter { $0.teamId == teamId } }
-    var unassignedEmployees: [Employee] { employees.filter { $0.teamId == nil } }
+    /// Display ordering for any employee list: マネージャー float to the top, everyone
+    /// else keeps their existing (insertion) relative order. Routed through every
+    /// roster / picker / switcher so managers always appear first.
+    func managersFirst(_ list: [Employee]) -> [Employee] {
+        list.filter { $0.role == .manager } + list.filter { $0.role != .manager }
+    }
+
+    /// All employees with managers ordered first (see `managersFirst`).
+    var sortedEmployees: [Employee] { managersFirst(employees) }
+
+    func employees(inTeam teamId: String) -> [Employee] { managersFirst(employees.filter { $0.teamId == teamId }) }
+    var unassignedEmployees: [Employee] { managersFirst(employees.filter { $0.teamId == nil }) }
 
     @discardableResult
     func createTeam(name: String) -> Team {
@@ -2012,6 +2098,28 @@ class AppState: ObservableObject {
         return "\(text)\n\n\(AgentMode.sentinelOpen)\(directive)\(AgentMode.sentinelClose)"
     }
 
+    // MARK: - Antigravity CLI backend (agy)
+
+    /// Build a plain (sentinel-free) prompt for `agy`, prepending the employee persona
+    /// and appending the chat/code mode directive as plain text. Antigravity won't strip
+    /// Hermes sentinels, so the directive is included verbatim (not sentinel-wrapped).
+    func antigravityPrompt(_ text: String, employee: Employee?, mode: AgentMode) -> String {
+        var prefix = ""
+        if let emp = employee {
+            prefix += "あなたは「\(emp.name)」という名前の\(emp.role.title)です。\(emp.persona)\n\n"
+        }
+        return "\(prefix)\(text)\n\n\(mode.directive)"
+    }
+
+    /// The model to run under the FIXED global provider. The provider is a Settings-only
+    /// value (never auto-switched), so an employee's own model is honored only when it
+    /// belongs to that provider; otherwise we fall back to the global default model.
+    func modelForFixedProvider(_ employee: Employee?) -> String {
+        if let e = employee, e.provider == provider, !e.model.isEmpty { return e.model }
+        if !defaultModel.isEmpty { return defaultModel }
+        return provider == AntigravityCLI.providerId ? AntigravityCLI.defaultModel : defaultModel
+    }
+
     /// Generate an AI avatar via Pollinations (free, no key) and cache it to disk.
     func generateAIAvatar(for employeeId: String) async {
         guard let emp = employees.first(where: { $0.id == employeeId }) else { return }
@@ -2108,10 +2216,14 @@ class AppState: ObservableObject {
     /// selected model is never hidden (so the user can always see their own choice).
     func modelIsHidden(_ id: String) -> Bool { id != defaultModel && hideBrokenModels && modelHealth[id] == false }
 
-    /// Quietly apply a model (no toast) — used on employee switch.
-    func applyModelSilently(provider: String, model: String) async {
-        self.provider = provider
+    /// Quietly apply a model under the FIXED provider (no toast) — used on employee switch.
+    /// The inference provider is a Settings-only value (see `handleProviderChange`) and is
+    /// never changed here, so switching employees can't silently flip the provider.
+    func applyModelSilently(model: String) async {
         self.defaultModel = model
+        // Antigravity runs via `agy`, not Hermes — never write it into the Hermes config
+        // (it's not a Hermes provider, and doing so would break Hermes-backed employees).
+        guard provider != AntigravityCLI.providerId else { return }
         _ = await HermesCLI.shared.exec(args: ["config", "set", "model.provider", provider])
         _ = await HermesCLI.shared.exec(args: ["config", "set", "model.default", model])
         let baseUrl = provider == "openrouter" ? "https://openrouter.ai/api/v1" : ""
@@ -2119,10 +2231,11 @@ class AppState: ObservableObject {
         await loadApiKey()
     }
 
-    /// Switch the active model (and provider) from the composer, persisting to the CLI config.
-    func setModel(provider: String, model: String) async {
-        await applyModelSilently(provider: provider, model: model)
-        // Persist onto the active employee so their default follows them.
+    /// Switch the active MODEL from the composer/picker, persisting to the CLI config.
+    /// The provider stays the fixed global one — only Settings changes the provider.
+    func setModel(_ model: String) async {
+        await applyModelSilently(model: model)
+        // Persist onto the active employee (with the fixed provider) so it follows them.
         if let empId = activeEmployeeId, let idx = employees.firstIndex(where: { $0.id == empId }) {
             employees[idx].provider = provider
             employees[idx].model = model
@@ -2132,11 +2245,11 @@ class AppState: ObservableObject {
         triggerToast(message: "モデルを変更しました: \(model)")
     }
 
-    /// Set just the model id, keeping the current provider (for custom entry).
+    /// Set just the model id (for custom entry). Provider is fixed via Settings.
     func setCustomModel(_ model: String) async {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        await setModel(provider: provider, model: trimmed)
+        await setModel(trimmed)
     }
 
     // Provider selection helper
@@ -2157,10 +2270,12 @@ class AppState: ObservableObject {
             self.defaultModel = "grok-beta"
         case "openai-codex":
             self.defaultModel = "code-davinci-002"
+        case AntigravityCLI.providerId:
+            self.defaultModel = AntigravityCLI.defaultModel
         default:
             break
         }
-        
+
         Task {
             await loadApiKey()
         }
@@ -2169,18 +2284,22 @@ class AppState: ObservableObject {
     // Save Settings Config
     func handleSaveSettings() async {
         self.isSavingSettings = true
-        
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.provider", provider])
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.default", defaultModel])
-        
-        let baseUrl = provider == "openrouter" ? "https://openrouter.ai/api/v1" : ""
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.base_url", baseUrl])
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "display.personality", personality])
-        
-        if !["nous", "xai-oauth", "openai-codex"].contains(provider) {
-            _ = HermesCLI.shared.saveApiKey(provider: provider, key: apiKey)
+
+        // Antigravity runs via `agy`, not Hermes — skip the Hermes model config writes
+        // (keep personality, which is display-only) and the API-key save (agy self-auths).
+        if provider != AntigravityCLI.providerId {
+            _ = await HermesCLI.shared.exec(args: ["config", "set", "model.provider", provider])
+            _ = await HermesCLI.shared.exec(args: ["config", "set", "model.default", defaultModel])
+
+            let baseUrl = provider == "openrouter" ? "https://openrouter.ai/api/v1" : ""
+            _ = await HermesCLI.shared.exec(args: ["config", "set", "model.base_url", baseUrl])
+
+            if !["nous", "xai-oauth", "openai-codex"].contains(provider) {
+                _ = HermesCLI.shared.saveApiKey(provider: provider, key: apiKey)
+            }
         }
-        
+        _ = await HermesCLI.shared.exec(args: ["config", "set", "display.personality", personality])
+
         triggerToast(message: "設定を保存しました。")
         await fetchConfig()
         self.isSavingSettings = false

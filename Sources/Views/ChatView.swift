@@ -83,7 +83,7 @@ struct ChatView: View {
                                     && msg.toolCalls.isEmpty && msg.thinking.isEmpty {
                                     EmptyView()
                                 } else {
-                                    MessageBlock(msg: msg)
+                                    MessageBlock(msg: msg, isLast: msg.id == appState.messages.last?.id)
                                         .id(msg.id)
                                 }
                             }
@@ -273,46 +273,68 @@ struct ChatView: View {
                         .fixedSize()
 
                         Menu {
-                            Section("おすすめ") {
-                                ForEach(AppState.modelPresets) { preset in
-                                    Button {
-                                        Task { await appState.setModel(provider: preset.provider, model: preset.model) }
-                                    } label: {
-                                        if appState.defaultModel == preset.model {
-                                            Label(preset.label, systemImage: "checkmark")
-                                        } else {
-                                            Text(preset.label)
+                            // Provider is fixed (Settings) — offer only models within it.
+                            if appState.provider == AntigravityCLI.providerId {
+                                Section("おすすめ（Antigravity）") {
+                                    ForEach(AntigravityCLI.presetModels, id: \.self) { m in
+                                        Button {
+                                            Task { await appState.setModel(m) }
+                                        } label: {
+                                            if appState.defaultModel == m {
+                                                Label(m, systemImage: "checkmark")
+                                            } else {
+                                                Text(m)
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            // Live OpenRouter catalog, grouped by provider (never stale).
-                            if !appState.availableModels.isEmpty {
-                                Menu("すべてのモデル（\(appState.availableModels.count)）") {
-                                    ForEach(appState.modelsByProvider, id: \.provider) { group in
-                                        Menu(group.provider) {
-                                            ForEach(group.models.filter { !appState.modelIsHidden($0.id) }) { m in
-                                                Button {
-                                                    Task { await appState.setModel(provider: "openrouter", model: m.id) }
-                                                } label: {
-                                                    if appState.defaultModel == m.id {
-                                                        Label(m.name, systemImage: "checkmark")
-                                                    } else {
-                                                        Text(m.name)
+                                Divider()
+                                Button("カスタムモデルを入力…") {
+                                    customModelText = appState.defaultModel
+                                    showModelInput = true
+                                }
+                            } else {
+                                Section("おすすめ") {
+                                    ForEach(AppState.modelPresets) { preset in
+                                        Button {
+                                            Task { await appState.setModel(preset.model) }
+                                        } label: {
+                                            if appState.defaultModel == preset.model {
+                                                Label(preset.label, systemImage: "checkmark")
+                                            } else {
+                                                Text(preset.label)
+                                            }
+                                        }
+                                    }
+                                }
+                                // Live OpenRouter catalog, grouped by provider (never stale).
+                                if !appState.availableModels.isEmpty {
+                                    Menu("すべてのモデル（\(appState.availableModels.count)）") {
+                                        ForEach(appState.modelsByProvider, id: \.provider) { group in
+                                            Menu(group.provider) {
+                                                ForEach(group.models.filter { !appState.modelIsHidden($0.id) }) { m in
+                                                    Button {
+                                                        Task { await appState.setModel(m.id) }
+                                                    } label: {
+                                                        if appState.defaultModel == m.id {
+                                                            Label(m.name, systemImage: "checkmark")
+                                                        } else {
+                                                            Text(m.name)
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            Divider()
-                            Button("モデル一覧を更新") {
-                                Task { await appState.fetchAvailableModels() }
-                            }
-                            Button("カスタムモデルを入力…") {
-                                customModelText = appState.defaultModel
-                                showModelInput = true
+                                Divider()
+                                Button("モデル一覧を更新") {
+                                    Task { await appState.fetchAvailableModels() }
+                                }
+                                Button("カスタムモデルを入力…") {
+                                    customModelText = appState.defaultModel
+                                    showModelInput = true
+                                }
                             }
                         } label: {
                             HStack(spacing: 3) {
@@ -464,14 +486,143 @@ struct ChatView: View {
 struct MessageBlock: View {
     @EnvironmentObject var appState: AppState
     let msg: Message
+    var isLast: Bool = false
 
-    /// Render markdown (bold/italic/links/inline code/structure). Falls back to plain.
+    /// Selection cues — only treat a trailing list as choices when the reply actually
+    /// asks the user to pick (avoids quick-replies on purely informational lists).
+    private static let choiceCues = ["？", "?", "どちら", "どれ", "いずれ", "選んで", "選択", "ご希望", "教えていただけ"]
+
+    /// Trailing run of numbered/bulleted items in an assistant reply, treated as selectable
+    /// choices (e.g. "1. プランA / 2. プランB") — but only when the reply prompts a choice.
+    /// Returns the choice texts (≥2) or [].
+    static func choices(_ content: String) -> [String] {
+        guard choiceCues.contains(where: { content.contains($0) }) else { return [] }
+        var lastRun: [String] = []
+        var run: [String] = []
+        for block in blocks(content) {
+            switch block {
+            case .ordered(_, let t): run.append(t)
+            case .bullet(let t): run.append(t)
+            default:
+                if run.count >= 2 { lastRun = run }
+                run.removeAll()
+            }
+        }
+        if run.count >= 2 { lastRun = run }
+        return lastRun
+    }
+
+    /// Plain text for sending a chosen option (strip emphasis/code markers).
+    static func plainChoice(_ s: String) -> String {
+        s.replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "`", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Render INLINE markdown (bold/italic/links/inline code) for one block, preserving
+    /// whitespace. `.full` would parse block grammar but `AttributedString`+`Text` then
+    /// collapses block boundaries (headings/lists/paragraph breaks) into one run — which
+    /// is why we render block structure ourselves (see `blocks`) and only do inline here.
     static func markdown(_ s: String) -> AttributedString {
         let opts = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .full,
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible
         )
         return (try? AttributedString(markdown: s, options: opts)) ?? AttributedString(s)
+    }
+
+    /// A block-level element of prose (everything between fenced code blocks).
+    enum Block {
+        case heading(level: Int, text: String)
+        case bullet(text: String)
+        case ordered(marker: String, text: String)
+        case quote(text: String)
+        case table(header: [String], rows: [[String]])
+        case paragraph(String)
+    }
+
+    /// A GFM table delimiter row, e.g. `|---|:--:|` (only pipes/dashes/colons/space,
+    /// with at least one dash and one pipe).
+    static func isTableDelimiter(_ raw: String) -> Bool {
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        guard t.contains("|"), t.contains("-") else { return false }
+        let allowed = Set("|:- ")
+        return t.allSatisfy { allowed.contains($0) }
+    }
+
+    /// Split a `| a | b |` row into trimmed cells (tolerates missing outer pipes).
+    static func tableCells(_ raw: String) -> [String] {
+        var t = raw.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("|") { t.removeFirst() }
+        if t.hasSuffix("|") { t.removeLast() }
+        return t.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// Split prose into block elements so headings/lists/paragraphs each render on their
+    /// own line — `AttributedString` markdown alone would mash them into one paragraph.
+    static func blocks(_ s: String) -> [Block] {
+        var out: [Block] = []
+        var para: [String] = []
+        func flushPara() {
+            let t = para.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { out.append(.paragraph(t)) }
+            para.removeAll()
+        }
+        let lines = s.components(separatedBy: "\n")
+        var i = 0
+        while i < lines.count {
+            let rawLine = lines[i]
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { flushPara(); i += 1; continue }
+            // GFM table: a row with pipes whose NEXT line is a delimiter row.
+            if line.contains("|"), i + 1 < lines.count, isTableDelimiter(lines[i + 1]) {
+                flushPara()
+                let header = tableCells(line)
+                var rows: [[String]] = []
+                var j = i + 2
+                while j < lines.count {
+                    let l = lines[j].trimmingCharacters(in: .whitespaces)
+                    guard !l.isEmpty, l.contains("|") else { break }
+                    rows.append(tableCells(l))
+                    j += 1
+                }
+                out.append(.table(header: header, rows: rows))
+                i = j
+                continue
+            }
+            // ATX heading: #..###### followed by a space.
+            if let h = line.range(of: #"^#{1,6}\s+"#, options: .regularExpression) {
+                flushPara()
+                let hashes = line.prefix(while: { $0 == "#" }).count
+                out.append(.heading(level: min(max(hashes, 1), 6), text: String(line[h.upperBound...])))
+                i += 1; continue
+            }
+            // Blockquote: > text
+            if let q = line.range(of: #"^>\s?"#, options: .regularExpression) {
+                flushPara()
+                out.append(.quote(text: String(line[q.upperBound...])))
+                i += 1; continue
+            }
+            // Unordered list: -, *, • , then a space.
+            if let b = line.range(of: #"^[-*•]\s+"#, options: .regularExpression) {
+                flushPara()
+                out.append(.bullet(text: String(line[b.upperBound...])))
+                i += 1; continue
+            }
+            // Ordered list: 1. or 1) then a space.
+            if let o = line.range(of: #"^\d+[.)]\s+"#, options: .regularExpression) {
+                flushPara()
+                let marker = String(line[line.startIndex..<line.index(before: o.upperBound)])
+                    .trimmingCharacters(in: .whitespaces)
+                out.append(.ordered(marker: marker, text: String(line[o.upperBound...])))
+                i += 1; continue
+            }
+            para.append(rawLine)
+            i += 1
+        }
+        flushPara()
+        return out
     }
 
     /// A piece of a reply: prose or a fenced code block.
@@ -578,11 +729,7 @@ struct MessageBlock: View {
                                 ForEach(Array(MessageBlock.segments(msg.content).enumerated()), id: \.offset) { _, seg in
                                     switch seg {
                                     case .text(let t):
-                                        Text(MessageBlock.markdown(t))
-                                            .font(.system(size: 14))
-                                            .foregroundColor(msg.isError ? .red : .primary)
-                                            .lineSpacing(4)
-                                            .textSelection(.enabled)
+                                        ProseView(text: t, isError: msg.isError)
                                     case .code(let lang, let body):
                                         CodeBlockView(language: lang, code: body)
                                     }
@@ -603,6 +750,39 @@ struct MessageBlock: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(appState.isStreaming)
+                    }
+
+                    // Quick-reply chips: when the latest reply offers choices, let the
+                    // user pick by tapping instead of retyping.
+                    if msg.role == .assistant, isLast, !msg.typewriter, !msg.isError {
+                        let choices = MessageBlock.choices(msg.content)
+                        if choices.count >= 2 {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(Array(choices.enumerated()), id: \.offset) { idx, c in
+                                    Button {
+                                        appState.sendQuickReply(MessageBlock.plainChoice(c))
+                                    } label: {
+                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                            Text("\(idx + 1)")
+                                                .font(.system(size: 11, weight: .bold)).foregroundColor(.blue)
+                                                .frame(width: 16)
+                                            Text(MessageBlock.markdown(c))
+                                                .font(.system(size: 13)).foregroundColor(.primary)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .lineLimit(2)
+                                        }
+                                        .padding(.horizontal, 12).padding(.vertical, 9)
+                                        .background(Color.blue.opacity(0.08))
+                                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.25), lineWidth: 0.5))
+                                        .cornerRadius(8)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(appState.isStreaming)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
                     }
                 }
                 .padding(.horizontal, 12)
@@ -634,6 +814,122 @@ struct MessageBlock: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Renders a prose segment as block elements — headings, bullet/ordered lists, and
+/// paragraphs each on their own line — so a reply isn't mashed into one run-on block.
+/// Inline markdown (bold/italic/code/links) is rendered within each block.
+struct ProseView: View {
+    let text: String
+    let isError: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(MessageBlock.blocks(text).enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .heading(let level, let t):
+                    Text(MessageBlock.markdown(t))
+                        .font(.system(size: headingSize(level), weight: level <= 2 ? .bold : .semibold))
+                        .foregroundColor(isError ? .red : .primary)
+                        .textSelection(.enabled)
+                        .padding(.top, 2)
+                case .bullet(let t):
+                    listRow(marker: "•", text: t)
+                case .ordered(let marker, let t):
+                    listRow(marker: marker, text: t)   // marker already includes "." or ")"
+                case .quote(let t):
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 1.5).fill(Color.secondary.opacity(0.4)).frame(width: 3)
+                        Text(MessageBlock.markdown(t))
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.leading, 2)
+                case .table(let header, let rows):
+                    MarkdownTableView(header: header, rows: rows, isError: isError)
+                case .paragraph(let t):
+                    Text(MessageBlock.markdown(t))
+                        .font(.system(size: 14))
+                        .foregroundColor(isError ? .red : .primary)
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return 19
+        case 2: return 17
+        case 3: return 15
+        default: return 14
+        }
+    }
+
+    private func listRow(marker: String, text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Text(marker)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(isError ? .red : .secondary)
+            Text(MessageBlock.markdown(text))
+                .font(.system(size: 14))
+                .foregroundColor(isError ? .red : .primary)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+/// Renders a GFM markdown table as a bordered grid (header row tinted), so a reply's
+/// `| a | b |` rows aren't shown as raw pipe text. Columns share the bubble width and
+/// cells wrap; inline markdown renders within each cell.
+struct MarkdownTableView: View {
+    let header: [String]
+    let rows: [[String]]
+    let isError: Bool
+
+    private var colCount: Int { max(header.count, rows.map { $0.count }.max() ?? 0) }
+
+    var body: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow {
+                ForEach(0..<colCount, id: \.self) { c in
+                    cell(c < header.count ? header[c] : "", header: true)
+                }
+            }
+            ForEach(rows.indices, id: \.self) { r in
+                GridRow {
+                    ForEach(0..<colCount, id: \.self) { c in
+                        cell(c < rows[r].count ? rows[r][c] : "", header: false)
+                    }
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15), lineWidth: 0.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func cell(_ s: String, header: Bool) -> some View {
+        Text(MessageBlock.markdown(s))
+            .font(.system(size: 12, weight: header ? .semibold : .regular))
+            .foregroundColor(isError ? .red : .primary)
+            .multilineTextAlignment(.leading)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(header ? Color.primary.opacity(0.06) : Color.clear)
+            .overlay(Rectangle().stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
     }
 }
 

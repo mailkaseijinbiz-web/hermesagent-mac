@@ -13,6 +13,14 @@ let package = Package(
         .executableTarget(
             name: "HermesCustom",
             path: "Sources"
+        ),
+        .testTarget(
+            name: "HermesCustomTests",
+            dependencies: ["HermesCustom"],
+            path: "Tests"
         )
-    ]
+    ],
+    // Match the shipping build (project.yml SWIFT_VERSION 5.0). Swift 6 strict-concurrency
+    // migration is tracked separately on the roadmap.
+    swiftLanguageModes: [.v5]
 )

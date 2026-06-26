@@ -5,12 +5,15 @@ import SwiftUI
 struct SettingsModal: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var voice = VoiceManager.shared
+    @ObservedObject private var updater = UpdateManager.shared
     @Environment(\.colorScheme) var colorScheme
     @State private var selected: Section = .general
     @State private var isLoggingIn = false
     @State private var mgmtTab: ManagementTab = .memory
     @State private var showModelPicker = false
     @State private var settingsSearch = ""
+    @State private var agyCustomModel = ""
+    @State private var agyInstalled: Bool? = nil
 
     enum Section: String, CaseIterable, Identifiable {
         case general = "一般"
@@ -38,7 +41,7 @@ struct SettingsModal: View {
         var keywords: String {
             switch self {
             case .general: return "一般 general 性格 personality 音声 読み上げ tts elevenlabs voice"
-            case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter"
+            case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter antigravity agy gemini cli"
             case .github: return "github リポジトリ repo ワークスペース clone git 作業フォルダ"
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
             case .channels: return "チャンネル channel telegram discord slack line whatsapp signal teams メール email"
@@ -60,7 +63,8 @@ struct SettingsModal: View {
         ("gemini", "Google Gemini"),
         ("nous", "Nous Portal (OAuth)"),
         ("xai-oauth", "xAI Grok (OAuth)"),
-        ("openai-codex", "OpenAI Codex (OAuth)")
+        ("openai-codex", "OpenAI Codex (OAuth)"),
+        ("antigravity", "Antigravity CLI (agy)")
     ]
     let personalities = [
         ("kawaii", "Kawaii (Cute / Sparkly)"),
@@ -192,46 +196,183 @@ struct SettingsModal: View {
             .pickerStyle(.menu)
             .onChange(of: appState.provider) { _, v in appState.handleProviderChange(v) }
 
-            fieldLabel("モデル")
-            Button { showModelPicker = true } label: {
-                HStack {
-                    Text(appState.defaultModel.isEmpty ? "モデルを選択…" : appState.defaultModel)
-                        .font(.system(size: 13))
-                        .foregroundColor(appState.defaultModel.isEmpty ? .secondary : .primary)
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundColor(.secondary)
-                }
-                .padding(8)
-                .background(Color.primary.opacity(0.05)).cornerRadius(6)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
-            }
-            .buttonStyle(.plain)
-            Text("検索・テストして選べます。動作しないモデルは一覧から隠せます。")
-                .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8))
-
-            if ["nous", "xai-oauth", "openai-codex"].contains(appState.provider) {
-                fieldLabel("OAuth Authentication")
-                Button {
-                    Task { isLoggingIn = true; await appState.triggerOAuthLogin(); isLoggingIn = false }
-                } label: {
-                    HStack { Spacer()
-                        if isLoggingIn { ProgressView().controlSize(.small).padding(.trailing, 6); Text("認証中...") }
-                        else { Text("OAuth認証でログインする") }
-                        Spacer() }
-                    .padding(.vertical, 8)
-                    .background(Color.purple.opacity(0.2)).foregroundColor(.purple).cornerRadius(6)
-                }
-                .buttonStyle(.plain).disabled(isLoggingIn)
+            if appState.provider == AntigravityCLI.providerId {
+                antigravitySection
             } else {
-                fieldLabel("API Key for \(appState.provider)")
-                styledField(SecureField("Enter API Key", text: $appState.apiKey))
+                fieldLabel("モデル")
+                Button { showModelPicker = true } label: {
+                    HStack {
+                        Text(appState.defaultModel.isEmpty ? "モデルを選択…" : appState.defaultModel)
+                            .font(.system(size: 13))
+                            .foregroundColor(appState.defaultModel.isEmpty ? .secondary : .primary)
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.system(size: 11)).foregroundColor(.secondary)
+                    }
+                    .padding(8)
+                    .background(Color.primary.opacity(0.05)).cornerRadius(6)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                Text("検索・テストして選べます。動作しないモデルは一覧から隠せます。")
+                    .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8))
+
+                if ["nous", "xai-oauth", "openai-codex"].contains(appState.provider) {
+                    fieldLabel("OAuth Authentication")
+                    Button {
+                        Task { isLoggingIn = true; await appState.triggerOAuthLogin(); isLoggingIn = false }
+                    } label: {
+                        HStack { Spacer()
+                            if isLoggingIn { ProgressView().controlSize(.small).padding(.trailing, 6); Text("認証中...") }
+                            else { Text("OAuth認証でログインする") }
+                            Spacer() }
+                        .padding(.vertical, 8)
+                        .background(Color.purple.opacity(0.2)).foregroundColor(.purple).cornerRadius(6)
+                    }
+                    .buttonStyle(.plain).disabled(isLoggingIn)
+                } else {
+                    fieldLabel("API Key for \(appState.provider)")
+                    styledField(SecureField("Enter API Key", text: $appState.apiKey))
+                }
             }
+        }
+    }
+
+    /// Antigravity CLI (`agy`) settings: model presets + custom entry, plus install status.
+    /// `agy` runs as its own backend and self-authenticates, so no API key / OAuth here.
+    @ViewBuilder private var antigravitySection: some View {
+        fieldLabel("モデル（Antigravity）")
+        Menu {
+            ForEach(AntigravityCLI.presetModels, id: \.self) { m in
+                Button(m) { Task { await appState.setModel(m) } }
+            }
+        } label: {
+            HStack {
+                Text(appState.defaultModel.isEmpty ? "モデルを選択…" : appState.defaultModel)
+                    .font(.system(size: 13))
+                    .foregroundColor(appState.defaultModel.isEmpty ? .secondary : .primary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 10)).foregroundColor(.secondary)
+            }
+            .padding(8)
+            .background(Color.primary.opacity(0.05)).cornerRadius(6)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+
+        fieldLabel("カスタムモデル")
+        HStack(spacing: 6) {
+            styledField(TextField("例: Gemini 3 Pro (High)", text: $agyCustomModel))
+            Button("適用") {
+                let m = agyCustomModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !m.isEmpty else { return }
+                Task { await appState.setModel(m) }
+            }
+            .buttonStyle(.plain).foregroundColor(.blue).font(.system(size: 12))
+            .disabled(agyCustomModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        Text("`agy models` の表示名をそのまま指定できます。")
+            .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8))
+
+        // Install status (checked once when this section appears).
+        HStack(spacing: 6) {
+            Circle().fill(agyInstalled == true ? Color.green : (agyInstalled == false ? Color.orange : Color.secondary))
+                .frame(width: 7, height: 7)
+            if agyInstalled == false {
+                Text(AntigravityCLI.installHint).font(.system(size: 10)).foregroundColor(.orange).lineLimit(nil)
+            } else {
+                Text(agyInstalled == true ? "Antigravity CLI を検出しました。認証は `agy` 側（ブラウザ/キーチェーン）。" : "確認中…")
+                    .font(.system(size: 10)).foregroundColor(.secondary)
+            }
+        }
+        .task { agyInstalled = await AntigravityCLI.shared.isInstalledAsync }
+    }
+
+    /// Auto version-up card: shows the current build, checks the git remote, and applies
+    /// updates (git pull → rebuild → relaunch) on click, with an optional auto toggle.
+    private var updateCard: some View {
+        card(title: "アップデート") {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(updater.updateAvailable ? Color.orange : Color.green)
+                    .frame(width: 7, height: 7)
+                Text("現在: \(updater.currentVersion)")
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+                if let last = updater.lastCheck {
+                    Text("確認: \(last.formatted(date: .omitted, time: .shortened))")
+                        .font(.system(size: 9)).foregroundColor(.secondary)
+                }
+            }
+
+            if !updater.status.isEmpty {
+                Text(updater.status)
+                    .font(.system(size: 11))
+                    .foregroundColor(updater.updateAvailable ? .orange : .secondary)
+                    .lineLimit(nil)
+            }
+
+            if updater.updateAvailable && !updater.latestLog.isEmpty {
+                ScrollView {
+                    Text(updater.latestLog)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 96)
+                .padding(8)
+                .background(Color.primary.opacity(0.04)).cornerRadius(6)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await updater.checkForUpdates(auto: false) }
+                } label: {
+                    HStack(spacing: 4) {
+                        if updater.isChecking { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "arrow.clockwise") }
+                        Text("更新を確認")
+                    }.font(.system(size: 12))
+                }
+                .buttonStyle(.plain).foregroundColor(.blue)
+                .disabled(updater.isChecking || updater.isUpdating)
+
+                if updater.updateAvailable {
+                    Button {
+                        Task { await updater.performUpdate() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if updater.isUpdating { ProgressView().controlSize(.small) }
+                            else { Image(systemName: "square.and.arrow.down.on.square") }
+                            Text(updater.isUpdating ? "更新中…" : "今すぐ更新（再ビルドして再起動）")
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Color.orange.opacity(0.18)).foregroundColor(.orange).cornerRadius(6)
+                    }
+                    .buttonStyle(.plain).disabled(updater.isUpdating)
+                }
+                Spacer()
+            }
+
+            Toggle(isOn: $updater.autoUpdate) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("自動で更新する").font(.system(size: 12, weight: .medium))
+                    Text("新しいバージョンを検知したら、確認なしで再ビルド・再起動します。")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+                }
+            }
+            .toggleStyle(.switch).controlSize(.small)
+            .disabled(updater.isUpdating)
         }
     }
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 18) {
+            updateCard
+
             card(title: "エージェント性格") {
                 fieldLabel("Personality Persona")
                 Picker("", selection: $appState.personality) {

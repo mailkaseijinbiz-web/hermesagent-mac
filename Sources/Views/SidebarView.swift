@@ -47,7 +47,7 @@ struct SidebarView: View {
                         .padding(.horizontal, 16)
                         .padding(.bottom, 2)
 
-                    ForEach(appState.employees) { emp in
+                    ForEach(appState.sortedEmployees) { emp in
                         let active = appState.activeEmployeeId == emp.id
                         HStack(spacing: 8) {
                             EmployeeAvatar(employee: emp, size: 22)

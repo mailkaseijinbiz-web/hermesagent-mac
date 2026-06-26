@@ -53,7 +53,7 @@ struct TasksView: View {
 
             Menu {
                 Button { newAssignee = nil } label: { Label("未割当", systemImage: newAssignee == nil ? "checkmark" : "") }
-                ForEach(appState.employees) { e in
+                ForEach(appState.sortedEmployees) { e in
                     Button { newAssignee = e.id } label: {
                         Label("\(e.role.emoji) \(e.name)", systemImage: newAssignee == e.id ? "checkmark" : "")
                     }
@@ -126,7 +126,7 @@ struct TaskCard: View {
                         .background(a.role.color.opacity(0.12)).cornerRadius(4)
                 } else {
                     Menu {
-                        ForEach(appState.employees) { e in
+                        ForEach(appState.sortedEmployees) { e in
                             Button("\(e.role.emoji) \(e.name)") { appState.assignTask(task.id, to: e.id) }
                         }
                     } label: {

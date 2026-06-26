@@ -434,7 +434,7 @@ struct MeetingSheet: View {
             Text("参加者").font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
             ScrollView {
                 VStack(spacing: 4) {
-                    ForEach(appState.employees) { e in
+                    ForEach(appState.sortedEmployees) { e in
                         Button {
                             if selected.contains(e.id) { selected.remove(e.id) } else { selected.insert(e.id) }
                         } label: {
