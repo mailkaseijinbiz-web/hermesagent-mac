@@ -110,6 +110,9 @@ swift build
 # .app バンドルを作成（release/HermesCustom.app）
 ./build_app.sh
 open release/HermesCustom.app
+
+# ユニットテスト（XCTest はフル Xcode が必要・拡張属性をクリアして実行）
+./run_tests.sh
 ```
 
 `build_app.sh` は `swift build -c release` 後にバンドル化し、`Info.plist`・アプリアイコンを配置、ビルドコミット/ブランチを `release/.build-commit` 等に記録します（アプリ内アップデータが参照）。

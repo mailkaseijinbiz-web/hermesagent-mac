@@ -4877,6 +4877,26 @@ class AppState: ObservableObject {
         return res.success
     }
 
+    /// 既存のスケジュールタスクを編集（`hermes cron edit`）。空でない項目だけ更新する。
+    func cronEdit(id: String, schedule: String, name: String, deliver: String) async -> Bool {
+        var args = ["cron", "edit", id]
+        let s = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !s.isEmpty { args.append(contentsOf: ["--schedule", s]) }
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !n.isEmpty { args.append(contentsOf: ["--name", n]) }
+        let d = deliver.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !d.isEmpty { args.append(contentsOf: ["--deliver", d]) }
+        guard args.count > 3 else { return false }   // 変更項目なし
+        let res = await HermesCLI.shared.exec(args: args)
+        if res.success {
+            triggerToast(message: "スケジュールタスクを更新しました。")
+            await fetchCronJobs()
+        } else {
+            triggerToast(message: "更新に失敗: \(res.stderr)")
+        }
+        return res.success
+    }
+
     func handleCreateCronJob() async {
         let name = newCronName.trimmingCharacters(in: .whitespacesAndNewlines)
         let schedule = newCronSchedule.trimmingCharacters(in: .whitespacesAndNewlines)

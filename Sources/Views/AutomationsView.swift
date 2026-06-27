@@ -146,37 +146,9 @@ struct AutomationsView: View {
                             .cornerRadius(6)
                         
                         HStack(spacing: 12) {
-                            // 配信先（ドロップダウン選択）
-                            Menu {
-                                Button { appState.newCronDeliver = "local" } label: {
-                                    Label("ローカル（アプリ内のみ）", systemImage: appState.newCronDeliver == "local" || appState.newCronDeliver.isEmpty ? "checkmark" : "")
-                                }
-                                Button { appState.newCronDeliver = "origin" } label: {
-                                    Label("送信元へ返信", systemImage: appState.newCronDeliver == "origin" ? "checkmark" : "")
-                                }
-                                if !appState.channels.isEmpty {
-                                    Divider()
-                                    ForEach(appState.channels) { ch in
-                                        let val = "\(ch.platform):\(ch.channelId)"
-                                        Button { appState.newCronDeliver = val } label: {
-                                            Label(channelMenuLabel(ch), systemImage: appState.newCronDeliver == val ? "checkmark" : "")
-                                        }
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "paperplane").font(.system(size: 11)).foregroundColor(.secondary)
-                                    Text(deliverDisplayLabel(appState.newCronDeliver))
-                                        .font(.system(size: 12)).foregroundColor(.primary)
-                                        .lineLimit(1).truncationMode(.middle)
-                                    Spacer(minLength: 4)
-                                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 8)).foregroundColor(.secondary)
-                                }
-                                .padding(8)
-                                .background(Color.primary.opacity(0.05)).cornerRadius(6)
-                            }
-                            .menuStyle(.borderlessButton)
-                            .frame(maxWidth: .infinity)
+                            // 配信先（ドロップダウン選択）— 作成/編集フォーム共通
+                            DeliverPicker(deliver: $appState.newCronDeliver)
+                                .frame(maxWidth: .infinity)
 
                             TextField("スクリプトパス (任意)", text: $appState.newCronScript)
                                 .textFieldStyle(.plain)
@@ -308,26 +280,64 @@ struct AutomationsView: View {
         }
     }
 
+}
+
+/// 配信先ドロップダウン（ローカル / 送信元 / 登録チャンネル）。作成・編集フォームで共通利用。
+struct DeliverPicker: View {
+    @EnvironmentObject var appState: AppState
+    @Binding var deliver: String
+
+    var body: some View {
+        Menu {
+            Button { deliver = "local" } label: {
+                Label("ローカル（アプリ内のみ）", systemImage: deliver == "local" || deliver.isEmpty ? "checkmark" : "")
+            }
+            Button { deliver = "origin" } label: {
+                Label("送信元へ返信", systemImage: deliver == "origin" ? "checkmark" : "")
+            }
+            if !appState.channels.isEmpty {
+                Divider()
+                ForEach(appState.channels) { ch in
+                    let val = "\(ch.platform):\(ch.channelId)"
+                    Button { deliver = val } label: {
+                        Label(Self.channelMenuLabel(ch), systemImage: deliver == val ? "checkmark" : "")
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "paperplane").font(.system(size: 11)).foregroundColor(.secondary)
+                Text(displayLabel)
+                    .font(.system(size: 12)).foregroundColor(.primary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 8)).foregroundColor(.secondary)
+            }
+            .padding(8)
+            .background(Color.primary.opacity(0.05)).cornerRadius(6)
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var displayLabel: String {
+        switch deliver {
+        case "", "local": return "ローカル（アプリ内のみ）"
+        case "origin": return "送信元へ返信"
+        default:
+            if let ch = appState.channels.first(where: { "\($0.platform):\($0.channelId)" == deliver }) {
+                return Self.channelMenuLabel(ch)
+            }
+            return deliver
+        }
+    }
+
     /// 配信先メニューの各チャンネル表示名（LINEの長いIDは末尾だけ短縮）。
-    private func channelMenuLabel(_ ch: HermesChannel) -> String {
+    static func channelMenuLabel(_ ch: HermesChannel) -> String {
         let plat = ch.platform.uppercased()
         if ch.name == ch.channelId && ch.channelId.count > 12 {
             return "\(plat)（…\(ch.channelId.suffix(6))）"
         }
         return "\(plat)：\(ch.name.isEmpty ? ch.channelId : ch.name)"
-    }
-
-    /// 現在の配信先の表示ラベル（local/origin/登録済みチャンネル/手入力カスタム）。
-    private func deliverDisplayLabel(_ value: String) -> String {
-        switch value {
-        case "", "local": return "ローカル（アプリ内のみ）"
-        case "origin": return "送信元へ返信"
-        default:
-            if let ch = appState.channels.first(where: { "\($0.platform):\($0.channelId)" == value }) {
-                return channelMenuLabel(ch)
-            }
-            return value
-        }
     }
 }
 
@@ -551,6 +561,7 @@ struct CronJobRow: View {
     @State private var isPendingAction = false
     @State private var isHovered = false
     @State private var showRunConfirm = false
+    @State private var showEdit = false
     
     var body: some View {
         HStack(spacing: 16) {
@@ -606,6 +617,20 @@ struct CronJobRow: View {
                     .controlSize(.small)
                     .padding(.trailing, 10)
             } else {
+                // 編集（名前・スケジュール・配信先）
+                Button(action: { showEdit = true }) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(Color.primary.opacity(0.05)).cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .help("スケジュール・名前・配信先を編集")
+                .popover(isPresented: $showEdit, arrowEdge: .bottom) {
+                    CronEditView(job: job) { showEdit = false }
+                }
+
                 // テスト実行（今すぐ実行 → 配信先へ送信）
                 Button(action: { showRunConfirm = true }) {
                     HStack(spacing: 4) {
@@ -668,6 +693,84 @@ struct CronJobRow: View {
                     }
                 }
             }
+        }
+    }
+}
+
+/// スケジュールタスク（cronジョブ）編集ポップオーバー：名前・スケジュール・配信先。
+/// プロンプト/スクリプトは一覧に値が無いため対象外（必要なら作り直し）。
+struct CronEditView: View {
+    @EnvironmentObject var appState: AppState
+    let job: HermesCronJob
+    let onClose: () -> Void
+    @State private var name: String
+    @State private var schedule: String
+    @State private var deliver: String
+    @State private var saving = false
+
+    init(job: HermesCronJob, onClose: @escaping () -> Void) {
+        self.job = job
+        self.onClose = onClose
+        _name = State(initialValue: job.name)
+        _schedule = State(initialValue: job.schedule)
+        _deliver = State(initialValue: job.deliver)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("スケジュールタスクを編集").font(.system(size: 13, weight: .semibold))
+
+            labeledField("タスク名") {
+                TextField("例: 株モニタリング", text: $name)
+                    .textFieldStyle(.plain).font(.system(size: 12))
+            }
+            labeledField("スケジュール（cron / 30m / every 2h）") {
+                TextField("例: 0 9 * * *", text: $schedule)
+                    .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("配信先").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                DeliverPicker(deliver: $deliver)   // 自前で背景を持つので labeledField で包まない
+            }
+
+            if let sc = job.script, !sc.isEmpty {
+                Text("スクリプト: \(sc)（編集不可）")
+                    .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.7))
+            }
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("キャンセル") { onClose() }.buttonStyle(.plain).font(.system(size: 12))
+                Button {
+                    saving = true
+                    Task {
+                        let ok = await appState.cronEdit(id: job.id, schedule: schedule, name: name, deliver: deliver)
+                        saving = false
+                        if ok { onClose() }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        if saving { ProgressView().controlSize(.small) }
+                        Text("保存").font(.system(size: 12, weight: .semibold))
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 6)
+                    .background(Color.accentColor).foregroundColor(.white).cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .disabled(saving || schedule.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(16).frame(width: 340)
+    }
+
+    @ViewBuilder
+    private func labeledField<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+            content()
+                .padding(8)
+                .background(Color.primary.opacity(0.05)).cornerRadius(6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
         }
     }
 }

@@ -16,3 +16,11 @@ logs
 node_modules/
 .claude/
 .vscode/
+
+# Secrets — never commit env/secret files (real secrets live in ~/.hermes/, outside the repo)
+.env
+*.env
+secrets/
+*.p8
+*.p12
+*.mobileprovision
