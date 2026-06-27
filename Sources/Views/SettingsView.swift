@@ -4,7 +4,6 @@ import SwiftUI
 /// panel (like the reference layout). Shown via `appState.showSettings`.
 struct SettingsModal: View {
     @EnvironmentObject var appState: AppState
-    @ObservedObject private var voice = VoiceManager.shared
     @ObservedObject private var updater = UpdateManager.shared
     @Environment(\.colorScheme) var colorScheme
     @State private var selected: Section = .general
@@ -18,7 +17,6 @@ struct SettingsModal: View {
     enum Section: String, CaseIterable, Identifiable {
         case general = "一般"
         case model = "モデル"
-        case voice = "音声"
         case google = "Google"
         case github = "GitHub"
         case cloud = "クラウド同期"
@@ -31,7 +29,6 @@ struct SettingsModal: View {
             switch self {
             case .general: return "gearshape"
             case .model: return "cpu"
-            case .voice: return "speaker.wave.2"
             case .google: return "g.circle"
             case .github: return "chevron.left.forwardslash.chevron.right"
             case .cloud: return "cloud"
@@ -45,7 +42,6 @@ struct SettingsModal: View {
             switch self {
             case .general: return "一般 general 性格 personality"
             case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter antigravity agy gemini cli"
-            case .voice: return "音声 読み上げ tts elevenlabs voice ボイス スピーチ speech"
             case .google: return "google gmail calendar カレンダー メール oauth 認証 連携"
             case .github: return "github リポジトリ repo ワークスペース clone git 作業フォルダ"
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
@@ -165,7 +161,6 @@ struct SettingsModal: View {
                         switch selected {
                         case .general: generalSection
                         case .model: modelSection
-                        case .voice: voiceSection
                         case .google: googleSection
                         case .github: githubSection
                         case .cloud: cloudSection
@@ -391,40 +386,6 @@ struct SettingsModal: View {
         }
     }
 
-    private var voiceSection: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            card(title: "音声読み上げ (TTS)") {
-                Toggle(isOn: $voice.useElevenLabs) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("ElevenLabs の音声を使う")
-                            .font(.system(size: 13, weight: .medium))
-                        Text(voice.elevenLabsAvailable
-                             ? "高品質な多言語音声(eleven_multilingual_v2)。OFFはシステム音声。"
-                             : "⚠️ ~/.hermes/.env に ELEVENLABS_API_KEY が必要です。")
-                            .font(.system(size: 10))
-                            .foregroundColor(voice.elevenLabsAvailable ? .secondary.opacity(0.8) : .orange)
-                            .lineLimit(nil)
-                    }
-                }
-                .toggleStyle(.switch)
-                .disabled(!voice.elevenLabsAvailable)
-
-                if voice.useElevenLabs {
-                    fieldLabel("Voice ID")
-                    styledField(TextField("例: 21m00Tcm4TlvDq8ikWAM (Rachel)", text: $voice.elevenLabsVoiceId))
-                }
-
-                Button {
-                    voice.speak("こんにちは。これは読み上げのテストです。")
-                } label: {
-                    HStack { Image(systemName: "speaker.wave.2"); Text("読み上げテスト") }
-                        .font(.system(size: 12))
-                        .foregroundColor(.blue)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
 
     private var channelsSection: some View {
         card(titleView: AnyView(

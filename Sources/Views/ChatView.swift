@@ -1,9 +1,9 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 
 struct ChatView: View {
     @EnvironmentObject var appState: AppState
-    @StateObject private var voice = VoiceManager.shared
     @Environment(\.colorScheme) var colorScheme
     @State private var composerHeight: CGFloat = CustomTextEditor.minHeight
     @State private var showModelInput = false
@@ -45,15 +45,6 @@ struct ChatView: View {
                 // Header padding — just enough to clear the floating header bar.
                 Spacer().frame(height: 40)
 
-                // 出力ビュー切替（構造化できる出力があるときだけ表示）
-                if appState.hasStructurableOutput {
-                    OutputModePicker(mode: $appState.chatOutputMode)
-                        .padding(.bottom, 8)
-                        .frame(maxWidth: contentMaxWidth)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                }
-
-                if appState.chatOutputMode == .chat {
                 // Messages Scroll
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -105,17 +96,6 @@ struct ChatView: View {
                             startPoint: .top, endPoint: .bottom
                         )
                     )
-                }
-                } else {
-                    // 構造化表示（ニュース/要約/タイムライン/テーブル）
-                    ScrollView {
-                        StructuredOutputContainer(entries: appState.latestAssistantEntries,
-                                                  mode: appState.chatOutputMode)
-                            .frame(maxWidth: contentMaxWidth, alignment: .leading)
-                            .padding(.horizontal, 32)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.top, 4).padding(.bottom, 20)
-                    }
                 }
 
                 // Composer at bottom (capped width, centered)
@@ -334,18 +314,6 @@ struct ChatView: View {
                         .fixedSize()
 
                         Button(action: {
-                            voice.toggle(base: appState.inputValue) { text in
-                                appState.inputValue = text
-                            }
-                        }) {
-                            Image(systemName: voice.isListening ? "mic.fill" : "mic")
-                                .font(.system(size: 13))
-                                .foregroundColor(voice.isListening ? .red : .primary.opacity(0.7))
-                        }
-                        .buttonStyle(.plain)
-                        .help(voice.unavailable ? "音声認識が利用できません（権限を確認）" : "音声入力")
-                        
-                        Button(action: {
                             if appState.isStreaming {
                                 appState.cancelStreaming()
                             } else {
@@ -381,20 +349,26 @@ struct ChatView: View {
                 handleFileDrop(providers)
             }
             
-            // Badges
+            // Badges — show the ACTUAL working folder (cwd) so it's clear where files land.
             HStack(spacing: 12) {
                 HStack(spacing: 4) {
-                    Image(systemName: "folder")
-                    Text(appState.workspaceName)
+                    Image(systemName: appState.activeEmployee != nil ? "person.crop.square" : "folder")
+                    Text(appState.effectiveCwdDisplay)
+                        .lineLimit(1).truncationMode(.middle)
+                        .frame(maxWidth: 420, alignment: .leading)
                 }
+                .help("作業フォルダ: \(appState.effectiveCwd)")
                 Text("ローカルで作業")
-                HStack(spacing: 4) {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                    Text("main")
+                if let branch = appState.effectiveCwdBranch {
+                    HStack(spacing: 4) {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                        Text(branch)
+                    }
                 }
             }
             .font(.system(size: 11))
             .foregroundColor(.secondary.opacity(0.6))
+            .frame(maxWidth: contentMaxWidth)
             .padding(.top, 12)
         }
         .alert("カスタムモデル", isPresented: $showModelInput) {
@@ -560,6 +534,29 @@ struct MessageBlock: View {
             failurePolicy: .returnPartiallyParsedIfPossible
         )
         return (try? AttributedString(markdown: s, options: opts)) ?? AttributedString(s)
+    }
+
+    /// Extract `[name](file://...)` links from a reply → (name, percent-decoded absolute path).
+    static func fileLinks(_ s: String) -> [(name: String, path: String)] {
+        guard let re = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(file://([^)\s]+)\)"#) else { return [] }
+        let ns = s as NSString
+        var out: [(name: String, path: String)] = []
+        var seen = Set<String>()
+        for m in re.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
+            let name = ns.substring(with: m.range(at: 1))
+            let raw = ns.substring(with: m.range(at: 2))
+            let path = raw.removingPercentEncoding ?? raw
+            if seen.insert(path).inserted { out.append((name: name, path: path)) }
+        }
+        return out
+    }
+
+    /// Replace inline `[name](file://...)` links with just `name`, so prose reads cleanly —
+    /// the clickable file is rendered as a chip below the reply instead of a raw file:// URL.
+    static func stripFileLinks(_ s: String) -> String {
+        guard let re = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(file://[^)\s]+\)"#) else { return s }
+        let ns = s as NSString
+        return re.stringByReplacingMatches(in: s, range: NSRange(location: 0, length: ns.length), withTemplate: "$1")
     }
 
     /// A block-level element of prose (everything between fenced code blocks).
@@ -755,8 +752,9 @@ struct MessageBlock: View {
                                 .textSelection(.enabled)
                         } else {
                             // Final: split fenced code blocks out for monospace + copy.
+                            // File links are pulled out into chips below, so strip them here.
                             VStack(alignment: .leading, spacing: 8) {
-                                ForEach(Array(MessageBlock.segments(msg.content).enumerated()), id: \.offset) { _, seg in
+                                ForEach(Array(MessageBlock.segments(MessageBlock.stripFileLinks(msg.content)).enumerated()), id: \.offset) { _, seg in
                                     switch seg {
                                     case .text(let t):
                                         ProseView(text: t, isError: msg.isError)
@@ -765,6 +763,20 @@ struct MessageBlock: View {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // File links in the reply → clickable file chips (real file icon + name,
+                    // opens on tap). Shown once streaming has finished.
+                    if msg.role == .assistant, !msg.typewriter {
+                        let files = MessageBlock.fileLinks(msg.content)
+                        if !files.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(Array(files.enumerated()), id: \.offset) { _, f in
+                                    FileChipView(name: f.name, path: f.path)
+                                }
+                            }
+                            .padding(.top, 2)
                         }
                     }
 
@@ -839,16 +851,9 @@ struct MessageBlock: View {
                 .background(msg.role == .user ? Color.primary.opacity(0.05) : Color.clear)
                 .cornerRadius(8)
 
-                // Meta: read-aloud + elapsed time + token count (assistant replies)
+                // Meta: artifact save + elapsed time + token count (assistant replies)
                 if msg.role == .assistant, !msg.content.isEmpty {
                     HStack(spacing: 10) {
-                        Button {
-                            VoiceManager.shared.speak(msg.content)
-                        } label: {
-                            Image(systemName: "speaker.wave.2")
-                        }
-                        .buttonStyle(.plain)
-                        .help("読み上げ")
                         // Save this reply as an artifact for the active employee.
                         if let emp = appState.activeEmployee, msg.delegatedName == nil {
                             Button {
@@ -890,6 +895,51 @@ struct MessageBlock: View {
 
 /// Renders a prose segment as block elements — headings, bullet/ordered lists, and
 /// paragraphs each on their own line — so a reply isn't mashed into one run-on block.
+/// A clickable file chip — real file icon + name (+ abbreviated path). Tapping opens the
+/// file with its default app; if that fails (or it's missing) it reveals it in Finder.
+struct FileChipView: View {
+    @EnvironmentObject var appState: AppState
+    let name: String
+    let path: String
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 8) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                    .resizable().frame(width: 24, height: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name).font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary).lineLimit(1)
+                    Text((path as NSString).abbreviatingWithTildeInPath)
+                        .font(.system(size: 10)).foregroundColor(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 6)
+                Image(systemName: "arrow.up.forward.app").font(.system(size: 12)).foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .frame(maxWidth: 380, alignment: .leading)
+            .background(Color.primary.opacity(0.05)).cornerRadius(8)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(path)
+    }
+
+    private func open() {
+        let url = URL(fileURLWithPath: path)
+        if FileManager.default.fileExists(atPath: path) {
+            if !NSWorkspace.shared.open(url) {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        } else {
+            appState.triggerToast(message: "ファイルが見つかりません: \((path as NSString).lastPathComponent)")
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+    }
+}
+
 /// Inline markdown (bold/italic/code/links) is rendered within each block.
 struct ProseView: View {
     let text: String

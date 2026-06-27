@@ -125,6 +125,18 @@ final class AntigravityCLI {
         var args = ["-p", prompt]
         let m = model.trimmingCharacters(in: .whitespacesAndNewlines)
         if !m.isEmpty { args.append(contentsOf: ["--model", m]) }
+        // Scope agy's workspace to the (employee's) working folder so file operations
+        // ("このフォルダ" / relative paths) land there instead of agy's own default scratch
+        // (~/.gemini/antigravity-cli/scratch). Setting the OS cwd alone is NOT honored by agy —
+        // `--add-dir` is its native way to add a directory to the session workspace.
+        // Skip when cwd is the home dir (employee has no dedicated folder) so we don't add all
+        // of $HOME to the workspace.
+        let trimmedCwd = cwd.trimmingCharacters(in: .whitespaces)
+        var isDir: ObjCBool = false
+        if !trimmedCwd.isEmpty, trimmedCwd != NSHomeDirectory(),
+           FileManager.default.fileExists(atPath: trimmedCwd, isDirectory: &isDir), isDir.boolValue {
+            args.append(contentsOf: ["--add-dir", trimmedCwd])
+        }
         process.arguments = args
         // Reuse Hermes' merged shell env (PATH, etc.) so `agy` resolves its own deps.
         process.environment = HermesCLI.shared.mergedEnvironment

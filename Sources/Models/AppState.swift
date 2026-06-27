@@ -196,7 +196,8 @@ struct HermesCronJob: Identifiable, Equatable {
     let script: String?
     let mode: String?
     let lastRun: String?
-    
+    let lastError: String?   // 直近の実行/配信エラー（`⚠ ...` 行）。正常時は nil
+
     var isActive: Bool {
         return status == "active"
     }
@@ -289,6 +290,33 @@ class AppState: ObservableObject {
     // Optional iOS OAuth client ID for `aud` verification (defense-in-depth). Empty = skip aud check.
     @Published var mobileAllowedClientID: String = UserDefaults.standard.string(forKey: "mobileAllowedClientID") ?? "" {
         didSet { UserDefaults.standard.set(mobileAllowedClientID, forKey: "mobileAllowedClientID") }
+    }
+
+    /// ローカル自動化キー。同一マシンの cron ジョブが `Authorization: Bearer <key>` で送ると
+    /// MobileServer に Google ID トークンなしで到達できる（Tailscale 越しは従来通り Google 認証）。
+    /// `~/.hermes/.env` の `HERMES_LOCAL_API_KEY` に保存。初回は自動生成。
+    /// 注: `~/.hermes/.env` を読めるローカルプロセスはこのキーを利用可能（同一マシン信頼前提）。
+    @Published var localAutomationKey: String = AppState.loadOrCreateLocalKey()
+
+    static var hermesEnvPath: String { NSHomeDirectory() + "/.hermes/.env" }
+    static func loadOrCreateLocalKey() -> String {
+        let path = hermesEnvPath
+        if let txt = try? String(contentsOfFile: path, encoding: .utf8) {
+            for raw in txt.split(separator: "\n") {
+                let l = raw.trimmingCharacters(in: .whitespaces)
+                if l.hasPrefix("HERMES_LOCAL_API_KEY=") {
+                    let v = String(l.dropFirst("HERMES_LOCAL_API_KEY=".count))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                    if !v.isEmpty { return v }
+                }
+            }
+        }
+        let key = "loc_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        var body = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        if !body.isEmpty, !body.hasSuffix("\n") { body += "\n" }
+        body += "HERMES_LOCAL_API_KEY=\(key)\n"
+        try? body.write(toFile: path, atomically: true, encoding: .utf8)
+        return key
     }
 
     // APNs push notifications (Mac acts as the push provider)
@@ -421,6 +449,29 @@ class AppState: ObservableObject {
     }
     @Published var workTasks: [WorkTask] = AppState.loadTasks() {
         didSet { AppState.saveJSON(workTasks, "workTasks"); scheduleICloudPush() }
+    }
+
+    // Health data pushed from the iOS app (HealthKit). Device-local (not iCloud-synced).
+    @Published var latestHealth: HealthSnapshot? = AppState.loadJSON("latestHealth") {
+        didSet { AppState.saveJSON(latestHealth, "latestHealth") }
+    }
+    func updateHealth(_ snap: HealthSnapshot) { latestHealth = snap }
+
+    /// 健康データの日本語1行サマリー（健康アドバイザーのチャットへ注入／表示用）。データ無しは nil。
+    var healthSummaryLine: String? {
+        guard let h = latestHealth else { return nil }
+        var parts: [String] = []
+        if let v = h.steps { parts.append("歩数 \(v)歩") }
+        if let v = h.distanceKm { parts.append(String(format: "距離 %.1fkm", v)) }
+        if let v = h.activeEnergyKcal { parts.append("消費エネルギー \(Int(v))kcal") }
+        if let v = h.exerciseMinutes { parts.append("運動 \(v)分") }
+        if let v = h.heartRate { parts.append("心拍 \(v)bpm") }
+        if let v = h.restingHeartRate { parts.append("安静時心拍 \(v)bpm") }
+        if let v = h.sleepHours { parts.append(String(format: "睡眠 %.1f時間", v)) }
+        if let v = h.bodyMassKg { parts.append(String(format: "体重 %.1fkg", v)) }
+        guard !parts.isEmpty else { return nil }
+        let day = (h.date?.isEmpty == false) ? "（\(h.date!)）" : ""
+        return "ユーザーの健康データ\(day): " + parts.joined(separator: " / ")
     }
     // Per-employee deliverables (Phase E), persisted + synced like tasks.
     @Published var artifacts: [Artifact] = AppState.loadArtifacts() {
@@ -1184,6 +1235,19 @@ class AppState: ObservableObject {
     /// employee's workspace, else the selected GitHub repo, else home.
     var effectiveCwd: String { cwdOverride ?? activeEmployee?.workspacePath ?? selectedRepoPath ?? NSHomeDirectory() }
 
+    /// Tilde-abbreviated working-folder path for the composer badge (full path via `.help`).
+    var effectiveCwdDisplay: String { (effectiveCwd as NSString).abbreviatingWithTildeInPath }
+
+    /// Current git branch of the working folder, read straight from `.git/HEAD` (no subprocess).
+    /// Returns nil when the folder isn't a git repo — the branch badge is hidden in that case.
+    var effectiveCwdBranch: String? {
+        let head = (effectiveCwd as NSString).appendingPathComponent(".git/HEAD")
+        guard let s = try? String(contentsOfFile: head, encoding: .utf8) else { return nil }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = t.range(of: "ref: refs/heads/") { return String(t[r.upperBound...]) }
+        return t.isEmpty ? nil : String(t.prefix(7))   // detached HEAD → short sha
+    }
+
     // MARK: Employee persistence
     static func loadEmployees() -> [Employee] {
         guard let data = UserDefaults.standard.data(forKey: "employees"),
@@ -1220,6 +1284,9 @@ class AppState: ObservableObject {
     @Published var newCronNoAgent: Bool = false
     // Phase D: the AI employee a scheduled task runs as (persona-wrapped).
     @Published var newCronAssigneeId: String? = nil
+
+    /// 作成フォームをモーダル（シート）で表示するか。「使う」/「このフローを設定」/新規作成で開く。
+    @Published var showCronCreateSheet = false
 
     // 株モニタリング: 保有銘柄リスト & 株価APIキー(Twelve Data)。ディスク(~/.hermes/scripts/)が真実、
     // これらは編集用バッファ。保存で書き出し、スクリプト(stock-monitor.py)が読む。
@@ -1793,9 +1860,19 @@ class AppState: ObservableObject {
             let list = paths.map { "- \($0)" }.joined(separator: "\n")
             return "\n\n【添付ファイル】以下のローカルファイルを読んで対応してください:\n\(list)"
         }()
+        // 健康アドバイザー社員とのチャットには、最新の健康データ(HealthKit由来)を文脈として
+        // 前置する（表示メッセージには出さない）。「今日の歩数は？」等に答えられるように。
+        let healthContext: String = {
+            guard let emp = activeEmployee,
+                  emp.name.contains("健康") || emp.name.lowercased().contains("health"),
+                  let line = healthSummaryLine else { return "" }
+            return "【参考データ（連携中のHealthKit）】\(line)\n\n"
+        }()
+
         var effectivePrompt = text
         if effectivePrompt.isEmpty { effectivePrompt = imagePath != nil ? "添付した画像について説明してください。" : "添付したファイルを確認してください。" }
         effectivePrompt += fileRefs
+        if !healthContext.isEmpty { effectivePrompt = healthContext + effectivePrompt }
         let sentPrompt = wrapForSend(effectivePrompt)
         let kind = BackendRouter.selectKind(provider: provider, useACP: useACPTransport)
 
@@ -1808,6 +1885,7 @@ class AppState: ObservableObject {
             var userText = text.isEmpty ? "添付したファイルを確認してください。" : text
             userText += fileRefs
             if imagePath != nil { userText += "\n\n（注: 添付画像は Antigravity CLI では無視されます）" }
+            if !healthContext.isEmpty { userText = healthContext + userText }
             agyPrompt = antigravityPrompt(userText, employee: activeEmployee, mode: agentMode)
         }
 
@@ -2677,6 +2755,23 @@ class AppState: ObservableObject {
                      "よろしく", "頼む", "たのむ"] {
             while t.hasSuffix(tail) { t = String(t.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
         }
+
+        // 中央形「（Task|タスク|TODO）に <X>（を）追加/登録/作成」。英語の Task/TODO も許容。
+        // 「タスクについて教えて」等の誤爆を避けるため、末尾が追加系の動詞の時だけ。
+        let lower = t.lowercased()
+        let middleLeads = ["task に", "taskに", "タスクに", "タスク に", "todoに", "todo に", "to do に"]
+        if let lead = middleLeads.first(where: { lower.hasPrefix($0) }),
+           ["追加", "登録", "作成"].contains(where: { t.hasSuffix($0) }) {
+            var mid = String(t.dropFirst(lead.count)).trimmingCharacters(in: .whitespaces)
+            for v in ["を追加", "に追加", "を登録", "を作成", "追加", "登録", "作成"] {
+                if mid.hasSuffix(v) { mid = String(mid.dropLast(v.count)).trimmingCharacters(in: .whitespaces); break }
+            }
+            for tail in ["の", "を", "、", ",", "という", "って", "に"] {
+                if mid.hasSuffix(tail) { mid = String(mid.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
+            }
+            let stop: Set<String> = ["新しい", "この", "その", "あの", "次の", "新規", "それ", "これ", "あれ", "タスク", "task", "todo"]
+            if mid.count >= 2, !stop.contains(mid.lowercased()) { return mid }
+        }
         let verbs = ["タスクとして追加", "タスクを追加", "タスクに追加", "タスクを作成", "タスクを登録",
                      "タスク追加", "タスク作成", "タスク登録", "TODOに追加", "ToDoに追加", "todoに追加"]
         for v in verbs where t.hasSuffix(v) {
@@ -2695,6 +2790,21 @@ class AppState: ObservableObject {
     func setTaskStatus(_ taskId: String, _ status: TaskStatus) {
         guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
         workTasks[idx].status = status
+        workTasks[idx].updatedAt = Date().timeIntervalSince1970
+    }
+
+    /// タスクのタイトルを編集（空は無視）。
+    func updateTaskTitle(_ taskId: String, _ title: String) {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
+        workTasks[idx].title = t
+        workTasks[idx].updatedAt = Date().timeIntervalSince1970
+    }
+
+    /// 締め切り期限を設定/解除（nil で解除）。
+    func setTaskDue(_ taskId: String, _ due: Double?) {
+        guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
+        workTasks[idx].dueDate = due
         workTasks[idx].updatedAt = Date().timeIntervalSince1970
     }
 
@@ -4447,9 +4557,13 @@ class AppState: ObservableObject {
         guard t.lowercased().contains("line") || t.contains("ライン") else { return false }
         let sendVerbs = ["送って", "送信", "送る", "送っといて", "送っておいて", "プッシュ", "通知して", "通知", "メッセージして", "伝えて", "知らせて"]
         guard sendVerbs.contains(where: { t.contains($0) }) else { return false }
-        // Reject "how-to" questions that merely mention LINE (unless an explicit quote is present).
+        // Reject "how-to" questions and conditional/recurring phrasing (unless an explicit quote
+        // pins the exact message text). 条件・反復表現（「〜たら」「定期的に」「毎日」など）は
+        // 一回限りの送信ではなく『自動化を組んでほしい』という意図なので、文字通り送らない。
         if !t.contains("「") && !t.contains("『") {
-            for q in ["使い方", "とは", "教えて", "どうやって", "方法", "設定", "繋ぎ方", "つなぎ方", "連携", "とは何"] where t.contains(q) {
+            let howTo = ["使い方", "とは", "教えて", "どうやって", "方法", "設定", "繋ぎ方", "つなぎ方", "連携", "とは何"]
+            let automationCues = ["たら", "次第", "毎日", "毎時", "毎週", "毎朝", "毎晩", "定期", "ごとに", "都度", "監視", "あれば", "出たら"]
+            for q in howTo + automationCues where t.contains(q) {
                 return false
             }
         }
@@ -4537,7 +4651,7 @@ class AppState: ObservableObject {
         newCronDeliver = s.deliver.isEmpty ? "local" : s.deliver
         newCronScript = ""
         newCronNoAgent = false
-        triggerToast(message: "提案をフォームに反映しました。内容を確認して『タスクを作成』。")
+        showCronCreateSheet = true   // 反映した内容を作成モーダルで開く
     }
 
     /// Ask the agent to propose automations (best-effort; parsed from pipe-delimited lines).
@@ -4678,7 +4792,8 @@ class AppState: ObservableObject {
         var currentScript: String? = nil
         var currentMode: String? = nil
         var currentLastRun: String? = nil
-        
+        var currentLastError: String? = nil
+
         func saveCurrentJob() {
             if !currentId.isEmpty {
                 jobs.append(HermesCronJob(
@@ -4691,7 +4806,8 @@ class AppState: ObservableObject {
                     status: currentStatus,
                     script: currentScript,
                     mode: currentMode,
-                    lastRun: currentLastRun
+                    lastRun: currentLastRun,
+                    lastError: currentLastError
                 ))
             }
         }
@@ -4717,6 +4833,7 @@ class AppState: ObservableObject {
                         currentScript = nil
                         currentMode = nil
                         currentLastRun = nil
+                        currentLastError = nil
                     }
                 }
             } else if !currentId.isEmpty && rawLine.hasPrefix("    ") {
@@ -4736,6 +4853,11 @@ class AppState: ObservableObject {
                     currentMode = trimmed.replacingOccurrences(of: "Mode:", with: "").trimmingCharacters(in: .whitespaces)
                 } else if trimmed.hasPrefix("Last run:") {
                     currentLastRun = trimmed.replacingOccurrences(of: "Last run:", with: "").trimmingCharacters(in: .whitespaces)
+                } else if trimmed.hasPrefix("⚠") || trimmed.lowercased().contains("delivery failed") {
+                    // 例: "⚠ Delivery failed: delivery error: LINE push 401: {...}"
+                    currentLastError = trimmed
+                        .replacingOccurrences(of: "⚠", with: "")
+                        .trimmingCharacters(in: .whitespaces)
                 }
             }
         }
@@ -4822,7 +4944,28 @@ class AppState: ObservableObject {
         return res.success
     }
 
-    func handleCreateCronJob() async {
+    /// 既存のスケジュールタスクを編集（`hermes cron edit`）。空でない項目だけ更新する。
+    func cronEdit(id: String, schedule: String, name: String, deliver: String) async -> Bool {
+        var args = ["cron", "edit", id]
+        let s = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !s.isEmpty { args.append(contentsOf: ["--schedule", s]) }
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !n.isEmpty { args.append(contentsOf: ["--name", n]) }
+        let d = deliver.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !d.isEmpty { args.append(contentsOf: ["--deliver", d]) }
+        guard args.count > 3 else { return false }   // 変更項目なし
+        let res = await HermesCLI.shared.exec(args: args)
+        if res.success {
+            triggerToast(message: "スケジュールタスクを更新しました。")
+            await fetchCronJobs()
+        } else {
+            triggerToast(message: "更新に失敗: \(res.stderr)")
+        }
+        return res.success
+    }
+
+    @discardableResult
+    func handleCreateCronJob() async -> Bool {
         let name = newCronName.trimmingCharacters(in: .whitespacesAndNewlines)
         let schedule = newCronSchedule.trimmingCharacters(in: .whitespacesAndNewlines)
         var prompt = newCronPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4832,10 +4975,10 @@ class AppState: ObservableObject {
         }
         let deliver = newCronDeliver.trimmingCharacters(in: .whitespacesAndNewlines)
         let script = newCronScript.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         guard !schedule.isEmpty else {
             triggerToast(message: "スケジュールを入力してください。")
-            return
+            return false
         }
         
         self.isCreatingCronJob = true
@@ -4873,6 +5016,18 @@ class AppState: ObservableObject {
             triggerToast(message: "作成に失敗しました: \(res.stderr)")
         }
         self.isCreatingCronJob = false
+        return res.success
+    }
+
+    /// 作成フォームを初期状態へリセット（モーダルを「新規作成」で開く前に呼ぶ）。
+    func resetNewCronForm() {
+        newCronName = ""
+        newCronSchedule = ""
+        newCronPrompt = ""
+        newCronDeliver = "local"
+        newCronScript = ""
+        newCronAssigneeId = nil
+        newCronNoAgent = false
     }
 
     // MARK: - 株モニタリング (証券アナリスト × cron × LINE)
@@ -4956,10 +5111,9 @@ class AppState: ObservableObject {
         newCronDeliver = firstLineChannelId.map { "line:\($0)" } ?? "local"
         newCronPrompt = "次のスクリプト出力は、ユーザーの保有銘柄の最新株価(前日比)と関連ニュース見出しです。これを分析し、保有銘柄に影響しそうな重要な変動・ニュースを中心に、要点を日本語で簡潔にまとめて、LINE通知向けの短いレポートにしてください。各銘柄の前日比と注目すべきニュースの見出しを優先し、全体は読みやすい長さに。最後に「※投資助言ではなく情報整理です」と一言添えてください。"
         view = "automations"
+        showCronCreateSheet = true   // 反映した内容を作成モーダルで開く
         if firstLineChannelId == nil {
-            triggerToast(message: "反映しました。LINE宛先が未登録のため配信先は『local』です（後で変更可）。内容を確認して『タスクを作成』。")
-        } else {
-            triggerToast(message: "株モニタリングをフォームに反映しました。内容を確認して『タスクを作成』。")
+            triggerToast(message: "LINE宛先が未登録のため配信先は『local』です（後で変更可）。")
         }
     }
 }

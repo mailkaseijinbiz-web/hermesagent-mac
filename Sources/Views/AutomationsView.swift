@@ -51,26 +51,6 @@ struct AutomationsView: View {
                 // Section: 株モニタリング (quick setup — 保有銘柄 + LINE通知フロー)
                 StockMonitorCard()
 
-                // Section 0: Proactive automation results (H4)
-                if !appState.automationResults.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("最近の自動実行結果")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.secondary)
-
-                        VStack(spacing: 8) {
-                            ForEach(Array(appState.automationResults.prefix(3))) { result in
-                                AutomationResultCard(result: result)
-                            }
-                        }
-                        if appState.automationResults.count > 3 {
-                            Text("他 \(appState.automationResults.count - 3) 件")
-                                .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.7))
-                                .padding(.leading, 4)
-                        }
-                    }
-                }
-
                 // Section 0.5: Suggested automations (collapsible — 既定で閉じる)
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 6) {
@@ -118,136 +98,24 @@ struct AutomationsView: View {
                     }
                 }
 
-                // Section 1: Create Cron Job Form
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("新しいスケジュールタスクを作成")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    
-                    VStack(spacing: 12) {
-                        HStack(spacing: 12) {
-                            TextField("タスク名 (例: daily_health_check)", text: $appState.newCronName)
-                                .textFieldStyle(.plain)
-                                .padding(8)
-                                .background(Color.primary.opacity(0.05))
-                                .cornerRadius(6)
-                            
-                            TextField("スケジュール (例: 0 9 * * *, 30m, every 2h)", text: $appState.newCronSchedule)
-                                .textFieldStyle(.plain)
-                                .padding(8)
-                                .background(Color.primary.opacity(0.05))
-                                .cornerRadius(6)
-                        }
-                        
-                        TextField("エージェントへの指示プロンプト (例: 今日の天気を調べてサマリーを送信して)", text: $appState.newCronPrompt)
-                            .textFieldStyle(.plain)
-                            .padding(8)
-                            .background(Color.primary.opacity(0.05))
-                            .cornerRadius(6)
-                        
-                        HStack(spacing: 12) {
-                            // 配信先（ドロップダウン選択）
-                            Menu {
-                                Button { appState.newCronDeliver = "local" } label: {
-                                    Label("ローカル（アプリ内のみ）", systemImage: appState.newCronDeliver == "local" || appState.newCronDeliver.isEmpty ? "checkmark" : "")
-                                }
-                                Button { appState.newCronDeliver = "origin" } label: {
-                                    Label("送信元へ返信", systemImage: appState.newCronDeliver == "origin" ? "checkmark" : "")
-                                }
-                                if !appState.channels.isEmpty {
-                                    Divider()
-                                    ForEach(appState.channels) { ch in
-                                        let val = "\(ch.platform):\(ch.channelId)"
-                                        Button { appState.newCronDeliver = val } label: {
-                                            Label(channelMenuLabel(ch), systemImage: appState.newCronDeliver == val ? "checkmark" : "")
-                                        }
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "paperplane").font(.system(size: 11)).foregroundColor(.secondary)
-                                    Text(deliverDisplayLabel(appState.newCronDeliver))
-                                        .font(.system(size: 12)).foregroundColor(.primary)
-                                        .lineLimit(1).truncationMode(.middle)
-                                    Spacer(minLength: 4)
-                                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 8)).foregroundColor(.secondary)
-                                }
-                                .padding(8)
-                                .background(Color.primary.opacity(0.05)).cornerRadius(6)
-                            }
-                            .menuStyle(.borderlessButton)
-                            .frame(maxWidth: .infinity)
-
-                            TextField("スクリプトパス (任意)", text: $appState.newCronScript)
-                                .textFieldStyle(.plain)
-                                .padding(8)
-                                .background(Color.primary.opacity(0.05))
-                                .cornerRadius(6)
-                        }
-                        
-                        HStack {
-                            if !appState.employees.isEmpty {
-                                Menu {
-                                    Button { appState.newCronAssigneeId = nil } label: {
-                                        Label("担当なし", systemImage: appState.newCronAssigneeId == nil ? "checkmark" : "")
-                                    }
-                                    ForEach(appState.sortedEmployees) { e in
-                                        Button { appState.newCronAssigneeId = e.id } label: {
-                                            Label("\(e.role.emoji) \(e.name)", systemImage: appState.newCronAssigneeId == e.id ? "checkmark" : "")
-                                        }
-                                    }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "person.crop.circle").font(.system(size: 11))
-                                        Text(appState.employees.first { $0.id == appState.newCronAssigneeId }?.name ?? "担当社員")
-                                            .font(.system(size: 11))
-                                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
-                                    }.foregroundColor(.secondary)
-                                }.menuStyle(.borderlessButton).fixedSize()
-                            }
-
-                            Toggle("LLMを介さずスクリプトを直接実行 (--no-agent)", isOn: $appState.newCronNoAgent)
-                                .toggleStyle(.checkbox)
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary)
-
-                            Spacer()
-                            
-                            Button(action: {
-                                Task {
-                                    await appState.handleCreateCronJob()
-                                }
-                            }) {
-                                HStack {
-                                    if appState.isCreatingCronJob {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                            .padding(.trailing, 4)
-                                        Text("作成中...")
-                                    } else {
-                                        Text("タスクを作成")
-                                    }
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .background(colorScheme == .dark ? Color.white : Color.black)
-                                .foregroundColor(colorScheme == .dark ? .black : .white)
-                                .font(.system(size: 12, weight: .semibold))
-                                .cornerRadius(6)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(appState.isCreatingCronJob || appState.newCronSchedule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
+                // Section 1: 新しいスケジュールタスクを作成（モーダルで開く）
+                Button {
+                    appState.resetNewCronForm()
+                    appState.showCronCreateSheet = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.circle.fill").font(.system(size: 14))
+                        Text("新しいスケジュールタスクを作成").font(.system(size: 13, weight: .semibold))
+                        Spacer()
                     }
+                    .foregroundColor(.accentColor)
+                    .padding(14)
+                    .background(Color.accentColor.opacity(0.08)).cornerRadius(10)
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor.opacity(0.25), lineWidth: 0.5))
+                    .contentShape(Rectangle())
                 }
-                .padding(16)
-                .background(Color.primary.opacity(0.02))
-                .cornerRadius(10)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.primary.opacity(0.05), lineWidth: 0.5)
-                )
-                
+                .buttonStyle(.plain)
+
                 // Section 2: Cron Jobs List
                 VStack(alignment: .leading, spacing: 16) {
                     Text("スケジュールされているジョブ")
@@ -306,28 +174,69 @@ struct AutomationsView: View {
             appState.fetchAutomationResults()
             appState.fetchChannels()
         }
+        .sheet(isPresented: $appState.showCronCreateSheet) {
+            CronCreateSheet().environmentObject(appState)
+        }
+    }
+
+}
+
+/// 配信先ドロップダウン（ローカル / 送信元 / 登録チャンネル）。作成・編集フォームで共通利用。
+struct DeliverPicker: View {
+    @EnvironmentObject var appState: AppState
+    @Binding var deliver: String
+
+    var body: some View {
+        Menu {
+            Button { deliver = "local" } label: {
+                Label("ローカル（アプリ内のみ）", systemImage: deliver == "local" || deliver.isEmpty ? "checkmark" : "")
+            }
+            Button { deliver = "origin" } label: {
+                Label("送信元へ返信", systemImage: deliver == "origin" ? "checkmark" : "")
+            }
+            if !appState.channels.isEmpty {
+                Divider()
+                ForEach(appState.channels) { ch in
+                    let val = "\(ch.platform):\(ch.channelId)"
+                    Button { deliver = val } label: {
+                        Label(Self.channelMenuLabel(ch), systemImage: deliver == val ? "checkmark" : "")
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "paperplane").font(.system(size: 11)).foregroundColor(.secondary)
+                Text(displayLabel)
+                    .font(.system(size: 12)).foregroundColor(.primary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 8)).foregroundColor(.secondary)
+            }
+            .padding(8)
+            .background(Color.primary.opacity(0.05)).cornerRadius(6)
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var displayLabel: String {
+        switch deliver {
+        case "", "local": return "ローカル（アプリ内のみ）"
+        case "origin": return "送信元へ返信"
+        default:
+            if let ch = appState.channels.first(where: { "\($0.platform):\($0.channelId)" == deliver }) {
+                return Self.channelMenuLabel(ch)
+            }
+            return deliver
+        }
     }
 
     /// 配信先メニューの各チャンネル表示名（LINEの長いIDは末尾だけ短縮）。
-    private func channelMenuLabel(_ ch: HermesChannel) -> String {
+    static func channelMenuLabel(_ ch: HermesChannel) -> String {
         let plat = ch.platform.uppercased()
         if ch.name == ch.channelId && ch.channelId.count > 12 {
             return "\(plat)（…\(ch.channelId.suffix(6))）"
         }
         return "\(plat)：\(ch.name.isEmpty ? ch.channelId : ch.name)"
-    }
-
-    /// 現在の配信先の表示ラベル（local/origin/登録済みチャンネル/手入力カスタム）。
-    private func deliverDisplayLabel(_ value: String) -> String {
-        switch value {
-        case "", "local": return "ローカル（アプリ内のみ）"
-        case "origin": return "送信元へ返信"
-        default:
-            if let ch = appState.channels.first(where: { "\($0.platform):\($0.channelId)" == value }) {
-                return channelMenuLabel(ch)
-            }
-            return value
-        }
     }
 }
 
@@ -551,8 +460,11 @@ struct CronJobRow: View {
     @State private var isPendingAction = false
     @State private var isHovered = false
     @State private var showRunConfirm = false
-    
+    @State private var showEdit = false
+    @State private var showResults = false
+
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
         HStack(spacing: 16) {
             Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 20))
@@ -596,6 +508,17 @@ struct CronJobRow: View {
                             .font(.system(size: 10))
                             .foregroundColor(.secondary.opacity(0.6))
                     }
+
+                    if let err = job.lastError, !err.isEmpty {
+                        HStack(alignment: .top, spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9))
+                            Text(err)
+                                .font(.system(size: 10)).lineLimit(2)
+                                .textSelection(.enabled)
+                        }
+                        .foregroundColor(.orange)
+                        .help(err)
+                    }
                 }
             }
             
@@ -606,6 +529,20 @@ struct CronJobRow: View {
                     .controlSize(.small)
                     .padding(.trailing, 10)
             } else {
+                // 編集（名前・スケジュール・配信先）
+                Button(action: { showEdit = true }) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(Color.primary.opacity(0.05)).cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .help("スケジュール・名前・配信先を編集")
+                .popover(isPresented: $showEdit, arrowEdge: .bottom) {
+                    CronEditView(job: job) { showEdit = false }
+                }
+
                 // テスト実行（今すぐ実行 → 配信先へ送信）
                 Button(action: { showRunConfirm = true }) {
                     HStack(spacing: 4) {
@@ -668,6 +605,254 @@ struct CronJobRow: View {
                     }
                 }
             }
+        }
+            // このジョブに紐づく実行結果（タイトルがジョブ名で始まるもの）を展開表示
+            resultsSection
+        }
+    }
+
+    private var jobResults: [AppState.AutomationResult] {
+        appState.automationResults.filter { $0.title.hasPrefix(job.name) }
+    }
+
+    @ViewBuilder private var resultsSection: some View {
+        let results = jobResults
+        if !results.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Button { withAnimation(.easeInOut(duration: 0.12)) { showResults.toggle() } } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: showResults ? "chevron.down" : "chevron.right").font(.system(size: 9))
+                        Text("実行結果 \(results.count)件").font(.system(size: 11, weight: .medium))
+                        if let latest = results.first {
+                            Text("· 最新 \(Self.relTime(latest.updatedAt))")
+                                .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.7))
+                        }
+                        Spacer()
+                    }
+                    .foregroundColor(.secondary).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if showResults {
+                    ForEach(Array(results.prefix(8))) { r in
+                        Button {
+                            Task { await appState.handleSelectSession(sessionId: r.id) }
+                            appState.view = "chat"
+                        } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack(spacing: 6) {
+                                    Text(r.title).font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.primary).lineLimit(1)
+                                    Spacer()
+                                    Text(Self.relTime(r.updatedAt))
+                                        .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.7))
+                                }
+                                if !r.preview.isEmpty {
+                                    Text(r.preview).font(.system(size: 10))
+                                        .foregroundColor(.secondary).lineLimit(1)
+                                }
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.03)).cornerRadius(6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.leading, 48)
+        }
+    }
+
+    private static func relTime(_ ts: Double) -> String {
+        guard ts > 0 else { return "" }
+        let f = RelativeDateTimeFormatter()
+        f.locale = Locale(identifier: "ja_JP"); f.unitsStyle = .short
+        return f.localizedString(for: Date(timeIntervalSince1970: ts), relativeTo: Date())
+    }
+}
+
+/// スケジュールタスク（cronジョブ）編集ポップオーバー：名前・スケジュール・配信先。
+/// プロンプト/スクリプトは一覧に値が無いため対象外（必要なら作り直し）。
+struct CronEditView: View {
+    @EnvironmentObject var appState: AppState
+    let job: HermesCronJob
+    let onClose: () -> Void
+    @State private var name: String
+    @State private var schedule: String
+    @State private var deliver: String
+    @State private var saving = false
+
+    init(job: HermesCronJob, onClose: @escaping () -> Void) {
+        self.job = job
+        self.onClose = onClose
+        _name = State(initialValue: job.name)
+        _schedule = State(initialValue: job.schedule)
+        _deliver = State(initialValue: job.deliver)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("スケジュールタスクを編集").font(.system(size: 13, weight: .semibold))
+
+            labeledField("タスク名") {
+                TextField("例: 株モニタリング", text: $name)
+                    .textFieldStyle(.plain).font(.system(size: 12))
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("スケジュール").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                SchedulePicker(schedule: $schedule)   // 自前で背景を持つので labeledField で包まない
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("配信先").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                DeliverPicker(deliver: $deliver)   // 自前で背景を持つので labeledField で包まない
+            }
+
+            if let sc = job.script, !sc.isEmpty {
+                Text("スクリプト: \(sc)（編集不可）")
+                    .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.7))
+            }
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("キャンセル") { onClose() }.buttonStyle(.plain).font(.system(size: 12))
+                Button {
+                    saving = true
+                    Task {
+                        let ok = await appState.cronEdit(id: job.id, schedule: schedule, name: name, deliver: deliver)
+                        saving = false
+                        if ok { onClose() }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        if saving { ProgressView().controlSize(.small) }
+                        Text("保存").font(.system(size: 12, weight: .semibold))
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 6)
+                    .background(Color.accentColor).foregroundColor(.white).cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .disabled(saving || schedule.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(16).frame(width: 340)
+    }
+
+    @ViewBuilder
+    private func labeledField<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+            content()
+                .padding(8)
+                .background(Color.primary.opacity(0.05)).cornerRadius(6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+        }
+    }
+}
+
+/// スケジュールタスク作成モーダル。名前・スケジュール(SchedulePicker)・プロンプト・配信先・
+/// スクリプト・担当社員・--no-agent を入力して作成。成功でシートを閉じる。
+struct CronCreateSheet: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.colorScheme) var colorScheme
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("新しいスケジュールタスク").font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary).frame(width: 26, height: 26)
+                        .background(Color.primary.opacity(0.06)).clipShape(Circle())
+                }.buttonStyle(.plain)
+            }
+            .padding(.bottom, 14)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    labeledField("タスク名") {
+                        TextField("例: daily_health_check", text: $appState.newCronName)
+                            .textFieldStyle(.plain).font(.system(size: 12))
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("スケジュール").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        SchedulePicker(schedule: $appState.newCronSchedule)
+                    }
+                    labeledField("エージェントへの指示プロンプト") {
+                        TextField("例: 今日の天気を調べてサマリーを送信して", text: $appState.newCronPrompt, axis: .vertical)
+                            .textFieldStyle(.plain).font(.system(size: 12)).lineLimit(1...5)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("配信先").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        DeliverPicker(deliver: $appState.newCronDeliver)
+                    }
+                    labeledField("スクリプトパス（任意）") {
+                        TextField("~/.hermes/scripts/ 配下のファイル名", text: $appState.newCronScript)
+                            .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
+                    }
+                    HStack {
+                        if !appState.employees.isEmpty {
+                            Menu {
+                                Button { appState.newCronAssigneeId = nil } label: {
+                                    Label("担当なし", systemImage: appState.newCronAssigneeId == nil ? "checkmark" : "")
+                                }
+                                ForEach(appState.sortedEmployees) { e in
+                                    Button { appState.newCronAssigneeId = e.id } label: {
+                                        Label("\(e.role.emoji) \(e.name)", systemImage: appState.newCronAssigneeId == e.id ? "checkmark" : "")
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "person.crop.circle").font(.system(size: 11))
+                                    Text(appState.employees.first { $0.id == appState.newCronAssigneeId }?.name ?? "担当社員")
+                                        .font(.system(size: 11))
+                                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
+                                }.foregroundColor(.secondary)
+                            }.menuStyle(.borderlessButton).fixedSize()
+                        }
+                        Toggle("LLMを介さずスクリプトを直接実行 (--no-agent)", isOn: $appState.newCronNoAgent)
+                            .toggleStyle(.checkbox).font(.system(size: 12)).foregroundColor(.secondary)
+                        Spacer()
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            Divider().padding(.vertical, 12)
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("キャンセル") { dismiss() }.buttonStyle(.plain).font(.system(size: 13))
+                Button {
+                    Task { if await appState.handleCreateCronJob() { dismiss() } }
+                } label: {
+                    HStack(spacing: 5) {
+                        if appState.isCreatingCronJob { ProgressView().controlSize(.small) }
+                        Text(appState.isCreatingCronJob ? "作成中..." : "作成")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .padding(.horizontal, 18).padding(.vertical, 8)
+                    .background(colorScheme == .dark ? Color.white : Color.black)
+                    .foregroundColor(colorScheme == .dark ? .black : .white).cornerRadius(7)
+                }
+                .buttonStyle(.plain)
+                .disabled(appState.isCreatingCronJob || appState.newCronSchedule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 560, height: 600)
+    }
+
+    @ViewBuilder
+    private func labeledField<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+            content()
+                .padding(8)
+                .background(Color.primary.opacity(0.05)).cornerRadius(6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
         }
     }
 }

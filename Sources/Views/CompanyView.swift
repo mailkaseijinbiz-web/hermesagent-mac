@@ -22,11 +22,8 @@ struct EmployeeAvatar: View {
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .stroke(employee.role.color.opacity(0.45), lineWidth: 1)
-        )
+        .clipShape(Circle())
+        .overlay(Circle().stroke(employee.role.color.opacity(0.45), lineWidth: 1))
         .overlay(alignment: .bottomTrailing) {
             Text(employee.role.emoji)
                 .font(.system(size: size * 0.3))
@@ -53,7 +50,6 @@ struct CompanyView: View {
                 if appState.employees.isEmpty {
                     emptyState
                 } else {
-                    usageSummary
                     teamsSection
                 }
             }
@@ -126,79 +122,6 @@ struct CompanyView: View {
         .padding(12)
         .background(Color.primary.opacity(0.02)).cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
-    }
-
-    // MARK: - Usage / cost summary (Phase 3)
-
-    private var budgetColor: Color {
-        appState.budgetState == 2 ? .red : (appState.budgetState == 1 ? .orange : .green)
-    }
-
-    private var usageSummary: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 0) {
-                statBox("今月のトークン", CompanyFmt.tokens(appState.totalTokens))
-                Divider().frame(height: 34)
-                statBox("今月の概算コスト", CompanyFmt.cost(appState.totalCostUSD))
-                Divider().frame(height: 34)
-                statBox("社員数", "\(appState.employees.count)")
-                Spacer()
-                Button { appState.refreshUsage() } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 12)).foregroundColor(.secondary)
-                }.buttonStyle(.plain).padding(.trailing, 4)
-            }
-
-            HStack(spacing: 10) {
-                Menu {
-                    Button("予算なし") { appState.monthlyBudgetUSD = 0 }
-                    ForEach([5.0, 10, 20, 50, 100, 200], id: \.self) { v in
-                        Button("$\(Int(v)) / 月") { appState.monthlyBudgetUSD = v }
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "target").font(.system(size: 10))
-                        Text(appState.monthlyBudgetUSD > 0 ? "予算 $\(Int(appState.monthlyBudgetUSD))/月" : "月予算を設定")
-                            .font(.system(size: 11))
-                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
-                    }
-                    .foregroundColor(.secondary)
-                }
-                .menuStyle(.borderlessButton).fixedSize()
-
-                if appState.monthlyBudgetUSD > 0 {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.primary.opacity(0.08))
-                            Capsule().fill(budgetColor)
-                                .frame(width: max(4, geo.size.width * appState.budgetFraction))
-                        }
-                    }
-                    .frame(height: 8)
-                    Text("\(Int((appState.budgetRatio * 100).rounded()))%")
-                        .font(.system(size: 11, weight: .semibold)).foregroundColor(budgetColor)
-                }
-            }
-
-            if appState.budgetState == 2 {
-                Text("⚠️ 今月の概算コストが予算を超えています（\(CompanyFmt.cost(appState.totalCostUSD)) / $\(Int(appState.monthlyBudgetUSD))）。安価なモデルへの切替を検討してください。")
-                    .font(.system(size: 10)).foregroundColor(.red).lineLimit(nil)
-            } else if appState.budgetState == 1 {
-                Text("予算の80%以上を使用しています。")
-                    .font(.system(size: 10)).foregroundColor(.orange)
-            }
-        }
-        .padding(.vertical, 12).padding(.horizontal, 16)
-        .background(Color.primary.opacity(0.03))
-        .cornerRadius(12)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
-    }
-
-    private func statBox(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label).font(.system(size: 10)).foregroundColor(.secondary)
-            Text(value).font(.system(size: 17, weight: .bold))
-        }
-        .padding(.trailing, 22)
     }
 
     private var header: some View {

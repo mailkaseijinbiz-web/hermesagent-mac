@@ -25,15 +25,6 @@ struct SidebarView: View {
                 SidebarMenuButton(icon: "person.3", title: "会社（AI社員）") {
                     appState.view = "company"
                 }
-                SidebarMenuButton(icon: "newspaper", title: "ニュース") {
-                    appState.view = "news"
-                }
-                SidebarMenuButton(icon: "envelope", title: "Gmail") {
-                    appState.view = "gmail"
-                }
-                SidebarMenuButton(icon: "calendar", title: "スケジュール") {
-                    appState.view = "schedule"
-                }
                 SidebarMenuButton(icon: "checklist", title: "タスク") {
                     appState.view = "tasks"
                 }
@@ -128,6 +119,23 @@ struct SidebarView: View {
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 4)
+
+                // 「〇〇のチャット」の下に「新しいチャット」（この社員の新規チャットを開始）
+                Button {
+                    appState.handleNewChat()
+                    appState.view = "chat"
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.and.pencil").font(.system(size: 12))
+                        Text("新しいチャット").font(.system(size: 13, weight: .medium))
+                        Spacer()
+                    }
+                    .foregroundColor(.accentColor)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 2)
 
                 ScrollView {
                     VStack(spacing: 2) {
