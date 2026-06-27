@@ -4506,9 +4506,13 @@ class AppState: ObservableObject {
         guard t.lowercased().contains("line") || t.contains("ライン") else { return false }
         let sendVerbs = ["送って", "送信", "送る", "送っといて", "送っておいて", "プッシュ", "通知して", "通知", "メッセージして", "伝えて", "知らせて"]
         guard sendVerbs.contains(where: { t.contains($0) }) else { return false }
-        // Reject "how-to" questions that merely mention LINE (unless an explicit quote is present).
+        // Reject "how-to" questions and conditional/recurring phrasing (unless an explicit quote
+        // pins the exact message text). 条件・反復表現（「〜たら」「定期的に」「毎日」など）は
+        // 一回限りの送信ではなく『自動化を組んでほしい』という意図なので、文字通り送らない。
         if !t.contains("「") && !t.contains("『") {
-            for q in ["使い方", "とは", "教えて", "どうやって", "方法", "設定", "繋ぎ方", "つなぎ方", "連携", "とは何"] where t.contains(q) {
+            let howTo = ["使い方", "とは", "教えて", "どうやって", "方法", "設定", "繋ぎ方", "つなぎ方", "連携", "とは何"]
+            let automationCues = ["たら", "次第", "毎日", "毎時", "毎週", "毎朝", "毎晩", "定期", "ごとに", "都度", "監視", "あれば", "出たら"]
+            for q in howTo + automationCues where t.contains(q) {
                 return false
             }
         }

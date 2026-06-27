@@ -51,26 +51,6 @@ struct AutomationsView: View {
                 // Section: 株モニタリング (quick setup — 保有銘柄 + LINE通知フロー)
                 StockMonitorCard()
 
-                // Section 0: Proactive automation results (H4)
-                if !appState.automationResults.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("最近の自動実行結果")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.secondary)
-
-                        VStack(spacing: 8) {
-                            ForEach(Array(appState.automationResults.prefix(3))) { result in
-                                AutomationResultCard(result: result)
-                            }
-                        }
-                        if appState.automationResults.count > 3 {
-                            Text("他 \(appState.automationResults.count - 3) 件")
-                                .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.7))
-                                .padding(.leading, 4)
-                        }
-                    }
-                }
-
                 // Section 0.5: Suggested automations (collapsible — 既定で閉じる)
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 6) {
@@ -481,8 +461,10 @@ struct CronJobRow: View {
     @State private var isHovered = false
     @State private var showRunConfirm = false
     @State private var showEdit = false
-    
+    @State private var showResults = false
+
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
         HStack(spacing: 16) {
             Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 20))
@@ -624,6 +606,69 @@ struct CronJobRow: View {
                 }
             }
         }
+            // このジョブに紐づく実行結果（タイトルがジョブ名で始まるもの）を展開表示
+            resultsSection
+        }
+    }
+
+    private var jobResults: [AppState.AutomationResult] {
+        appState.automationResults.filter { $0.title.hasPrefix(job.name) }
+    }
+
+    @ViewBuilder private var resultsSection: some View {
+        let results = jobResults
+        if !results.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Button { withAnimation(.easeInOut(duration: 0.12)) { showResults.toggle() } } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: showResults ? "chevron.down" : "chevron.right").font(.system(size: 9))
+                        Text("実行結果 \(results.count)件").font(.system(size: 11, weight: .medium))
+                        if let latest = results.first {
+                            Text("· 最新 \(Self.relTime(latest.updatedAt))")
+                                .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.7))
+                        }
+                        Spacer()
+                    }
+                    .foregroundColor(.secondary).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if showResults {
+                    ForEach(Array(results.prefix(8))) { r in
+                        Button {
+                            Task { await appState.handleSelectSession(sessionId: r.id) }
+                            appState.view = "chat"
+                        } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack(spacing: 6) {
+                                    Text(r.title).font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.primary).lineLimit(1)
+                                    Spacer()
+                                    Text(Self.relTime(r.updatedAt))
+                                        .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.7))
+                                }
+                                if !r.preview.isEmpty {
+                                    Text(r.preview).font(.system(size: 10))
+                                        .foregroundColor(.secondary).lineLimit(1)
+                                }
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.03)).cornerRadius(6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.leading, 48)
+        }
+    }
+
+    private static func relTime(_ ts: Double) -> String {
+        guard ts > 0 else { return "" }
+        let f = RelativeDateTimeFormatter()
+        f.locale = Locale(identifier: "ja_JP"); f.unitsStyle = .short
+        return f.localizedString(for: Date(timeIntervalSince1970: ts), relativeTo: Date())
     }
 }
 

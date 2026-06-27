@@ -22,11 +22,8 @@ struct EmployeeAvatar: View {
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .stroke(employee.role.color.opacity(0.45), lineWidth: 1)
-        )
+        .clipShape(Circle())
+        .overlay(Circle().stroke(employee.role.color.opacity(0.45), lineWidth: 1))
         .overlay(alignment: .bottomTrailing) {
             Text(employee.role.emoji)
                 .font(.system(size: size * 0.3))
