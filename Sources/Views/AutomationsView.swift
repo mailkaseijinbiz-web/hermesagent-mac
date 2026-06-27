@@ -125,19 +125,17 @@ struct AutomationsView: View {
                         .foregroundColor(.secondary)
                     
                     VStack(spacing: 12) {
-                        HStack(spacing: 12) {
-                            TextField("タスク名 (例: daily_health_check)", text: $appState.newCronName)
-                                .textFieldStyle(.plain)
-                                .padding(8)
-                                .background(Color.primary.opacity(0.05))
-                                .cornerRadius(6)
-                            
-                            TextField("スケジュール (例: 0 9 * * *, 30m, every 2h)", text: $appState.newCronSchedule)
-                                .textFieldStyle(.plain)
-                                .padding(8)
-                                .background(Color.primary.opacity(0.05))
-                                .cornerRadius(6)
+                        TextField("タスク名 (例: daily_health_check)", text: $appState.newCronName)
+                            .textFieldStyle(.plain)
+                            .padding(8)
+                            .background(Color.primary.opacity(0.05))
+                            .cornerRadius(6)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("スケジュール").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
+                            SchedulePicker(schedule: $appState.newCronSchedule)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         
                         TextField("エージェントへの指示プロンプト (例: 今日の天気を調べてサマリーを送信して)", text: $appState.newCronPrompt)
                             .textFieldStyle(.plain)
@@ -735,9 +733,9 @@ struct CronEditView: View {
                 TextField("例: 株モニタリング", text: $name)
                     .textFieldStyle(.plain).font(.system(size: 12))
             }
-            labeledField("スケジュール（cron / 30m / every 2h）") {
-                TextField("例: 0 9 * * *", text: $schedule)
-                    .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("スケジュール").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                SchedulePicker(schedule: $schedule)   // 自前で背景を持つので labeledField で包まない
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("配信先").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
