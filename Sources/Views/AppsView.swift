@@ -103,6 +103,7 @@ struct AppCard: View {
     @EnvironmentObject var appState: AppState
     let app: AppProject
     let onEdit: () -> Void
+    @State private var confirmingDelete = false
 
     private var assignee: Employee? { appState.employees.first { $0.id == app.assigneeId } }
 
@@ -212,7 +213,7 @@ struct AppCard: View {
                     }
                     Button { onEdit() } label: { Label("編集", systemImage: "pencil") }
                     Divider()
-                    Button(role: .destructive) { appState.deleteApp(app.id) } label: { Label("削除（フォルダは残ります）", systemImage: "trash") }
+                    Button(role: .destructive) { confirmingDelete = true } label: { Label("削除（フォルダは残ります）", systemImage: "trash") }
                 } label: {
                     Image(systemName: "ellipsis").font(.system(size: 13)).foregroundColor(.secondary).frame(width: 26, height: 26)
                 }.menuStyle(.borderlessButton).fixedSize()
@@ -221,6 +222,13 @@ struct AppCard: View {
         .padding(14)
         .background(Color.primary.opacity(0.02)).cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
+        .confirmationDialog("「\(app.name)」を削除しますか？", isPresented: $confirmingDelete,
+                            titleVisibility: .visible) {
+            Button("削除", role: .destructive) { appState.deleteApp(app.id) }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("一覧から削除します（プロジェクトフォルダはディスクに残ります）。")
+        }
     }
 
     private var statusBadge: some View {

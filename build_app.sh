@@ -71,4 +71,22 @@ fi
 git rev-parse HEAD > release/.build-commit 2>/dev/null || true
 git rev-parse --abbrev-ref HEAD > release/.build-branch 2>/dev/null || true
 
+# Stable code signature → macOS remembers granted permissions (TCC: folder access, mic, etc.)
+# across rebuilds. An ad-hoc signature changes the app's identity every build, so macOS treats
+# each build as a new app and re-prompts on launch. Signing with the Apple Development cert gives
+# a fixed Team-ID identity that TCC keys on, so a permission granted once persists.
+#  ⚠️ Strip iCloud file-provider xattrs first — release/ lives under ~/Documents (iCloud-synced)
+#     and those xattrs make codesign fail with "resource fork ... not allowed".
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Apple Development: KEITA YASUI"; then
+    SIGN_ID=$(security find-identity -v -p codesigning | grep "Apple Development: KEITA YASUI" | head -1 | sed -E 's/.*"(.*)"/\1/')
+    xattr -cr "${APP_DIR}" 2>/dev/null || true
+    if codesign --force --sign "$SIGN_ID" --identifier com.custom.hermesmac --timestamp=none "${APP_DIR}" 2>/dev/null; then
+        echo "Signed with stable identity → permissions persist across rebuilds."
+    else
+        echo "⚠️  codesign failed — ad-hoc build; macOS may re-prompt for permissions each launch."
+    fi
+else
+    echo "⚠️  Apple Development identity not found — ad-hoc build; macOS may re-prompt for permissions."
+fi
+
 echo "Done! App packaged successfully at: ${APP_DIR}"

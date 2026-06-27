@@ -138,6 +138,34 @@ class MobileServer {
         return bodyReceived >= contentLength
     }
     
+    /// Extract the `Origin` request header (browsers send it; native URLSession clients don't).
+    private nonisolated func originHeader(_ raw: String) -> String? {
+        for line in raw.components(separatedBy: "\r\n") where line.lowercased().hasPrefix("origin:") {
+            let v = line.dropFirst("origin:".count).trimmingCharacters(in: .whitespaces)
+            return v.isEmpty ? nil : v
+        }
+        return nil
+    }
+
+    /// Returns the origin to echo in `Access-Control-Allow-Origin`, or nil to deny CORS.
+    /// Trusted = loopback, Tailscale CGNAT (100.64.0.0/10), or private LAN (10/172.16-31/192.168).
+    /// Anything else (e.g. a public website) is denied so it can't read API responses cross-origin.
+    private nonisolated func corsAllowedOrigin(_ origin: String?) -> String? {
+        guard let origin, let url = URL(string: origin), let host = url.host else { return nil }
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" { return origin }
+        // Tailscale MagicDNS / Bonjour hostnames — what updateDashboardURL prefers for the QR URL.
+        if host.hasSuffix(".ts.net") || host.hasSuffix(".local") { return origin }
+        let octets = host.split(separator: ".").map { Int($0) }
+        func octet(_ i: Int) -> Int? { (octets.count == 4 && octets[i] != nil) ? octets[i] : nil }
+        // Tailscale 100.64.0.0/10  →  100.64.x.x – 100.127.x.x
+        if octet(0) == 100, let b = octet(1), (64...127).contains(b) { return origin }
+        // Private LAN
+        if octet(0) == 10 { return origin }
+        if octet(0) == 192, octet(1) == 168 { return origin }
+        if octet(0) == 172, let b = octet(1), (16...31).contains(b) { return origin }
+        return nil
+    }
+
     private nonisolated func routeRequest(_ raw: String, connection: NWConnection) {
         let lines = raw.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else {
@@ -162,8 +190,17 @@ class MobileServer {
             }
         }
         
-        // CORS headers for all responses
-        let corsHeaders = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization"
+        // CORS: echo the request Origin only when it's trusted (loopback / Tailscale / LAN),
+        // never a blanket "*". A wildcard let any public web page script the local API; an
+        // allow-list blocks tabnabbing/CSRF-style abuse while still permitting the QR dashboard.
+        // Native iOS/iPad clients send no Origin, so CORS doesn't gate them (URLSession ≠ browser).
+        let methodsHeaders = "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization"
+        let corsHeaders: String
+        if let allowed = corsAllowedOrigin(originHeader(raw)) {
+            corsHeaders = "Access-Control-Allow-Origin: \(allowed)\r\nVary: Origin\r\n" + methodsHeaders
+        } else {
+            corsHeaders = "Vary: Origin\r\n" + methodsHeaders
+        }
 
         // Handle OPTIONS (CORS preflight) — no auth needed
         if method == "OPTIONS" {

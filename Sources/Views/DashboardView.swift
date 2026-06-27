@@ -27,7 +27,6 @@ struct DashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
-                briefCard
                 HStack(alignment: .top, spacing: 16) {
                     scheduleCard
                     tasksCard
@@ -36,14 +35,6 @@ struct DashboardView: View {
             .padding(.horizontal, 32).padding(.vertical, 24)
             .frame(maxWidth: 980)
             .frame(maxWidth: .infinity, alignment: .center)
-        }
-        .onAppear {
-            // Auto-generate once per day (empty, or last brief was a previous day).
-            let stale = appState.dailyBriefAt == 0
-                || !Calendar.current.isDateInToday(Date(timeIntervalSince1970: appState.dailyBriefAt))
-            if stale && !appState.isGeneratingBrief {
-                Task { await appState.generateDailyBrief() }
-            }
         }
     }
 
@@ -65,48 +56,6 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: Daily brief
-
-    private var briefCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("デイリーブリーフ", systemImage: "sun.max")
-                    .font(.system(size: 13, weight: .semibold)).foregroundColor(.orange)
-                if appState.dailyBriefAt > 0 {
-                    Text("（\(Self.timeFmt.string(from: Date(timeIntervalSince1970: appState.dailyBriefAt))) 時点）")
-                        .font(.system(size: 10)).foregroundColor(.secondary)
-                }
-                Spacer()
-                if appState.isGeneratingBrief {
-                    HStack(spacing: 5) { ProgressView().controlSize(.small).scaleEffect(0.7); Text("生成中…").font(.system(size: 11)).foregroundColor(.secondary) }
-                } else {
-                    Button { Task { await appState.generateDailyBrief() } } label: {
-                        HStack(spacing: 4) { Image(systemName: "arrow.clockwise"); Text(appState.dailyBrief.isEmpty ? "生成" : "更新") }
-                            .font(.system(size: 11, weight: .medium))
-                    }.buttonStyle(.plain).foregroundColor(.blue)
-                }
-            }
-            if appState.dailyBrief.isEmpty && !appState.isGeneratingBrief {
-                Text("「生成」を押すと、今日の予定・タスク・アプリの状況をもとにAIがブリーフを書きます。")
-                    .font(.system(size: 12)).foregroundColor(.secondary)
-            } else if appState.dailyBrief.isEmpty {
-                Text("今日のブリーフを書いています…").font(.system(size: 13)).foregroundColor(.secondary)
-            } else {
-                Text(appState.dailyBrief)
-                    .font(.system(size: 14)).lineSpacing(5)
-                    .foregroundColor(.primary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            LinearGradient(colors: [Color.orange.opacity(0.10), Color.orange.opacity(0.03)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing))
-        .cornerRadius(14)
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.18), lineWidth: 0.5))
-    }
 
     // MARK: Schedule card
 

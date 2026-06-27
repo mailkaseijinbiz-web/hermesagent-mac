@@ -14,7 +14,7 @@ struct SidebarView: View {
                 SidebarMenuButton(icon: "square.grid.2x2", title: "ダッシュボード") {
                     appState.view = "dashboard"
                 }
-                SidebarMenuButton(icon: "person.3", title: "会社（AI社員）") {
+                SidebarMenuButton(icon: "person.3", title: appState.companyDisplayName) {
                     appState.view = "company"
                 }
                 SidebarMenuButton(icon: "checklist", title: "タスク") {
@@ -37,48 +37,12 @@ struct SidebarView: View {
             // 各行のケバブ（⋮）から右ペインで開く（左ペインのセッション一覧は廃止）。
             if !appState.employees.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
-                    // Pinned employees float to the top; stored order (drag-drop) within each group.
-                    ForEach(appState.sidebarEmployees) { emp in
-                        let active = appState.activeEmployeeId == emp.id
-                        HStack(spacing: 8) {
-                            EmployeeAvatar(employee: emp, size: 28)
-                            if emp.isPinned {
-                                Image(systemName: "pin.fill")
-                                    .font(.system(size: 8)).foregroundColor(.orange)
-                            }
-                            Text(emp.name)
-                                .font(.system(size: 13, weight: active ? .semibold : .regular))
-                                .foregroundColor(active ? .primary : .secondary)
-                                .lineLimit(1)
-                            Spacer()
-                            if appState.isEmployeeBusy(emp.id) {
-                                ProgressView().controlSize(.small).scaleEffect(0.6)
-                            }
-                            employeeKebab(emp)
-                        }
-                        .padding(.horizontal, 12).padding(.vertical, 5)
-                        .background(active ? Color.primary.opacity(0.08) : Color.clear)
-                        .cornerRadius(6)
-                        .contentShape(Rectangle())
-                        .onTapGesture { appState.switchEmployee(emp.id) }
-                        // Drag-and-drop reorder: drag a row onto another to move it before it.
-                        .draggable(emp.id) {
-                            HStack(spacing: 6) {
-                                EmployeeAvatar(employee: emp, size: 18)
-                                Text(emp.name).font(.system(size: 12, weight: .medium))
-                            }.padding(6)
-                        }
-                        .dropDestination(for: String.self) { items, _ in
-                            guard let dragged = items.first, dragged != emp.id else { return false }
-                            appState.moveEmployee(dragged, before: emp.id)
-                            return true
-                        }
-                        .contextMenu { employeeMenuItems(emp) }
-                    }
+                    // ピン留めを先頭にしたフラットな社員一覧（チームのセクション分けはしない）。
+                    ForEach(appState.sidebarEmployees) { emp in employeeRow(emp) }
 
                     HStack(spacing: 8) {
                         Image(systemName: "person.crop.circle.dashed")
-                            .font(.system(size: 16)).frame(width: 28, height: 28).foregroundColor(.secondary)
+                            .font(.system(size: 20)).frame(width: 34, height: 34).foregroundColor(.secondary)
                         Text("全体（社員なし）")
                             .font(.system(size: 13))
                             .foregroundColor(appState.activeEmployeeId == nil ? .primary : .secondary)
@@ -124,6 +88,43 @@ struct SidebarView: View {
                 }
             }
         }
+    }
+
+    // 1社員の行。
+    private func employeeRow(_ emp: Employee) -> some View {
+        let active = appState.activeEmployeeId == emp.id
+        return HStack(spacing: 8) {
+            EmployeeAvatar(employee: emp, size: 34)
+            if emp.isPinned {
+                Image(systemName: "pin.fill").font(.system(size: 8)).foregroundColor(.orange)
+            }
+            Text(emp.name)
+                .font(.system(size: 13, weight: active ? .semibold : .regular))
+                .foregroundColor(active ? .primary : .secondary)
+                .lineLimit(1)
+            Spacer()
+            if appState.isEmployeeBusy(emp.id) {
+                ProgressView().controlSize(.small).scaleEffect(0.6)
+            }
+            employeeKebab(emp)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 5)
+        .background(active ? Color.primary.opacity(0.08) : Color.clear)
+        .cornerRadius(6)
+        .contentShape(Rectangle())
+        .onTapGesture { appState.switchEmployee(emp.id) }
+        .draggable(emp.id) {
+            HStack(spacing: 6) {
+                EmployeeAvatar(employee: emp, size: 18)
+                Text(emp.name).font(.system(size: 12, weight: .medium))
+            }.padding(6)
+        }
+        .dropDestination(for: String.self) { items, _ in
+            guard let dragged = items.first, dragged != emp.id else { return false }
+            appState.moveEmployee(dragged, before: emp.id)
+            return true
+        }
+        .contextMenu { employeeMenuItems(emp) }
     }
 
     // 縦三点（⋮）のケバブアイコン。SF Symbols に縦 ellipsis が無いので水平を90°回転。

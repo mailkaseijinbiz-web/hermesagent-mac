@@ -41,6 +41,14 @@ struct CompanyView: View {
     @Environment(\.colorScheme) var colorScheme
     @State private var showHire = false
     @State private var showMeeting = false
+    @State private var renamingCompany = false
+    @State private var companyNameDraft = ""
+    @State private var renamingTeamId: String? = nil
+    @State private var teamNameDraft = ""
+    @State private var confirmingDeleteTeamId: String? = nil
+    // Drag-and-drop highlight targets.
+    @State private var dropTargetTeamId: String? = nil
+    @State private var dropTargetUnassigned = false
 
     var body: some View {
         ScrollView {
@@ -59,6 +67,35 @@ struct CompanyView: View {
         .sheet(isPresented: $showHire) { HireSheet().environmentObject(appState) }
         .sheet(isPresented: $showMeeting) { MeetingSheet().environmentObject(appState) }
         .onAppear { appState.refreshUsage() }
+        // 会社名の変更
+        .alert("会社名を変更", isPresented: $renamingCompany) {
+            TextField("会社名", text: $companyNameDraft)
+            Button("変更") { appState.setCompanyName(companyNameDraft) }
+            Button("既定に戻す", role: .destructive) { appState.setCompanyName("") }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("空にすると「会社（AI社員）」に戻ります。")
+        }
+        // チーム名の変更
+        .alert("チーム名を変更", isPresented: Binding(get: { renamingTeamId != nil },
+                                                set: { if !$0 { renamingTeamId = nil } })) {
+            TextField("チーム名", text: $teamNameDraft)
+            Button("変更") { if let id = renamingTeamId { appState.renameTeam(id, name: teamNameDraft) }; renamingTeamId = nil }
+            Button("キャンセル", role: .cancel) { renamingTeamId = nil }
+        }
+        // チーム削除の確認
+        .confirmationDialog("このチームを削除しますか？",
+                            isPresented: Binding(get: { confirmingDeleteTeamId != nil },
+                                                 set: { if !$0 { confirmingDeleteTeamId = nil } }),
+                            titleVisibility: .visible) {
+            Button("チームを削除", role: .destructive) {
+                if let id = confirmingDeleteTeamId { appState.deleteTeam(id) }
+                confirmingDeleteTeamId = nil
+            }
+            Button("キャンセル", role: .cancel) { confirmingDeleteTeamId = nil }
+        } message: {
+            Text("メンバーは解雇されず「未配属」に戻ります。")
+        }
     }
 
     // MARK: - Org & teams (Phase A)
@@ -81,6 +118,18 @@ struct CompanyView: View {
                     sectionLabel(appState.teams.isEmpty ? "メンバー" : "未配属")
                     ForEach(unassigned) { EmployeeCard(employee: $0) }
                 }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(dropTargetUnassigned ? Color.purple.opacity(0.06) : Color.clear)
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12)
+                    .stroke(dropTargetUnassigned ? Color.purple : Color.clear,
+                            lineWidth: dropTargetUnassigned ? 1.5 : 0))
+                // チーム所属を外す（未配属へ）。
+                .dropDestination(for: String.self) { items, _ in
+                    for id in items { appState.assignEmployee(id, toTeam: nil) }
+                    return !items.isEmpty
+                } isTargeted: { hovering in dropTargetUnassigned = hovering }
             }
         }
     }
@@ -98,13 +147,16 @@ struct CompanyView: View {
                 Text("\(members.count)名").font(.system(size: 10)).foregroundColor(.secondary)
                 Spacer()
                 Menu {
+                    Button { teamNameDraft = team.name; renamingTeamId = team.id } label: {
+                        Label("名前を変更", systemImage: "pencil")
+                    }
                     Menu("リーダーを設定") {
                         Button("なし") { appState.setTeamManager(team.id, managerId: nil) }
                         ForEach(appState.employees.filter { $0.role == .manager }) { m in
                             Button(m.name) { appState.setTeamManager(team.id, managerId: m.id) }
                         }
                     }
-                    Button(role: .destructive) { appState.deleteTeam(team.id) } label: {
+                    Button(role: .destructive) { confirmingDeleteTeamId = team.id } label: {
                         Label("チームを削除", systemImage: "trash")
                     }
                 } label: {
@@ -113,21 +165,37 @@ struct CompanyView: View {
                 .menuStyle(.borderlessButton).fixedSize()
             }
             if members.isEmpty {
-                Text("メンバーがいません（社員カードの … →「チームに配属」）")
+                Text("メンバーがいません（社員カードをここにドラッグ、または … →「チームに配属」）")
                     .font(.system(size: 10)).foregroundColor(.secondary).padding(.leading, 4)
             } else {
                 ForEach(members) { EmployeeCard(employee: $0) }
             }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.02)).cornerRadius(12)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .stroke(dropTargetTeamId == team.id ? Color.purple : Color.primary.opacity(0.06),
+                    lineWidth: dropTargetTeamId == team.id ? 1.5 : 0.5))
+        .contentShape(Rectangle())
+        // 社員カードをこのチームにドラッグ＝配属。
+        .dropDestination(for: String.self) { items, _ in
+            for id in items { appState.assignEmployee(id, toTeam: team.id) }
+            return !items.isEmpty
+        } isTargeted: { hovering in
+            dropTargetTeamId = hovering ? team.id : (dropTargetTeamId == team.id ? nil : dropTargetTeamId)
+        }
     }
 
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("会社（AI社員）").font(.system(size: 24, weight: .bold))
+                HStack(spacing: 8) {
+                    Text(appState.companyDisplayName).font(.system(size: 24, weight: .bold))
+                    Button { companyNameDraft = appState.companyName; renamingCompany = true } label: {
+                        Image(systemName: "pencil").font(.system(size: 12)).foregroundColor(.secondary)
+                    }.buttonStyle(.plain).help("会社名を変更")
+                }
                 Text("役割を選んでAI社員を採用。社員ごとに会話コンテキストは分離されます。")
                     .font(.system(size: 12)).foregroundColor(.secondary)
             }
@@ -185,6 +253,7 @@ struct EmployeeCard: View {
     @State private var generating = false
     @State private var renaming = false
     @State private var newName = ""
+    @State private var confirmingFire = false
 
     private var isActive: Bool { appState.activeEmployeeId == employee.id }
     private var shortModel: String {
@@ -260,7 +329,7 @@ struct EmployeeCard: View {
                     Task { await appState.generateAIAvatar(for: employee.id); generating = false }
                 } label: { Label("AIアバターを生成", systemImage: "wand.and.stars") }
                 Divider()
-                Button(role: .destructive) { appState.fireEmployee(employee.id) } label: {
+                Button(role: .destructive) { confirmingFire = true } label: {
                     Label("解雇", systemImage: "person.badge.minus")
                 }
             } label: {
@@ -278,12 +347,26 @@ struct EmployeeCard: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { appState.switchEmployee(employee.id) }
+        // チーム間ドラッグ＆ドロップ移動用。
+        .draggable(employee.id) {
+            HStack(spacing: 8) {
+                EmployeeAvatar(employee: employee, size: 24)
+                Text(employee.name).font(.system(size: 12, weight: .medium))
+            }.padding(8)
+        }
         .alert("名前を変更", isPresented: $renaming) {
             TextField("名前", text: $newName)
             Button("変更") { appState.renameEmployee(employee.id, name: newName) }
             Button("キャンセル", role: .cancel) {}
         } message: {
             Text("「\(employee.name)」の表示名を変更します。")
+        }
+        .confirmationDialog("「\(employee.name)」を解雇しますか？", isPresented: $confirmingFire,
+                            titleVisibility: .visible) {
+            Button("解雇", role: .destructive) { appState.fireEmployee(employee.id) }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("この社員のチャット・タスク・成果物も削除されます（直後ならトーストから取り消せます）。")
         }
     }
 }

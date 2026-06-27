@@ -407,28 +407,6 @@ struct ChatView: View {
             .onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in
                 handleFileDrop(providers)
             }
-            
-            // Badges — show the ACTUAL working folder (cwd) so it's clear where files land.
-            HStack(spacing: 12) {
-                HStack(spacing: 4) {
-                    Image(systemName: appState.activeEmployee != nil ? "person.crop.square" : "folder")
-                    Text(appState.effectiveCwdDisplay)
-                        .lineLimit(1).truncationMode(.middle)
-                        .frame(maxWidth: 420, alignment: .leading)
-                }
-                .help("作業フォルダ: \(appState.effectiveCwd)")
-                Text("ローカルで作業")
-                if let branch = appState.effectiveCwdBranch {
-                    HStack(spacing: 4) {
-                        Image(systemName: "point.3.connected.trianglepath.dotted")
-                        Text(branch)
-                    }
-                }
-            }
-            .font(.system(size: 11))
-            .foregroundColor(.secondary.opacity(0.6))
-            .frame(maxWidth: contentMaxWidth)
-            .padding(.top, 12)
         }
         .alert("カスタムモデル", isPresented: $showModelInput) {
             TextField("例: openai/gpt-4o-mini", text: $customModelText)
@@ -546,10 +524,42 @@ struct AttachmentThumbnail: View {
     }
 }
 
+/// 👎 を押したときに出る小さな入力ポップオーバー。何が違ったかを書いて「修正を依頼」すると、
+/// その指摘とともにエージェントへ訂正を依頼する（記録だけにもできる）。
+private struct FeedbackPopover: View {
+    @Binding var note: String
+    let onSubmit: (String) -> Void
+    let onJustFlag: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("どこが間違っていましたか？").font(.system(size: 12, weight: .semibold))
+            TextField("例: 日付が違う / 事実と異なる / 指示と違う（任意）", text: $note, axis: .vertical)
+                .textFieldStyle(.plain).font(.system(size: 12)).lineLimit(2...6)
+                .padding(8).background(Color.primary.opacity(0.05)).cornerRadius(6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+            HStack {
+                Button("記録だけ") { onJustFlag(note) }
+                    .buttonStyle(.plain).font(.system(size: 12)).foregroundColor(.secondary)
+                Spacer()
+                Button { onSubmit(note) } label: {
+                    HStack(spacing: 4) { Image(systemName: "arrow.uturn.left"); Text("修正を依頼") }
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(Color.blue).foregroundColor(.white).cornerRadius(6)
+                }.buttonStyle(.plain)
+            }
+        }
+        .padding(14).frame(width: 330)
+    }
+}
+
 struct MessageBlock: View {
     @EnvironmentObject var appState: AppState
     let msg: Message
     var isLast: Bool = false
+    @State private var showFeedbackInput = false
+    @State private var feedbackNote = ""
 
     /// Selection cues — only treat a trailing list as choices when the reply actually
     /// asks the user to pick (avoids quick-replies on purely informational lists).
@@ -940,6 +950,30 @@ struct MessageBlock: View {
                         }
                         if let t = msg.tokens {
                             Label("\(t) tokens", systemImage: "number")
+                        }
+
+                        // フィードバック（誤対応の指摘をしやすく）：👍 / 👎修正。
+                        Button { appState.giveMessageFeedback(msg.id, positive: true) } label: {
+                            Image(systemName: appState.messageFeedback[msg.id] == 1 ? "hand.thumbsup.fill" : "hand.thumbsup")
+                                .foregroundColor(appState.messageFeedback[msg.id] == 1 ? .green : .secondary.opacity(0.6))
+                        }.buttonStyle(.plain).help("良い回答")
+                        Button { showFeedbackInput = true } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: appState.messageFeedback[msg.id] == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+                                Text("修正")
+                            }
+                            .foregroundColor(appState.messageFeedback[msg.id] == -1 ? .orange : .secondary.opacity(0.6))
+                        }
+                        .buttonStyle(.plain).help("間違いを指摘して修正を依頼")
+                        .popover(isPresented: $showFeedbackInput, arrowEdge: .bottom) {
+                            FeedbackPopover(note: $feedbackNote, onSubmit: { note in
+                                appState.giveMessageFeedback(msg.id, positive: false, note: note)
+                                appState.sendCorrectionForLastReply(note: note)
+                                showFeedbackInput = false; feedbackNote = ""
+                            }, onJustFlag: { note in
+                                appState.giveMessageFeedback(msg.id, positive: false, note: note)
+                                showFeedbackInput = false; feedbackNote = ""
+                            })
                         }
                     }
                     .font(.system(size: 10))

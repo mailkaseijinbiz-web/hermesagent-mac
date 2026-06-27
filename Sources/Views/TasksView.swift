@@ -145,6 +145,7 @@ struct TaskCard: View {
     let task: WorkTask
     let assignee: Employee?
     @State private var showEdit = false
+    @State private var confirmingDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -175,10 +176,17 @@ struct TaskCard: View {
                         Button(s.title) { appState.setTaskStatus(task.id, s) }
                     }
                     Divider()
-                    Button(role: .destructive) { appState.deleteTask(task.id) } label: { Label("削除", systemImage: "trash") }
+                    Button(role: .destructive) { confirmingDelete = true } label: { Label("削除", systemImage: "trash") }
                 } label: {
                     Image(systemName: "ellipsis").font(.system(size: 12)).foregroundColor(.secondary)
                 }.menuStyle(.borderlessButton).fixedSize()
+                    .confirmationDialog("このタスクを削除しますか？", isPresented: $confirmingDelete,
+                                        titleVisibility: .visible) {
+                        Button("削除", role: .destructive) { appState.deleteTask(task.id) }
+                        Button("キャンセル", role: .cancel) {}
+                    } message: {
+                        Text("「\(task.title)」を削除します。この操作は取り消せません。")
+                    }
             }
 
             if task.status != .done, assignee != nil {
