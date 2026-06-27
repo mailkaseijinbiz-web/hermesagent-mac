@@ -25,30 +25,41 @@ struct AppsView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) var colorScheme
     @State private var editor: AppEditorTarget? = nil
+    /// Embedded inside the Settings panel: drop the outer ScrollView (settings scrolls) and
+    /// the close-X (settings has its own close), and tighten padding.
+    var embedded: Bool = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                header
-                if appState.apps.isEmpty {
-                    emptyState
-                } else {
-                    ForEach(appState.sortedApps) { app in
-                        AppCard(app: app, onEdit: { editor = AppEditorTarget(existing: app) })
-                    }
-                }
+        Group {
+            if embedded {
+                listContent
+            } else {
+                ScrollView { listContent }
             }
-            .padding(.horizontal, 32).padding(.vertical, 24)
-            .frame(maxWidth: 940)
-            .frame(maxWidth: .infinity, alignment: .center)
         }
         .sheet(item: $editor) { t in AppEditSheet(existing: t.existing).environmentObject(appState) }
+    }
+
+    private var listContent: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            header
+            if appState.apps.isEmpty {
+                emptyState
+            } else {
+                ForEach(appState.sortedApps) { app in
+                    AppCard(app: app, onEdit: { editor = AppEditorTarget(existing: app) })
+                }
+            }
+        }
+        .padding(.horizontal, embedded ? 2 : 32).padding(.vertical, embedded ? 4 : 24)
+        .frame(maxWidth: embedded ? .infinity : 940)
+        .frame(maxWidth: .infinity, alignment: embedded ? .leading : .center)
     }
 
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("アプリ").font(.system(size: 24, weight: .bold))
+                Text("アプリ").font(.system(size: embedded ? 18 : 24, weight: .bold))
                 Text("プロジェクトを作成し、担当のAI社員がフォルダ内で開発します。")
                     .font(.system(size: 12)).foregroundColor(.secondary)
             }
@@ -60,11 +71,13 @@ struct AppsView: View {
                     .background(colorScheme == .dark ? Color.white : Color.black)
                     .foregroundColor(colorScheme == .dark ? .black : .white).cornerRadius(8)
             }.buttonStyle(.plain)
-            Button { appState.view = "chat" } label: {
-                Image(systemName: "xmark").font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.secondary).frame(width: 26, height: 26)
-                    .background(Color.primary.opacity(0.06)).clipShape(Circle())
-            }.buttonStyle(.plain)
+            if !embedded {
+                Button { appState.view = "chat" } label: {
+                    Image(systemName: "xmark").font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary).frame(width: 26, height: 26)
+                        .background(Color.primary.opacity(0.06)).clipShape(Circle())
+                }.buttonStyle(.plain)
+            }
         }
     }
 

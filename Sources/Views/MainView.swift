@@ -3,7 +3,6 @@ import SwiftUI
 struct MainView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) var colorScheme
-    @State private var showMobileSyncPopover = false
     @State private var sidebarWidth: CGFloat = 260
     @State private var resizeHovered = false
     @State private var rightSidebarWidth: CGFloat = 360
@@ -134,6 +133,7 @@ struct MainView: View {
                         case .browser:  BrowserView()
                         case .employee: EmployeeSidePanel()
                         case .terminal: TerminalView()
+                        case .history:  ChatHistoryPanel()
                         }
                     }
                     .frame(width: rightSidebarWidth)
@@ -238,18 +238,7 @@ struct MainView: View {
 
             Spacer(minLength: 12)
 
-            Button(action: { showMobileSyncPopover.toggle() }) {
-                Image(systemName: "iphone.and.arrow.forward")
-                    .font(.system(size: 14))
-                    .foregroundColor(appState.isDashboardRunning ? .green : .secondary)
-                    .frame(width: 24, height: 24)
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showMobileSyncPopover, arrowEdge: .bottom) {
-                MobileSyncView()
-                    .environmentObject(appState)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // モバイル連携（QRペアリング）は「設定 → モバイル」に集約したのでヘッダーからは撤去。
 
             Button(action: { toggleRightSidebar(.employee) }) {
                 Image(systemName: "square.grid.2x2")
