@@ -2459,7 +2459,13 @@ class AppState: ObservableObject {
     func cloneRepo(_ repo: GitHubRepo) async {
         cloningRepo = repo.nameWithOwner
         defer { cloningRepo = nil }
-        try? FileManager.default.createDirectory(atPath: githubCloneBase, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(atPath: githubCloneBase, withIntermediateDirectories: true)
+        } catch {
+            reportFailure("クローン先ディレクトリの作成に失敗 (\(githubCloneBase))", error: error,
+                          toast: "クローン先フォルダを作成できませんでした。設定でクローン先を確認してください。")
+            return
+        }
         let target = (githubCloneBase as NSString).appendingPathComponent(repo.name)
         if FileManager.default.fileExists(atPath: target) {
             setWorkspace(path: target, slug: repo.nameWithOwner)
@@ -3132,7 +3138,14 @@ class AppState: ObservableObject {
         while employees.contains(where: { $0.id != employeeId && $0.workspacePath == folder }) {
             folder = (base as NSString).appendingPathComponent("\(slug)-\(i)"); i += 1
         }
-        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        } catch {
+            // Don't persist a workspace path whose folder doesn't exist (would break the agent cwd).
+            reportFailure("社員の作業フォルダ作成に失敗 (\(folder))", error: error,
+                          toast: "作業フォルダを作成できませんでした。設定で作業フォルダを指定してください。")
+            return nil
+        }
         employees[idx].workspacePath = folder
         return folder
     }
@@ -3228,8 +3241,12 @@ class AppState: ObservableObject {
         let spec = detail.trimmingCharacters(in: .whitespacesAndNewlines)
         if !spec.isEmpty {
             let readme = "# \(display)\n\n\(spec)\n"
-            try? readme.write(toFile: (folder as NSString).appendingPathComponent("README.md"),
-                              atomically: true, encoding: .utf8)
+            let readmePath = (folder as NSString).appendingPathComponent("README.md")
+            do {
+                try readme.write(toFile: readmePath, atomically: true, encoding: .utf8)
+            } catch {
+                Log.failure("app", "README.md の書き込みに失敗 (\(readmePath))", error)   // 非致命: アプリ登録は継続
+            }
         }
         var a = AppProject(name: display, detail: detail, folderPath: folder)
         a.assigneeId = assigneeId
@@ -5271,8 +5288,13 @@ class AppState: ObservableObject {
 
     func savePortfolioText() {
         ensureStockScriptsDir()
-        try? stockPortfolioText.write(toFile: Self.stockPortfolioPath, atomically: true, encoding: .utf8)
-        triggerToast(message: "保有銘柄を保存しました。")
+        do {
+            try stockPortfolioText.write(toFile: Self.stockPortfolioPath, atomically: true, encoding: .utf8)
+            triggerToast(message: "保有銘柄を保存しました。")
+        } catch {
+            reportFailure("保有銘柄の保存に失敗 (\(Self.stockPortfolioPath))", error: error,
+                          toast: "保有銘柄を保存できませんでした。")
+        }
     }
 
     /// .env の TWELVEDATA_API_KEY 行だけを差し替え/追記して保存(他の行は保持)。
@@ -5286,7 +5308,12 @@ class AppState: ObservableObject {
         }
         if !key.isEmpty { lines.append("TWELVEDATA_API_KEY=\(key)") }
         let body = lines.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"
-        try? body.write(toFile: Self.stockEnvPath, atomically: true, encoding: .utf8)
+        do {
+            try body.write(toFile: Self.stockEnvPath, atomically: true, encoding: .utf8)
+        } catch {
+            reportFailure("株価APIキーの保存に失敗 (\(Self.stockEnvPath))", error: error,
+                          toast: "株価APIキーを保存できませんでした。")
+        }
     }
 
     /// 株モニタリングの担当=証券アナリスト社員を解決(名前に「証券」→ロール analyst →「アナリスト」)。
