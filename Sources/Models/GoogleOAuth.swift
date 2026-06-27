@@ -352,9 +352,12 @@ final class GoogleOAuth: ObservableObject {
     private func writeTokenFile(_ key: String, _ value: String) {
         let url = tokenFileURL(key)
         do {
-            try value.write(to: url, atomically: true, encoding: .utf8)
+            try value.write(to: url, atomically: true, encoding: .utf8)   // atomic: temp file + rename
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } catch { /* 保存失敗は静かに（次回再試行） */ }
+        } catch {
+            // 失敗するとログインが永続化されない（再認証になる）。ファイルログに残す（次回書込で再試行）。
+            Log.failure("auth", "Googleトークンの保存に失敗 (\(url.path))", error)
+        }
     }
 
     private func readKeychainItem(_ key: String, dataProtection: Bool) -> String? {
