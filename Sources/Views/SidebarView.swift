@@ -47,12 +47,6 @@ struct SidebarView: View {
             // Employee switcher (each employee = isolated context)
             if !appState.employees.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("社員")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 2)
-
                     // Stored order (not managers-first) so drag-and-drop reordering sticks.
                     ForEach(appState.employees) { emp in
                         let active = appState.activeEmployeeId == emp.id
