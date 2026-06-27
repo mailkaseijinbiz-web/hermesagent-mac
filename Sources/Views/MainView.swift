@@ -101,10 +101,22 @@ struct MainView: View {
 
                     if appState.view == "chat" {
                         ChatView()
+                    } else if appState.view == "dashboard" {
+                        DashboardView()
                     } else if appState.view == "company" {
                         CompanyView()
+                    } else if appState.view == "employee" {
+                        EmployeeDetailView()
+                    } else if appState.view == "news" {
+                        NewsView()
+                    } else if appState.view == "gmail" {
+                        GmailView()
+                    } else if appState.view == "schedule" {
+                        ScheduleView()
                     } else if appState.view == "tasks" {
                         TasksView()
+                    } else if appState.view == "apps" {
+                        AppsView()
                     } else if appState.view == "automations" {
                         AutomationsView()
                     } else {
@@ -118,10 +130,10 @@ struct MainView: View {
 
                 if appState.showRightSidebar {
                     Group {
-                        if appState.rightTab == .browser {
-                            BrowserView()
-                        } else {
-                            TerminalView()
+                        switch appState.rightTab {
+                        case .browser:  BrowserView()
+                        case .employee: EmployeeSidePanel()
+                        case .terminal: TerminalView()
                         }
                     }
                     .frame(width: rightSidebarWidth)
@@ -162,8 +174,12 @@ struct MainView: View {
     /// The title shown in the header (current chat 件名, or the active section name).
     private var headerTitle: String {
         switch appState.view {
+        case "dashboard": return "ダッシュボード"
         case "company": return "会社（AI社員）"
+        case "employee": return appState.detailEmployee.map { "\($0.name)（\($0.role.title)）" } ?? "社員"
+        case "schedule": return "スケジュール"
         case "tasks": return "タスク"
+        case "apps": return "アプリ"
         case "automations": return "オートメーション"
         case "settings": return "設定"
         default:
@@ -193,16 +209,19 @@ struct MainView: View {
                 .background(Color.primary.opacity(0.06))
                 .clipShape(Capsule())
 
-            // Activity indicator — is the agent working right now?
+            // Activity indicator — is the agent working right now, and is it progressing?
             HStack(spacing: 5) {
                 if appState.isStreaming {
-                    ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.6)
-                        .frame(width: 12, height: 12)
-                    Text(appState.activeStatus == "thinking" ? "思考中…" : "応答中…")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.orange)
+                    TimelineView(.periodic(from: .now, by: 1.0)) { ctx in
+                        let s = LiveStreamStatus.compute(appState: appState, now: ctx.date)
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 12, height: 12)
+                            Text(s.label).font(.system(size: 10, weight: .semibold)).foregroundColor(s.color)
+                            if let e = s.elapsedText {
+                                Text(e).font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
+                            }
+                        }
+                    }
                 } else {
                     Circle().fill(Color.green).frame(width: 6, height: 6)
                     Text("待機中")
@@ -215,7 +234,7 @@ struct MainView: View {
             .background(Color.primary.opacity(0.05))
             .clipShape(Capsule())
             .animation(.easeInOut(duration: 0.2), value: appState.isStreaming)
-            .help(appState.isStreaming ? "エージェントが稼働中です" : "待機中（入力できます）")
+            .help(appState.isStreaming ? "エージェントが稼働中です（経過時間と受信状況を表示）" : "待機中（入力できます）")
 
             Spacer(minLength: 12)
 
@@ -231,6 +250,15 @@ struct MainView: View {
                     .environmentObject(appState)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Button(action: { toggleRightSidebar(.employee) }) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 14))
+                    .foregroundColor(appState.showRightSidebar && appState.rightTab == .employee ? .purple : .secondary)
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("社員パネル（タスク・成果物・ファイル）")
 
             Button(action: { toggleRightSidebar(.browser) }) {
                 Image(systemName: "globe")
@@ -507,6 +535,7 @@ struct ModelSelectionModal: View {
     
     let providers = [
         ("openrouter", "OpenRouter"),
+        ("cerebras", "Cerebras"),
         ("openai", "OpenAI"),
         ("anthropic", "Anthropic"),
         ("gemini", "Google Gemini"),

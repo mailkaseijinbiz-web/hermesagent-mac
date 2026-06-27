@@ -130,7 +130,7 @@ struct ModelPickerView: View {
         .background(selected ? Color.purple.opacity(0.08) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture {
-            Task { await appState.setModel(provider: "openrouter", model: m.id); dismiss() }
+            Task { await appState.setModel(m.id); dismiss() }
         }
     }
 

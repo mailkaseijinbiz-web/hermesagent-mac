@@ -56,8 +56,19 @@ cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
     <string>音声入力（音声をテキストに変換）に使用します。</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>話した内容をテキストに変換するために音声認識を使用します。</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
 </dict>
 </plist>
 EOF
+
+# App icon: copy the .icns into Resources (referenced by CFBundleIconFile above).
+if [ -f "AppIcon.icns" ]; then
+    cp "AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
+fi
+
+# Record the built commit/branch so the in-app updater can compare against the remote.
+git rev-parse HEAD > release/.build-commit 2>/dev/null || true
+git rev-parse --abbrev-ref HEAD > release/.build-branch 2>/dev/null || true
 
 echo "Done! App packaged successfully at: ${APP_DIR}"

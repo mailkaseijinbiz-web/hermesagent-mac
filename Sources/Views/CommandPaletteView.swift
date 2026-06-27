@@ -22,15 +22,25 @@ struct CommandPaletteView: View {
         out.append(Item(title: "新しいチャット", subtitle: "移動", icon: "square.and.pencil") {
             appState.handleNewChat(); appState.view = "chat"
         })
+        out.append(Item(title: "ダッシュボード", subtitle: "移動", icon: "square.grid.2x2") { appState.view = "dashboard" })
         out.append(Item(title: "会社（AI社員）", subtitle: "移動", icon: "person.3") { appState.view = "company" })
+        out.append(Item(title: "スケジュール", subtitle: "移動", icon: "calendar") { appState.view = "schedule" })
+        out.append(Item(title: "アプリ", subtitle: "移動", icon: "hammer") { appState.view = "apps" })
+        for a in appState.sortedApps {
+            out.append(Item(title: "\(a.name) を起動", subtitle: "アプリ", icon: "play.fill") { appState.launchApp(a.id) })
+            out.append(Item(title: "\(a.name) を開発", subtitle: "アプリ", icon: "hammer.fill") { appState.developApp(a.id) })
+        }
         out.append(Item(title: "オートメーション", subtitle: "移動", icon: "clock") {
             appState.view = "automations"; Task { await appState.fetchCronJobs() }
         })
         out.append(Item(title: "設定を開く", subtitle: "移動", icon: "gearshape") { appState.showSettings = true })
 
-        for e in appState.employees {
+        for e in appState.sortedEmployees {
             out.append(Item(title: "\(e.role.emoji) \(e.name)", subtitle: "社員 ・ \(e.role.title)", icon: "person.crop.circle") {
                 appState.switchEmployee(e.id)
+            })
+            out.append(Item(title: "\(e.name) を管理", subtitle: "タスク・成果物・ファイル（右パネル）", icon: "sidebar.right") {
+                appState.openEmployeePanel(e.id)
             })
         }
         if !appState.employees.isEmpty {
@@ -45,10 +55,19 @@ struct CommandPaletteView: View {
             })
         }
 
-        for m in AppState.modelPresets {
-            out.append(Item(title: m.label, subtitle: "モデル", icon: "cpu") {
-                Task { await appState.setModel(provider: m.provider, model: m.model) }
-            })
+        // Models within the FIXED provider (provider is changed only in Settings).
+        if appState.provider == AntigravityCLI.providerId {
+            for m in AntigravityCLI.presetModels {
+                out.append(Item(title: m, subtitle: "モデル", icon: "cpu") {
+                    Task { await appState.setModel(m) }
+                })
+            }
+        } else {
+            for m in appState.currentModelPresets {
+                out.append(Item(title: m.label, subtitle: "モデル", icon: "cpu") {
+                    Task { await appState.setModel(m.model) }
+                })
+            }
         }
         return out
     }

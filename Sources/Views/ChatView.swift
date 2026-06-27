@@ -21,30 +21,6 @@ struct ChatView: View {
         return model
     }
 
-    // First-run / empty-state quick starts.
-    private var quickStartChips: some View {
-        HStack(spacing: 10) {
-            chip("person.badge.plus", "AI社員を採用") { appState.view = "company" }
-            chip("cpu", "モデルを設定") { appState.showSettings = true }
-            chip("chevron.left.forwardslash.chevron.right", "GitHub") { appState.showSettings = true }
-            chip("command", "クイック移動 ⌘K") { appState.showCommandPalette = true }
-        }
-    }
-
-    private func chip(_ icon: String, _ label: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 12))
-                Text(label).font(.system(size: 12, weight: .medium))
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .foregroundColor(.primary.opacity(0.8))
-            .background(Color.primary.opacity(0.05)).cornerRadius(8)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
-        }
-        .buttonStyle(.plain)
-    }
-
     var body: some View {
         if appState.messages.isEmpty && !appState.isStreaming {
             // Initial screen: vertically centered
@@ -54,9 +30,6 @@ struct ChatView: View {
                 Text("何を作りましょうか？")
                     .font(.system(size: 32, weight: .light))
                     .foregroundColor(.primary.opacity(0.9))
-                    .padding(.bottom, 20)
-
-                quickStartChips
                     .padding(.bottom, 24)
 
                 composerView
@@ -72,6 +45,15 @@ struct ChatView: View {
                 // Header padding — just enough to clear the floating header bar.
                 Spacer().frame(height: 40)
 
+                // 出力ビュー切替（構造化できる出力があるときだけ表示）
+                if appState.hasStructurableOutput {
+                    OutputModePicker(mode: $appState.chatOutputMode)
+                        .padding(.bottom, 8)
+                        .frame(maxWidth: contentMaxWidth)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+
+                if appState.chatOutputMode == .chat {
                 // Messages Scroll
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -83,7 +65,7 @@ struct ChatView: View {
                                     && msg.toolCalls.isEmpty && msg.thinking.isEmpty {
                                     EmptyView()
                                 } else {
-                                    MessageBlock(msg: msg)
+                                    MessageBlock(msg: msg, isLast: msg.id == appState.messages.last?.id)
                                         .id(msg.id)
                                 }
                             }
@@ -124,6 +106,17 @@ struct ChatView: View {
                         )
                     )
                 }
+                } else {
+                    // 構造化表示（ニュース/要約/タイムライン/テーブル）
+                    ScrollView {
+                        StructuredOutputContainer(entries: appState.latestAssistantEntries,
+                                                  mode: appState.chatOutputMode)
+                            .frame(maxWidth: contentMaxWidth, alignment: .leading)
+                            .padding(.horizontal, 32)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.top, 4).padding(.bottom, 20)
+                    }
+                }
 
                 // Composer at bottom (capped width, centered)
                 composerView
@@ -138,27 +131,18 @@ struct ChatView: View {
     private var composerView: some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
-                // Attached image thumbnail (drag-drop or picker)
-                if let data = appState.attachedImageData, let img = NSImage(data: data) {
-                    HStack {
-                        ZStack(alignment: .topTrailing) {
-                            Image(nsImage: img)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 56, height: 56)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                            Button(action: { appState.attachedImageData = nil }) {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 15))
-                                    .foregroundStyle(.white, .black.opacity(0.6))
+                // Attached files (drag-drop / picker / paste): thumbnails with an × to remove.
+                if !appState.attachedFiles.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(appState.attachedFiles) { f in
+                                AttachmentThumbnail(file: f) { appState.removeAttachment(f.id) }
                             }
-                            .buttonStyle(.plain)
-                            .offset(x: 5, y: -5)
                         }
-                        Spacer()
+                        .padding(.horizontal, 14)
+                        .padding(.top, 10)
+                        .padding(.bottom, 2)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 10)
                 }
 
                 CustomTextEditor(text: $appState.inputValue, height: $composerHeight) {
@@ -183,6 +167,23 @@ struct ChatView: View {
                                 .cornerRadius(6)
                         }
                         .buttonStyle(.plain)
+
+                        // When talking to an employee: register the typed request as that
+                        // employee's scheduled automation (jumps to the Automations screen).
+                        if let emp = appState.activeEmployee {
+                            Button {
+                                appState.registerAutomationForEmployee(emp.id, prompt: appState.inputValue)
+                            } label: {
+                                Image(systemName: "clock.badge.plus")
+                                    .font(.system(size: 13))
+                                    .foregroundColor(.primary.opacity(0.7))
+                                    .frame(width: 24, height: 24)
+                                    .background(Color.primary.opacity(0.05))
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                            .help("この依頼を\(emp.name)のオートメーションに登録")
+                        }
 
                         // Manager-only: delegate the typed task to a team member (Phase 2).
                         // Scoped to the manager's team if they lead one, else all members.
@@ -256,46 +257,68 @@ struct ChatView: View {
                         .fixedSize()
 
                         Menu {
-                            Section("おすすめ") {
-                                ForEach(AppState.modelPresets) { preset in
-                                    Button {
-                                        Task { await appState.setModel(provider: preset.provider, model: preset.model) }
-                                    } label: {
-                                        if appState.defaultModel == preset.model {
-                                            Label(preset.label, systemImage: "checkmark")
-                                        } else {
-                                            Text(preset.label)
+                            // Provider is fixed (Settings) — offer only models within it.
+                            if appState.provider == AntigravityCLI.providerId {
+                                Section("おすすめ（Antigravity）") {
+                                    ForEach(AntigravityCLI.presetModels, id: \.self) { m in
+                                        Button {
+                                            Task { await appState.setModel(m) }
+                                        } label: {
+                                            if appState.defaultModel == m {
+                                                Label(m, systemImage: "checkmark")
+                                            } else {
+                                                Text(m)
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            // Live OpenRouter catalog, grouped by provider (never stale).
-                            if !appState.availableModels.isEmpty {
-                                Menu("すべてのモデル（\(appState.availableModels.count)）") {
-                                    ForEach(appState.modelsByProvider, id: \.provider) { group in
-                                        Menu(group.provider) {
-                                            ForEach(group.models.filter { !appState.modelIsHidden($0.id) }) { m in
-                                                Button {
-                                                    Task { await appState.setModel(provider: "openrouter", model: m.id) }
-                                                } label: {
-                                                    if appState.defaultModel == m.id {
-                                                        Label(m.name, systemImage: "checkmark")
-                                                    } else {
-                                                        Text(m.name)
+                                Divider()
+                                Button("カスタムモデルを入力…") {
+                                    customModelText = appState.defaultModel
+                                    showModelInput = true
+                                }
+                            } else {
+                                Section("おすすめ") {
+                                    ForEach(appState.currentModelPresets) { preset in
+                                        Button {
+                                            Task { await appState.setModel(preset.model) }
+                                        } label: {
+                                            if appState.defaultModel == preset.model {
+                                                Label(preset.label, systemImage: "checkmark")
+                                            } else {
+                                                Text(preset.label)
+                                            }
+                                        }
+                                    }
+                                }
+                                // Live OpenRouter catalog, grouped by provider (never stale).
+                                if !appState.availableModels.isEmpty {
+                                    Menu("すべてのモデル（\(appState.availableModels.count)）") {
+                                        ForEach(appState.modelsByProvider, id: \.provider) { group in
+                                            Menu(group.provider) {
+                                                ForEach(group.models.filter { !appState.modelIsHidden($0.id) }) { m in
+                                                    Button {
+                                                        Task { await appState.setModel(m.id) }
+                                                    } label: {
+                                                        if appState.defaultModel == m.id {
+                                                            Label(m.name, systemImage: "checkmark")
+                                                        } else {
+                                                            Text(m.name)
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            Divider()
-                            Button("モデル一覧を更新") {
-                                Task { await appState.fetchAvailableModels() }
-                            }
-                            Button("カスタムモデルを入力…") {
-                                customModelText = appState.defaultModel
-                                showModelInput = true
+                                Divider()
+                                Button("モデル一覧を更新") {
+                                    Task { await appState.fetchAvailableModels() }
+                                }
+                                Button("カスタムモデルを入力…") {
+                                    customModelText = appState.defaultModel
+                                    showModelInput = true
+                                }
                             }
                         } label: {
                             HStack(spacing: 3) {
@@ -354,8 +377,8 @@ struct ChatView: View {
                     .stroke(colorScheme == .dark ? Color.white.opacity(0.1) : Color.primary.opacity(0.1), lineWidth: 0.5)
             )
             .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.3 : 0.1), radius: 10, x: 0, y: 5)
-            .onDrop(of: [.image, .fileURL], isTargeted: nil) { providers in
-                handleImageDrop(providers)
+            .onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in
+                handleFileDrop(providers)
             }
             
             // Badges
@@ -403,58 +426,233 @@ struct ChatView: View {
 
     private func selectFileToAttach() {
         let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true       // attach several files at once
         panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        // Photo picker: show ONLY images in the list (写真のみ).
-        panel.allowedContentTypes = [.image]
-        panel.title = "写真を選択"
+        panel.canChooseFiles = true                // any file type (画像・PDF・テキスト等)
+        panel.title = "ファイルを選択"
         panel.prompt = "添付"
-
-        if panel.runModal() == .OK, let url = panel.url {
-            if let img = NSImage(contentsOf: url), let data = img.jpegData() {
-                appState.attachedImageData = data
-            }
+        if panel.runModal() == .OK {
+            for url in panel.urls { appState.attachFileURL(url) }
         }
     }
 
-    /// Accept an image dropped onto the composer → show it as a thumbnail.
-    private func handleImageDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        if provider.canLoadObject(ofClass: NSImage.self) {
-            provider.loadObject(ofClass: NSImage.self) { obj, _ in
-                if let img = obj as? NSImage, let data = img.jpegData() {
-                    DispatchQueue.main.async { appState.attachedImageData = data }
+    /// Accept files/images dropped onto the composer → stage them as attachments.
+    private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
+        var handled = false
+        for provider in providers {
+            // Prefer a real file URL (so the agent gets a path it can read).
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                handled = true
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                    var url: URL?
+                    if let d = item as? Data { url = URL(dataRepresentation: d, relativeTo: nil) }
+                    else if let u = item as? URL { url = u }
+                    if let url = url { DispatchQueue.main.async { appState.attachFileURL(url) } }
+                }
+            } else if provider.canLoadObject(ofClass: NSImage.self) {
+                // Image dragged with no file URL (e.g. from a browser) → keep its bytes.
+                handled = true
+                provider.loadObject(ofClass: NSImage.self) { obj, _ in
+                    if let img = obj as? NSImage, let data = img.jpegData() {
+                        DispatchQueue.main.async { appState.attachImageData(data) }
+                    }
                 }
             }
-            return true
         }
-        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                var url: URL?
-                if let d = item as? Data { url = URL(dataRepresentation: d, relativeTo: nil) }
-                else if let u = item as? URL { url = u }
-                if let url = url, let img = NSImage(contentsOf: url), let data = img.jpegData() {
-                    DispatchQueue.main.async { appState.attachedImageData = data }
+        return handled
+    }
+}
+
+/// One composer attachment: an image preview, or a file-type chip — with an × to remove.
+struct AttachmentThumbnail: View {
+    let file: AttachedFile
+    let onRemove: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let data = file.imageData, let img = NSImage(data: data) {
+                    Image(nsImage: img)
+                        .resizable().scaledToFill()
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else {
+                    VStack(spacing: 3) {
+                        Image(systemName: icon).font(.system(size: 16)).foregroundColor(.secondary)
+                        Text(file.ext).font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                            .lineLimit(1).minimumScaleFactor(0.6)
+                    }
+                    .frame(width: 56, height: 56)
+                    .background(Color.primary.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
                 }
             }
-            return true
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white, .black.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+            .offset(x: 5, y: -5)
         }
-        return false
+        .help(file.name)
+    }
+
+    private var icon: String {
+        switch file.ext.lowercased() {
+        case "pdf":                       return "doc.richtext"
+        case "txt", "md", "rtf":          return "doc.text"
+        case "csv", "xlsx", "xls", "numbers": return "tablecells"
+        case "zip", "tar", "gz":          return "doc.zipper"
+        case "mp4", "mov", "avi", "mkv":  return "film"
+        case "mp3", "wav", "m4a", "aac":  return "music.note"
+        case "json", "xml", "yml", "yaml", "swift", "py", "js", "ts", "html", "css": return "chevron.left.forwardslash.chevron.right"
+        default:                          return "doc"
+        }
     }
 }
 
 struct MessageBlock: View {
     @EnvironmentObject var appState: AppState
     let msg: Message
+    var isLast: Bool = false
 
-    /// Render markdown (bold/italic/links/inline code/structure). Falls back to plain.
+    /// Selection cues — only treat a trailing list as choices when the reply actually
+    /// asks the user to pick (avoids quick-replies on purely informational lists).
+    private static let choiceCues = ["？", "?", "どちら", "どれ", "いずれ", "選んで", "選択", "ご希望", "教えていただけ"]
+
+    /// Trailing run of numbered/bulleted items in an assistant reply, treated as selectable
+    /// choices (e.g. "1. プランA / 2. プランB") — but only when the reply prompts a choice.
+    /// Returns the choice texts (≥2) or [].
+    static func choices(_ content: String) -> [String] {
+        guard choiceCues.contains(where: { content.contains($0) }) else { return [] }
+        var lastRun: [String] = []
+        var run: [String] = []
+        for block in blocks(content) {
+            switch block {
+            case .ordered(_, let t): run.append(t)
+            case .bullet(let t): run.append(t)
+            default:
+                if run.count >= 2 { lastRun = run }
+                run.removeAll()
+            }
+        }
+        if run.count >= 2 { lastRun = run }
+        return lastRun
+    }
+
+    /// Plain text for sending a chosen option (strip emphasis/code markers).
+    static func plainChoice(_ s: String) -> String {
+        s.replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "`", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Render INLINE markdown (bold/italic/links/inline code) for one block, preserving
+    /// whitespace. `.full` would parse block grammar but `AttributedString`+`Text` then
+    /// collapses block boundaries (headings/lists/paragraph breaks) into one run — which
+    /// is why we render block structure ourselves (see `blocks`) and only do inline here.
     static func markdown(_ s: String) -> AttributedString {
         let opts = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .full,
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible
         )
         return (try? AttributedString(markdown: s, options: opts)) ?? AttributedString(s)
+    }
+
+    /// A block-level element of prose (everything between fenced code blocks).
+    enum Block {
+        case heading(level: Int, text: String)
+        case bullet(text: String)
+        case ordered(marker: String, text: String)
+        case quote(text: String)
+        case table(header: [String], rows: [[String]])
+        case paragraph(String)
+    }
+
+    /// A GFM table delimiter row, e.g. `|---|:--:|` (only pipes/dashes/colons/space,
+    /// with at least one dash and one pipe).
+    static func isTableDelimiter(_ raw: String) -> Bool {
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        guard t.contains("|"), t.contains("-") else { return false }
+        let allowed = Set("|:- ")
+        return t.allSatisfy { allowed.contains($0) }
+    }
+
+    /// Split a `| a | b |` row into trimmed cells (tolerates missing outer pipes).
+    static func tableCells(_ raw: String) -> [String] {
+        var t = raw.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("|") { t.removeFirst() }
+        if t.hasSuffix("|") { t.removeLast() }
+        return t.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// Split prose into block elements so headings/lists/paragraphs each render on their
+    /// own line — `AttributedString` markdown alone would mash them into one paragraph.
+    static func blocks(_ s: String) -> [Block] {
+        var out: [Block] = []
+        var para: [String] = []
+        func flushPara() {
+            let t = para.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { out.append(.paragraph(t)) }
+            para.removeAll()
+        }
+        let lines = s.components(separatedBy: "\n")
+        var i = 0
+        while i < lines.count {
+            let rawLine = lines[i]
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { flushPara(); i += 1; continue }
+            // GFM table: a row with pipes whose NEXT line is a delimiter row.
+            if line.contains("|"), i + 1 < lines.count, isTableDelimiter(lines[i + 1]) {
+                flushPara()
+                let header = tableCells(line)
+                var rows: [[String]] = []
+                var j = i + 2
+                while j < lines.count {
+                    let l = lines[j].trimmingCharacters(in: .whitespaces)
+                    guard !l.isEmpty, l.contains("|") else { break }
+                    rows.append(tableCells(l))
+                    j += 1
+                }
+                out.append(.table(header: header, rows: rows))
+                i = j
+                continue
+            }
+            // ATX heading: #..###### followed by a space.
+            if let h = line.range(of: #"^#{1,6}\s+"#, options: .regularExpression) {
+                flushPara()
+                let hashes = line.prefix(while: { $0 == "#" }).count
+                out.append(.heading(level: min(max(hashes, 1), 6), text: String(line[h.upperBound...])))
+                i += 1; continue
+            }
+            // Blockquote: > text
+            if let q = line.range(of: #"^>\s?"#, options: .regularExpression) {
+                flushPara()
+                out.append(.quote(text: String(line[q.upperBound...])))
+                i += 1; continue
+            }
+            // Unordered list: -, *, • , then a space.
+            if let b = line.range(of: #"^[-*•]\s+"#, options: .regularExpression) {
+                flushPara()
+                out.append(.bullet(text: String(line[b.upperBound...])))
+                i += 1; continue
+            }
+            // Ordered list: 1. or 1) then a space.
+            if let o = line.range(of: #"^\d+[.)]\s+"#, options: .regularExpression) {
+                flushPara()
+                let marker = String(line[line.startIndex..<line.index(before: o.upperBound)])
+                    .trimmingCharacters(in: .whitespaces)
+                out.append(.ordered(marker: marker, text: String(line[o.upperBound...])))
+                i += 1; continue
+            }
+            para.append(rawLine)
+            i += 1
+        }
+        flushPara()
+        return out
     }
 
     /// A piece of a reply: prose or a fenced code block.
@@ -561,16 +759,31 @@ struct MessageBlock: View {
                                 ForEach(Array(MessageBlock.segments(msg.content).enumerated()), id: \.offset) { _, seg in
                                     switch seg {
                                     case .text(let t):
-                                        Text(MessageBlock.markdown(t))
-                                            .font(.system(size: 14))
-                                            .foregroundColor(msg.isError ? .red : .primary)
-                                            .lineSpacing(4)
-                                            .textSelection(.enabled)
+                                        ProseView(text: t, isError: msg.isError)
                                     case .code(let lang, let body):
                                         CodeBlockView(language: lang, code: body)
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Live "is it alive or stuck?" indicator while THIS (last) reply streams,
+                    // even after content has started — shows 受信中 / 応答待ち（遅延）+ elapsed.
+                    if msg.role == .assistant, isLast, msg.typewriter, appState.isStreaming {
+                        TimelineView(.periodic(from: .now, by: 1.0)) { ctx in
+                            let s = LiveStreamStatus.compute(appState: appState, now: ctx.date)
+                            HStack(spacing: 5) {
+                                Circle().fill(s.color).frame(width: 6, height: 6)
+                                Text(s.label).font(.system(size: 11, weight: .medium)).foregroundColor(s.color)
+                                if let e = s.elapsedText {
+                                    Text(e).font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
+                                }
+                                if appState.streamedCharCount > 0 {
+                                    Text("· \(appState.streamedCharCount)字").font(.system(size: 10)).foregroundColor(.secondary.opacity(0.7))
+                                }
+                            }
+                            .padding(.top, 2)
                         }
                     }
 
@@ -586,6 +799,39 @@ struct MessageBlock: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(appState.isStreaming)
+                    }
+
+                    // Quick-reply chips: when the latest reply offers choices, let the
+                    // user pick by tapping instead of retyping.
+                    if msg.role == .assistant, isLast, !msg.typewriter, !msg.isError {
+                        let choices = MessageBlock.choices(msg.content)
+                        if choices.count >= 2 {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(Array(choices.enumerated()), id: \.offset) { idx, c in
+                                    Button {
+                                        appState.sendQuickReply(MessageBlock.plainChoice(c))
+                                    } label: {
+                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                            Text("\(idx + 1)")
+                                                .font(.system(size: 11, weight: .bold)).foregroundColor(.blue)
+                                                .frame(width: 16)
+                                            Text(MessageBlock.markdown(c))
+                                                .font(.system(size: 13)).foregroundColor(.primary)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .lineLimit(2)
+                                        }
+                                        .padding(.horizontal, 12).padding(.vertical, 9)
+                                        .background(Color.blue.opacity(0.08))
+                                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.25), lineWidth: 0.5))
+                                        .cornerRadius(8)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(appState.isStreaming)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
                     }
                 }
                 .padding(.horizontal, 12)
@@ -603,6 +849,28 @@ struct MessageBlock: View {
                         }
                         .buttonStyle(.plain)
                         .help("読み上げ")
+                        // Save this reply as an artifact for the active employee.
+                        if let emp = appState.activeEmployee, msg.delegatedName == nil {
+                            Button {
+                                appState.saveReplyAsArtifact(msg.content, employeeId: emp.id)
+                            } label: {
+                                Image(systemName: "shippingbox")
+                            }
+                            .buttonStyle(.plain)
+                            .help("\(emp.name)の成果物として保存")
+                        } else if let did = (msg.delegatedId
+                                    ?? msg.delegatedName.flatMap { n in appState.employees.first { $0.name == n }?.id }),
+                                  appState.employees.contains(where: { $0.id == did }) {
+                            // A delegated reply → save to the specialist who produced it
+                            // (keyed by id, since names aren't unique).
+                            Button {
+                                appState.saveReplyAsArtifact(msg.content, employeeId: did)
+                            } label: {
+                                Image(systemName: "shippingbox")
+                            }
+                            .buttonStyle(.plain)
+                            .help("この担当者の成果物として保存")
+                        }
                         if let e = msg.elapsed {
                             Label(String(format: "%.1fs", e), systemImage: "clock")
                         }
@@ -617,6 +885,122 @@ struct MessageBlock: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Renders a prose segment as block elements — headings, bullet/ordered lists, and
+/// paragraphs each on their own line — so a reply isn't mashed into one run-on block.
+/// Inline markdown (bold/italic/code/links) is rendered within each block.
+struct ProseView: View {
+    let text: String
+    let isError: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(MessageBlock.blocks(text).enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .heading(let level, let t):
+                    Text(MessageBlock.markdown(t))
+                        .font(.system(size: headingSize(level), weight: level <= 2 ? .bold : .semibold))
+                        .foregroundColor(isError ? .red : .primary)
+                        .textSelection(.enabled)
+                        .padding(.top, 2)
+                case .bullet(let t):
+                    listRow(marker: "•", text: t)
+                case .ordered(let marker, let t):
+                    listRow(marker: marker, text: t)   // marker already includes "." or ")"
+                case .quote(let t):
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 1.5).fill(Color.secondary.opacity(0.4)).frame(width: 3)
+                        Text(MessageBlock.markdown(t))
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.leading, 2)
+                case .table(let header, let rows):
+                    MarkdownTableView(header: header, rows: rows, isError: isError)
+                case .paragraph(let t):
+                    Text(MessageBlock.markdown(t))
+                        .font(.system(size: 14))
+                        .foregroundColor(isError ? .red : .primary)
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return 19
+        case 2: return 17
+        case 3: return 15
+        default: return 14
+        }
+    }
+
+    private func listRow(marker: String, text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Text(marker)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(isError ? .red : .secondary)
+            Text(MessageBlock.markdown(text))
+                .font(.system(size: 14))
+                .foregroundColor(isError ? .red : .primary)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+/// Renders a GFM markdown table as a bordered grid (header row tinted), so a reply's
+/// `| a | b |` rows aren't shown as raw pipe text. Columns share the bubble width and
+/// cells wrap; inline markdown renders within each cell.
+struct MarkdownTableView: View {
+    let header: [String]
+    let rows: [[String]]
+    let isError: Bool
+
+    private var colCount: Int { max(header.count, rows.map { $0.count }.max() ?? 0) }
+
+    var body: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow {
+                ForEach(0..<colCount, id: \.self) { c in
+                    cell(c < header.count ? header[c] : "", header: true)
+                }
+            }
+            ForEach(rows.indices, id: \.self) { r in
+                GridRow {
+                    ForEach(0..<colCount, id: \.self) { c in
+                        cell(c < rows[r].count ? rows[r][c] : "", header: false)
+                    }
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.15), lineWidth: 0.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func cell(_ s: String, header: Bool) -> some View {
+        Text(MessageBlock.markdown(s))
+            .font(.system(size: 12, weight: header ? .semibold : .regular))
+            .foregroundColor(isError ? .red : .primary)
+            .multilineTextAlignment(.leading)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(header ? Color.primary.opacity(0.06) : Color.clear)
+            .overlay(Rectangle().stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
     }
 }
 
@@ -831,42 +1215,77 @@ struct TypewriterText: View {
 }
 
 struct ThinkingBlock: View {
+    @EnvironmentObject var appState: AppState
     @State private var animate = false
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Hermes")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
-            
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(Color.secondary)
-                    .frame(width: 6, height: 6)
-                    .scaleEffect(animate ? 1.0 : 0.5)
-                    .animation(.easeInOut(duration: 0.5).repeatForever().delay(0.0), value: animate)
-                Circle()
-                    .fill(Color.secondary)
-                    .frame(width: 6, height: 6)
-                    .scaleEffect(animate ? 1.0 : 0.5)
-                    .animation(.easeInOut(duration: 0.5).repeatForever().delay(0.15), value: animate)
-                Circle()
-                    .fill(Color.secondary)
-                    .frame(width: 6, height: 6)
-                    .scaleEffect(animate ? 1.0 : 0.5)
-                    .animation(.easeInOut(duration: 0.5).repeatForever().delay(0.3), value: animate)
-                
-                Text("Thinking...")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-                    .padding(.leading, 4)
+
+            // Tick every second so the elapsed/heartbeat updates even with no new tokens —
+            // this is what tells the user it's alive vs frozen.
+            TimelineView(.periodic(from: .now, by: 1.0)) { ctx in
+                let s = LiveStreamStatus.compute(appState: appState, now: ctx.date)
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(s.color)
+                        .frame(width: 7, height: 7)
+                        .scaleEffect(animate ? 1.0 : 0.45)
+                        .animation(.easeInOut(duration: 0.6).repeatForever(), value: animate)
+                    Text(s.label)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(s.color)
+                    if let e = s.elapsedText {
+                        Text(e)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    if s.showStopHint {
+                        Text("· 停止ボタンで中断できます")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary.opacity(0.85))
+                    }
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .onAppear {
-                animate = true
-            }
+            .onAppear { animate = true }
         }
+    }
+}
+
+/// Derives a human-readable "is it alive or stuck?" status from the stream timers.
+struct LiveStreamStatus {
+    var label: String
+    var color: Color
+    var elapsedText: String?
+    var showStopHint: Bool
+
+    @MainActor
+    static func compute(appState: AppState, now: Date) -> LiveStreamStatus {
+        let started = appState.streamStartedAt
+        let elapsed = started.map { max(0, now.timeIntervalSince($0)) }
+        let sinceActivity = appState.lastStreamActivityAt.map { max(0, now.timeIntervalSince($0)) } ?? .infinity
+        let chars = appState.streamedCharCount
+
+        let elapsedText = elapsed.map { fmt($0) }
+        // Receiving: a token/thought arrived within the last ~2s → clearly progressing.
+        if sinceActivity < 2.0, chars > 0 {
+            return .init(label: "受信中", color: .green, elapsedText: elapsedText, showStopHint: false)
+        }
+        // Long silence → likely slow or stuck; flag it and point at the stop button.
+        if sinceActivity >= 30 || (elapsed ?? 0) >= 60 {
+            return .init(label: "応答待ち（遅延）", color: .orange, elapsedText: elapsedText, showStopHint: true)
+        }
+        // Normal compute window (reasoning before first token, between tokens).
+        return .init(label: chars > 0 ? "応答中" : "考え中", color: .secondary, elapsedText: elapsedText, showStopHint: false)
+    }
+
+    private static func fmt(_ s: TimeInterval) -> String {
+        let t = Int(s.rounded())
+        return t < 60 ? "\(t)秒" : String(format: "%d分%02d秒", t / 60, t % 60)
     }
 }
 
@@ -874,6 +1293,55 @@ struct ThinkingBlock: View {
 /// so the placeholder visibility never depends on a SwiftUI binding round-trip.
 final class PlaceholderTextView: NSTextView {
     var placeholderString: String = ""
+
+    /// Catch Cmd+V at the key-event level (this SwiftUI app has no Edit-menu Paste item, so
+    /// Cmd+V is NOT wired to the `paste:` action). If the clipboard holds an image/file, attach
+    /// it; otherwise fall back to the normal text paste.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v" {
+            if attachFromPasteboard(NSPasteboard.general) { return true }
+            super.paste(nil)   // plain text → normal paste
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// Cmd+V via the Edit menu (if present): same image/file-attach behavior.
+    override func paste(_ sender: Any?) {
+        if attachFromPasteboard(NSPasteboard.general) { return }
+        super.paste(sender)   // text → default paste
+    }
+
+    /// If `pb` carries image bytes or a copied file, stage it as a composer attachment and
+    /// return true. Plain text / web links → false (caller does the normal text paste).
+    private func attachFromPasteboard(_ pb: NSPasteboard) -> Bool {
+        // A plain-text copy (no image) must paste as text.
+        let imageTypes: [NSPasteboard.PasteboardType] = [.png, .tiff,
+            .init("public.jpeg"), .init("com.compuserve.gif"), .init("public.heic"), .init("public.image")]
+        if pb.availableType(from: imageTypes) != nil {
+            // Read the raw bytes for whichever image type is present (most robust).
+            for t in imageTypes {
+                if let data = pb.data(forType: t), let img = NSImage(data: data), let jpeg = img.jpegData() {
+                    DispatchQueue.main.async { AppState.shared.attachImageData(jpeg) }
+                    return true
+                }
+            }
+            if let img = NSImage(pasteboard: pb), let jpeg = img.jpegData() {
+                DispatchQueue.main.async { AppState.shared.attachImageData(jpeg) }
+                return true
+            }
+        }
+        // Copied file(s) from Finder → attach by path (skip web links, which are strings).
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            let files = urls.filter { $0.isFileURL }
+            if !files.isEmpty {
+                DispatchQueue.main.async { for u in files { AppState.shared.attachFileURL(u) } }
+                return true
+            }
+        }
+        return false
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)

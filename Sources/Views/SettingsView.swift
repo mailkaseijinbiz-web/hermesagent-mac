@@ -5,15 +5,21 @@ import SwiftUI
 struct SettingsModal: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var voice = VoiceManager.shared
+    @ObservedObject private var updater = UpdateManager.shared
     @Environment(\.colorScheme) var colorScheme
     @State private var selected: Section = .general
     @State private var isLoggingIn = false
     @State private var mgmtTab: ManagementTab = .memory
     @State private var showModelPicker = false
     @State private var settingsSearch = ""
+    @State private var agyCustomModel = ""
+    @State private var agyInstalled: Bool? = nil
 
     enum Section: String, CaseIterable, Identifiable {
         case general = "一般"
+        case model = "モデル"
+        case voice = "音声"
+        case google = "Google"
         case github = "GitHub"
         case cloud = "クラウド同期"
         case channels = "チャンネル"
@@ -24,6 +30,9 @@ struct SettingsModal: View {
         var icon: String {
             switch self {
             case .general: return "gearshape"
+            case .model: return "cpu"
+            case .voice: return "speaker.wave.2"
+            case .google: return "g.circle"
             case .github: return "chevron.left.forwardslash.chevron.right"
             case .cloud: return "cloud"
             case .channels: return "bubble.left.and.bubble.right"
@@ -32,10 +41,12 @@ struct SettingsModal: View {
             case .experimental: return "flask"
             }
         }
-        /// Extra search terms so a query like "supabase" or "モデル" finds the right section.
         var keywords: String {
             switch self {
-            case .general: return "モデル model プロバイダー provider api キー key 性格 personality 音声 読み上げ tts elevenlabs"
+            case .general: return "一般 general 性格 personality"
+            case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter antigravity agy gemini cli"
+            case .voice: return "音声 読み上げ tts elevenlabs voice ボイス スピーチ speech"
+            case .google: return "google gmail calendar カレンダー メール oauth 認証 連携"
             case .github: return "github リポジトリ repo ワークスペース clone git 作業フォルダ"
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
             case .channels: return "チャンネル channel telegram discord slack line whatsapp signal teams メール email"
@@ -52,12 +63,14 @@ struct SettingsModal: View {
 
     let providers = [
         ("openrouter", "OpenRouter"),
+        ("cerebras", "Cerebras"),
         ("openai", "OpenAI"),
         ("anthropic", "Anthropic"),
         ("gemini", "Google Gemini"),
         ("nous", "Nous Portal (OAuth)"),
         ("xai-oauth", "xAI Grok (OAuth)"),
-        ("openai-codex", "OpenAI Codex (OAuth)")
+        ("openai-codex", "OpenAI Codex (OAuth)"),
+        ("antigravity", "Antigravity CLI (agy)")
     ]
     let personalities = [
         ("kawaii", "Kawaii (Cute / Sparkly)"),
@@ -151,6 +164,9 @@ struct SettingsModal: View {
                     VStack(alignment: .leading, spacing: 18) {
                         switch selected {
                         case .general: generalSection
+                        case .model: modelSection
+                        case .voice: voiceSection
+                        case .google: googleSection
                         case .github: githubSection
                         case .cloud: cloudSection
                         case .channels: channelsSection
@@ -158,7 +174,7 @@ struct SettingsModal: View {
                         case .management: managementSection
                         case .experimental: experimentalSection
                         }
-                        if selected == .general || selected == .experimental { saveButton }
+                        if selected == .general || selected == .model || selected == .experimental { saveButton }
                     }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 24)
@@ -179,16 +195,18 @@ struct SettingsModal: View {
 
     // MARK: - Sections
 
-    private var generalSection: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            card(title: "プロバイダーとモデル") {
-                fieldLabel("Inference Provider")
-                Picker("", selection: $appState.provider) {
-                    ForEach(providers, id: \.0) { Text($0.1).tag($0.0) }
-                }
-                .pickerStyle(.menu)
-                .onChange(of: appState.provider) { _, v in appState.handleProviderChange(v) }
+    private var modelSection: some View {
+        card(title: "プロバイダーとモデル") {
+            fieldLabel("Inference Provider")
+            Picker("", selection: $appState.provider) {
+                ForEach(providers, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .pickerStyle(.menu)
+            .onChange(of: appState.provider) { _, v in appState.handleProviderChange(v) }
 
+            if appState.provider == AntigravityCLI.providerId {
+                antigravitySection
+            } else {
                 fieldLabel("モデル")
                 Button { showModelPicker = true } label: {
                     HStack {
@@ -225,6 +243,143 @@ struct SettingsModal: View {
                     styledField(SecureField("Enter API Key", text: $appState.apiKey))
                 }
             }
+        }
+    }
+
+    /// Antigravity CLI (`agy`) settings: model presets + custom entry, plus install status.
+    /// `agy` runs as its own backend and self-authenticates, so no API key / OAuth here.
+    @ViewBuilder private var antigravitySection: some View {
+        fieldLabel("モデル（Antigravity）")
+        Menu {
+            ForEach(AntigravityCLI.presetModels, id: \.self) { m in
+                Button(m) { Task { await appState.setModel(m) } }
+            }
+        } label: {
+            HStack {
+                Text(appState.defaultModel.isEmpty ? "モデルを選択…" : appState.defaultModel)
+                    .font(.system(size: 13))
+                    .foregroundColor(appState.defaultModel.isEmpty ? .secondary : .primary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 10)).foregroundColor(.secondary)
+            }
+            .padding(8)
+            .background(Color.primary.opacity(0.05)).cornerRadius(6)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+
+        fieldLabel("カスタムモデル")
+        HStack(spacing: 6) {
+            styledField(TextField("例: Gemini 3 Pro (High)", text: $agyCustomModel))
+            Button("適用") {
+                let m = agyCustomModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !m.isEmpty else { return }
+                Task { await appState.setModel(m) }
+            }
+            .buttonStyle(.plain).foregroundColor(.blue).font(.system(size: 12))
+            .disabled(agyCustomModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        Text("`agy models` の表示名をそのまま指定できます。")
+            .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8))
+
+        // Install status (checked once when this section appears).
+        HStack(spacing: 6) {
+            Circle().fill(agyInstalled == true ? Color.green : (agyInstalled == false ? Color.orange : Color.secondary))
+                .frame(width: 7, height: 7)
+            if agyInstalled == false {
+                Text(AntigravityCLI.installHint).font(.system(size: 10)).foregroundColor(.orange).lineLimit(nil)
+            } else {
+                Text(agyInstalled == true ? "Antigravity CLI を検出しました。認証は `agy` 側（ブラウザ/キーチェーン）。" : "確認中…")
+                    .font(.system(size: 10)).foregroundColor(.secondary)
+            }
+        }
+        .task { agyInstalled = await AntigravityCLI.shared.isInstalledAsync }
+    }
+
+    /// Auto version-up card: shows the current build, checks the git remote, and applies
+    /// updates (git pull → rebuild → relaunch) on click, with an optional auto toggle.
+    private var updateCard: some View {
+        card(title: "アップデート") {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(updater.updateAvailable ? Color.orange : Color.green)
+                    .frame(width: 7, height: 7)
+                Text("現在: \(updater.currentVersion)")
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+                if let last = updater.lastCheck {
+                    Text("確認: \(last.formatted(date: .omitted, time: .shortened))")
+                        .font(.system(size: 9)).foregroundColor(.secondary)
+                }
+            }
+
+            if !updater.status.isEmpty {
+                Text(updater.status)
+                    .font(.system(size: 11))
+                    .foregroundColor(updater.updateAvailable ? .orange : .secondary)
+                    .lineLimit(nil)
+            }
+
+            if updater.updateAvailable && !updater.latestLog.isEmpty {
+                ScrollView {
+                    Text(updater.latestLog)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 96)
+                .padding(8)
+                .background(Color.primary.opacity(0.04)).cornerRadius(6)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await updater.checkForUpdates(auto: false) }
+                } label: {
+                    HStack(spacing: 4) {
+                        if updater.isChecking { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "arrow.clockwise") }
+                        Text("更新を確認")
+                    }.font(.system(size: 12))
+                }
+                .buttonStyle(.plain).foregroundColor(.blue)
+                .disabled(updater.isChecking || updater.isUpdating)
+
+                if updater.updateAvailable {
+                    Button {
+                        Task { await updater.performUpdate() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if updater.isUpdating { ProgressView().controlSize(.small) }
+                            else { Image(systemName: "square.and.arrow.down.on.square") }
+                            Text(updater.isUpdating ? "更新中…" : "今すぐ更新（再ビルドして再起動）")
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Color.orange.opacity(0.18)).foregroundColor(.orange).cornerRadius(6)
+                    }
+                    .buttonStyle(.plain).disabled(updater.isUpdating)
+                }
+                Spacer()
+            }
+
+            Toggle(isOn: $updater.autoUpdate) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("自動で更新する").font(.system(size: 12, weight: .medium))
+                    Text("新しいバージョンを検知したら、確認なしで再ビルド・再起動します。")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+                }
+            }
+            .toggleStyle(.switch).controlSize(.small)
+            .disabled(updater.isUpdating)
+        }
+    }
+
+    private var generalSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            updateCard
 
             card(title: "エージェント性格") {
                 fieldLabel("Personality Persona")
@@ -233,7 +388,11 @@ struct SettingsModal: View {
                 }
                 .pickerStyle(.menu)
             }
+        }
+    }
 
+    private var voiceSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
             card(title: "音声読み上げ (TTS)") {
                 Toggle(isOn: $voice.useElevenLabs) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -277,6 +436,21 @@ struct SettingsModal: View {
                 }.buttonStyle(.plain)
             }
         )) {
+            HStack(spacing: 8) {
+                Circle().fill(appState.isLineBridgeRunning ? Color.green : Color.orange)
+                    .frame(width: 7, height: 7)
+                Text("LINEブリッジ: \(appState.isLineBridgeRunning ? "稼働中" : "停止中") (:8650)")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                Spacer()
+                Button("再起動") { Task { await appState.restartLineBridge() } }
+                    .font(.system(size: 11)).buttonStyle(.plain).foregroundColor(.blue)
+            }
+            if !appState.lineBridgeStatus.isEmpty {
+                Text(appState.lineBridgeStatus)
+                    .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.7)).lineLimit(nil)
+            }
+            Divider()
+
             if appState.channels.isEmpty {
                 Text("登録済みチャンネルはありません。").font(.system(size: 12)).foregroundColor(.secondary)
             } else {
@@ -297,18 +471,7 @@ struct SettingsModal: View {
                 }
             }
             Divider()
-            fieldLabel("チャンネルを追加")
-            Picker("", selection: $appState.newChannelPlatform) {
-                ForEach(["telegram", "discord", "slack", "signal", "whatsapp", "line", "email", "teams"], id: \.self) { Text($0).tag($0) }
-            }.pickerStyle(.menu)
-            styledField(TextField("チャットID / 宛先 (例: 7928751273)", text: $appState.newChannelId))
-            styledField(TextField("表示名（任意）", text: $appState.newChannelName))
-            Button { appState.addChannel() } label: {
-                HStack { Spacer(); Image(systemName: "plus"); Text("チャンネルを追加"); Spacer() }
-                    .font(.system(size: 12, weight: .medium)).padding(.vertical, 8)
-                    .background(Color.primary.opacity(0.06)).cornerRadius(6)
-            }.buttonStyle(.plain)
-            Text("※ プラットフォーム連携(ボットトークン等)は別途 hermes の設定が必要です。受信したチャットは自動で一覧に追加されます。")
+            Text("※ チャンネルは受信したチャットから自動で一覧に追加されます。プラットフォーム連携（ボットトークン等）は hermes 側の設定が必要です。")
                 .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
         }
     }
@@ -475,6 +638,77 @@ struct SettingsModal: View {
     }
 
     private var cloudSection: some View {
+        // Supabase card is hidden after migrating to iCloud (supabaseCard + its
+        // AppState logic are kept so it can be restored by re-adding it here).
+        icloudCard
+    }
+
+    private var icloudCard: some View {
+        card(title: "クラウド同期 (iCloud · CloudKit)") {
+            Toggle(isOn: $appState.icloudSyncEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("iCloud同期を有効化").font(.system(size: 13, weight: .medium))
+                    Text("社員・チーム・タスクを iCloud (CloudKit) で全端末同期します。編集時に自動同期＋起動時に取得＋他端末の変更を約20秒ごとに自動反映（起動中）。")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+                }
+            }.toggleStyle(.switch)
+
+            HStack(spacing: 10) {
+                Button { Task { await appState.syncRosterNow() } } label: {
+                    HStack(spacing: 4) {
+                        if appState.isSyncingICloud { ProgressView().controlSize(.small) }
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                        Text("iCloudで今すぐ同期")
+                    }.font(.system(size: 12))
+                }.buttonStyle(.borderedProminent)
+                    .disabled(!appState.icloudSyncEnabled || appState.isSyncingICloud)
+
+                Button { Task { await appState.testICloud() } } label: {
+                    HStack(spacing: 4) {
+                        if appState.isTestingICloud { ProgressView().controlSize(.small) }
+                        Image(systemName: "icloud")
+                        Text("接続テスト")
+                    }.font(.system(size: 12))
+                }.buttonStyle(.bordered).disabled(appState.isTestingICloud)
+                Spacer()
+            }
+
+            Divider().padding(.vertical, 2)
+
+            Toggle(isOn: $appState.icloudMirrorMessages) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("メッセージもミラー（一方向）").font(.system(size: 12, weight: .medium))
+                    Text("会話履歴を iCloud にバックアップします。state.db は読み取り専用のため書き戻しはしません（他端末では閲覧用）。")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+                }
+            }.toggleStyle(.switch).disabled(!appState.icloudSyncEnabled)
+
+            HStack(spacing: 10) {
+                Button { Task { await appState.mirrorMessagesNow() } } label: {
+                    HStack(spacing: 4) {
+                        if appState.isMirroringMessages { ProgressView().controlSize(.small) }
+                        Image(systemName: "arrow.up.doc")
+                        Text("メッセージをミラー")
+                    }.font(.system(size: 12))
+                }.buttonStyle(.bordered)
+                    .disabled(!appState.icloudSyncEnabled || appState.isMirroringMessages)
+                Button { Task { await appState.verifyCloudHistory() } } label: {
+                    HStack(spacing: 4) { Image(systemName: "checkmark.icloud"); Text("クラウド履歴を確認") }
+                        .font(.system(size: 12))
+                }.buttonStyle(.bordered).disabled(!appState.icloudSyncEnabled)
+                Spacer()
+            }
+
+            if !appState.icloudStatus.isEmpty {
+                Text(appState.icloudStatus)
+                    .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(nil)
+            }
+            Text("※ コンテナ iCloud.com.custom.hermes / public DB（個人iCloud容量を消費しません）。同期は社員/チーム/タスクの共有項目のみ（アバター・作業フォルダ等は端末ローカル）。Mac がシステム設定で iCloud にサインインしている必要があります。")
+                .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+        }
+    }
+
+    private var supabaseCard: some View {
         card(title: "クラウド同期 (Supabase)") {
             Toggle(isOn: $appState.cloudSyncEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -510,6 +744,129 @@ struct SettingsModal: View {
             }
             Text("※ Supabaseでプロジェクト作成 → テーブル作成SQLを実行 → URL と anon キーをここに入力 → 接続テスト。")
                 .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+        }
+    }
+
+    // MARK: - Google section
+
+    @ObservedObject private var gauth = GoogleOAuth.shared
+    @ObservedObject private var gcal  = GoogleCalendarSync.shared
+
+    private var googleSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            // Account status
+            card(title: "Google アカウント") {
+                if gauth.isConnected, let email = gauth.email {
+                    HStack(spacing: 12) {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("接続済み").font(.system(size: 12, weight: .semibold))
+                            Text(email).font(.system(size: 12)).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("切断") {
+                            gauth.disconnect()
+                            GoogleCalendarSync.shared.stopPeriodicSync()
+                            GmailSync.shared.stopPeriodicSync()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundColor(.red)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Google Cloud Console で「デスクトップ アプリ」タイプの OAuth 2.0 クライアント ID を作成し、クライアント ID とクライアント シークレットを入力してください。")
+                            .font(.system(size: 12)).foregroundColor(.secondary)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            fieldLabel("クライアント ID")
+                            styledField(TextField("123456789-xxx.apps.googleusercontent.com", text: $gauth.clientId))
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            fieldLabel("クライアント シークレット")
+                            styledField(SecureField("GOCSPX-...", text: $gauth.clientSecret))
+                        }
+
+                        if let err = gauth.errorMessage {
+                            Text(err).font(.system(size: 12)).foregroundColor(.red)
+                        }
+
+                        Button {
+                            Task { await gauth.connect() }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if gauth.isConnecting {
+                                    ProgressView().controlSize(.small)
+                                }
+                                Text(gauth.isConnecting ? "認証中…（ブラウザが開きます）" : "Google アカウントと接続")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            .padding(.horizontal, 16).padding(.vertical, 9)
+                            .background(gauth.isConnecting ? Color.secondary.opacity(0.2) : Color.accentColor)
+                            .foregroundColor(gauth.isConnecting ? .secondary : .white)
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(gauth.isConnecting || gauth.clientId.isEmpty || gauth.clientSecret.isEmpty)
+                    }
+                }
+            }
+
+            // Calendar sync
+            if gauth.isConnected {
+                card(title: "Google カレンダー") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("スケジュールと同期")
+                                .font(.system(size: 13, weight: .medium))
+                            Text(gcal.lastSyncStatus.isEmpty ? "未同期" : gcal.lastSyncStatus)
+                                .font(.system(size: 11)).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if gcal.isSyncing {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("今すぐ同期") {
+                                Task { await GoogleCalendarSync.shared.sync() }
+                            }
+                            .buttonStyle(.plain).font(.system(size: 12)).foregroundColor(.accentColor)
+                        }
+                    }
+                }
+
+                // Gmail
+                card(title: "Gmail") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("受信トレイ")
+                                .font(.system(size: 13, weight: .medium))
+                            Text(GmailSync.shared.lastSyncStatus.isEmpty ? "未同期" : GmailSync.shared.lastSyncStatus)
+                                .font(.system(size: 11)).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Gmail を開く") {
+                            appState.view = "gmail"
+                            appState.showSettings = false
+                        }
+                        .buttonStyle(.plain).font(.system(size: 12)).foregroundColor(.accentColor)
+                    }
+                }
+            }
+
+            // Setup guide link
+            card(title: "設定方法") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("1. Google Cloud Console → 「API とサービス」→「認証情報」")
+                        .font(.system(size: 12))
+                    Text("2. 「認証情報を作成」→「OAuth クライアント ID」→「デスクトップ アプリ」")
+                        .font(.system(size: 12))
+                    Text("3. Google Calendar API と Gmail API を有効化")
+                        .font(.system(size: 12))
+                    Text("4. 上記のクライアント ID / シークレットを貼り付けて「接続」")
+                        .font(.system(size: 12))
+                }
+                .foregroundColor(.secondary)
+            }
         }
     }
 

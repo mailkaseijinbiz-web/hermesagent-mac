@@ -235,6 +235,51 @@ class MobileServer {
         case ("DELETE", _) where pathOnly.hasPrefix("/api/sessions/"):
             let sessionId = String(pathOnly.dropFirst("/api/sessions/".count))
             handleDeleteSession(connection: connection, sessionId: sessionId, corsHeaders: corsHeaders)
+
+        // MARK: iOS parity — Dashboard / Schedule / Apps / EmployeeDetail / Gmail
+        case ("GET", "/api/dashboard"):
+            handleDashboard(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", "/api/calendar"):
+            handleCalendarList(connection: connection, month: query["month"], corsHeaders: corsHeaders)
+        case ("POST", "/api/calendar"):
+            handleCalendarCreate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("PUT", _) where pathOnly.hasPrefix("/api/calendar/"):
+            handleCalendarUpdate(connection: connection, id: String(pathOnly.dropFirst("/api/calendar/".count)), body: body, corsHeaders: corsHeaders)
+        case ("DELETE", _) where pathOnly.hasPrefix("/api/calendar/"):
+            handleCalendarDelete(connection: connection, id: String(pathOnly.dropFirst("/api/calendar/".count)), corsHeaders: corsHeaders)
+        case ("GET", "/api/apps"):
+            handleAppsList(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/apps"):
+            handleAppCreate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("PUT", _) where pathOnly.hasPrefix("/api/apps/"):
+            handleAppUpdate(connection: connection, id: String(pathOnly.dropFirst("/api/apps/".count)), body: body, corsHeaders: corsHeaders)
+        case ("DELETE", _) where pathOnly.hasPrefix("/api/apps/"):
+            handleAppDelete(connection: connection, id: String(pathOnly.dropFirst("/api/apps/".count)), corsHeaders: corsHeaders)
+        case ("GET", "/api/tasks"):
+            handleTasksList(connection: connection, employeeId: query["employeeId"], corsHeaders: corsHeaders)
+        case ("POST", "/api/tasks"):
+            handleTaskCreate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("PUT", _) where pathOnly.hasPrefix("/api/tasks/"):
+            handleTaskUpdate(connection: connection, id: String(pathOnly.dropFirst("/api/tasks/".count)), body: body, corsHeaders: corsHeaders)
+        case ("DELETE", _) where pathOnly.hasPrefix("/api/tasks/"):
+            handleTaskDelete(connection: connection, id: String(pathOnly.dropFirst("/api/tasks/".count)), corsHeaders: corsHeaders)
+        case ("GET", "/api/artifacts"):
+            handleArtifactsList(connection: connection, employeeId: query["employeeId"], corsHeaders: corsHeaders)
+        case ("POST", "/api/artifacts"):
+            handleArtifactCreate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("PUT", _) where pathOnly.hasPrefix("/api/artifacts/"):
+            handleArtifactUpdate(connection: connection, id: String(pathOnly.dropFirst("/api/artifacts/".count)), body: body, corsHeaders: corsHeaders)
+        case ("DELETE", _) where pathOnly.hasPrefix("/api/artifacts/"):
+            handleArtifactDelete(connection: connection, id: String(pathOnly.dropFirst("/api/artifacts/".count)), corsHeaders: corsHeaders)
+        case ("GET", _) where pathOnly.hasPrefix("/api/employees/") && pathOnly.hasSuffix("/files"):
+            let id = String(pathOnly.dropFirst("/api/employees/".count).dropLast("/files".count))
+            handleEmployeeFiles(connection: connection, employeeId: id, corsHeaders: corsHeaders)
+        case ("POST", "/api/gmail/send"):
+            handleGmailSend(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/gmail"):
+            handleGmailList(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", _) where pathOnly.hasPrefix("/api/gmail/"):
+            handleGmailThread(connection: connection, threadId: String(pathOnly.dropFirst("/api/gmail/".count)), corsHeaders: corsHeaders)
         default:
             sendResponse(connection: connection, status: 404, body: "{\"error\":\"Not Found\"}", corsHeaders: corsHeaders)
         }
@@ -305,23 +350,44 @@ class MobileServer {
         // Read the sessions table directly (covers cli/slack/whatsapp/cron uniformly,
         // and avoids the fragile CLI column-scraping used by the Mac UI).
         let rows = StateDB.shared.sessions()
+        let agy = AgyStore.shared.sessions()
         let iso = ISO8601DateFormatter()
-        let sessionsArray = rows.map { r -> [String: Any] in
+        // Union Hermes + agy sessions (agy turns aren't in the read-only state.db), newest first.
+        let hermesItems = rows.map { r -> (dict: [String: Any], updatedAt: Double) in
             let title = r.title.isEmpty ? (r.preview.isEmpty ? "(無題)" : String(r.preview.prefix(40))) : r.title
-            return [
-                "id": r.id,
-                "title": title,
-                "preview": String(r.preview.prefix(80)),
+            return ([
+                "id": r.id, "title": title, "preview": String(r.preview.prefix(80)),
                 "lastActive": iso.string(from: Date(timeIntervalSince1970: r.updatedAt)),
-                "source": r.source,
-                "messageCount": r.messageCount,
-                "lastMessageId": r.lastMessageId
-            ]
+                "source": r.source, "messageCount": r.messageCount, "lastMessageId": r.lastMessageId
+            ], r.updatedAt)
         }
+        let agyItems = agy.map { s -> (dict: [String: Any], updatedAt: Double) in
+            let preview = s.messages.last?.content ?? ""
+            return ([
+                "id": s.id, "title": s.title.isEmpty ? "(無題)" : s.title, "preview": String(preview.prefix(80)),
+                "lastActive": iso.string(from: Date(timeIntervalSince1970: s.updatedAt)),
+                "source": "antigravity", "messageCount": s.messages.count, "lastMessageId": 0
+            ], s.updatedAt)
+        }
+        let sorted = (hermesItems + agyItems).sorted { $0.updatedAt > $1.updatedAt }
         Task { @MainActor in
+            let state = AppState.shared
+            // Build sessionId → owning-employee map (so iOS can filter chats per employee
+            // exactly like the Mac sidebar, `AppState.visibleSessions`). "" = unowned (全体).
+            // Computed inline in the actor context (a nested func wouldn't be MainActor-isolated).
+            var ownerBySession = state.sessionOwner
+            for e in state.employees {
+                if let sid = e.sessionId, ownerBySession[sid] == nil { ownerBySession[sid] = e.id }
+            }
+            var sessionsArray: [[String: Any]] = []
+            for item in sorted {
+                var d = item.dict
+                if let sid = d["id"] as? String { d["employeeId"] = ownerBySession[sid] ?? "" }
+                sessionsArray.append(d)
+            }
             let json: [String: Any] = [
                 "sessions": sessionsArray,
-                "currentSessionId": AppState.shared.currentSessionId ?? ""
+                "currentSessionId": state.currentSessionId ?? ""
             ]
             if let data = try? JSONSerialization.data(withJSONObject: json),
                let str = String(data: data, encoding: .utf8) {
@@ -339,6 +405,22 @@ class MobileServer {
             sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid session id\"}", corsHeaders: corsHeaders)
             return
         }
+        // agy sessions: serve from the AgyStore with synthetic incrementing ids (full
+        // history each time; `after` deltas don't apply to the JSON store).
+        if AgyStore.isAgySession(sessionId) {
+            let stored = AgyStore.shared.messages(sessionId)
+            let msgs = stored.enumerated().map { (i, m) -> [String: Any] in
+                ["id": i + 1, "role": m.role, "content": m.content, "timestamp": m.ts]
+            }
+            let json: [String: Any] = ["sessionId": sessionId, "messages": msgs, "messageCount": stored.count]
+            if let data = try? JSONSerialization.data(withJSONObject: json),
+               let str = String(data: data, encoding: .utf8) {
+                sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+            } else {
+                sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+            return
+        }
         let rows = StateDB.shared.messages(sessionId: sessionId, after: after)
         let totalCount = StateDB.shared.visibleMessageCount(sessionId: sessionId)
         let msgs = rows.map { r -> [String: Any] in
@@ -353,10 +435,16 @@ class MobileServer {
         }
     }
 
+    /// Combined change token: Hermes state.db digest + agy store version, so agy turns
+    /// (which never touch state.db) still nudge clients to re-pull.
+    nonisolated func changeToken() -> String {
+        StateDB.shared.digest().token + "~" + AgyStore.shared.version()
+    }
+
     /// Cheap change-detection token for clients to decide whether to pull.
     private nonisolated func handleDigest(connection: NWConnection, corsHeaders: String) {
         let d = StateDB.shared.digest()
-        let json: [String: Any] = ["maxMessageId": d.maxMessageId, "sessionCount": d.sessionCount, "token": d.token]
+        let json: [String: Any] = ["maxMessageId": d.maxMessageId, "sessionCount": d.sessionCount, "token": changeToken()]
         if let data = try? JSONSerialization.data(withJSONObject: json),
            let str = String(data: data, encoding: .utf8) {
             sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
@@ -367,7 +455,7 @@ class MobileServer {
     private nonisolated func handleEvents(connection: NWConnection, corsHeaders: String) {
         let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\(corsHeaders)\r\n\r\n"
         sendRaw(connection: connection, text: headers)
-        let token = StateDB.shared.digest().token
+        let token = changeToken()
         sendRaw(connection: connection, text: "data: {\"type\":\"changed\",\"token\":\"\(token)\"}\n\n")
 
         connection.stateUpdateHandler = { [weak self] state in
@@ -399,7 +487,7 @@ class MobileServer {
     @MainActor
     private func tickEvents() {
         guard !eventConnections.isEmpty else { return }
-        let token = StateDB.shared.digest().token
+        let token = changeToken()
         if token != lastBroadcastToken {
             lastBroadcastToken = token
             let msg = "data: {\"type\":\"changed\",\"token\":\"\(token)\"}\n\n"
@@ -429,7 +517,7 @@ class MobileServer {
     /// The AI-employee roster (iOS company parity) — shared fields only.
     private nonisolated func handleEmployees(connection: NWConnection, corsHeaders: String) {
         Task { @MainActor in
-            let emps: [[String: Any]] = AppState.shared.employees.map { e in
+            let emps: [[String: Any]] = AppState.shared.sortedEmployees.map { e in
                 [
                     "id": e.id,
                     "name": e.name,
@@ -495,81 +583,98 @@ class MobileServer {
             // which would merge a phone's new chat into whatever the Mac has open).
             let effectiveSessionId: String? = (sessionId?.isEmpty == false) ? sessionId : nil
 
-            // Structured ACP relay: stream typed events (text/thought/tool activity)
-            // to the phone so it gets the same rich experience as the Mac (H1完遂).
-            if AppState.shared.useACPTransport {
-                let (tokens, ok) = await ACPClient.mobile.prompt(
-                    sentPrompt,
-                    imagePath: imagePath,
-                    cwd: cwd,
-                    resumeHermesSessionId: effectiveSessionId,
-                    startFresh: effectiveSessionId == nil,   // no id → a brand-new chat
-                    onChunk: { [weak self] text in
-                        self?.writeSSEJSON(connection: connection, ["type": "chunk", "content": text])
-                    },
-                    onThought: { [weak self] text in
-                        self?.writeSSEJSON(connection: connection, ["type": "thought", "content": text])
-                    },
-                    onToolActivity: { [weak self] calls in
-                        self?.writeSSEJSON(connection: connection, ["type": "tool_activity", "calls": calls.map { $0.sseDict }])
-                    }
-                )
-                if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
-                if !ok { self.writeSSEJSON(connection: connection, ["type": "error", "content": "ACP応答に失敗しました"]) }
-                self.writeSSEJSON(connection: connection, ["type": "done", "tokens": tokens ?? 0])
+            // Backend routing (provider→backend) via the shared AgentBackend abstraction.
+            // The relay uses ACPClient.mobile; per-kind bookkeeping (agy image guard +
+            // AgyStore, ACP tokens, CLI session reconcile) stays here.
+            let mobileEmployee = employeeId.flatMap { id in AppState.shared.employees.first { $0.id == id } }
+            let kind = BackendRouter.selectKind(provider: AppState.shared.provider,
+                                                useACP: AppState.shared.useACPTransport)
+            let rawText = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Close the SSE connection after a brief flush delay (shared across kinds).
+            func teardown() {
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
                     connection.cancel()
                     Task { @MainActor in self.activeStreamConnections.removeAll { $0 === connection } }
                 }
-                await AppState.shared.fetchSessions()
-                return
             }
 
-            let process = HermesCLI.shared.streamPrompt(
-                prompt: sentPrompt,
-                sessionId: effectiveSessionId,
-                imagePath: imagePath,
-                cwd: cwd,
-                onData: { [weak self] text in
-                    // Send raw chunk to iOS client
-                    let sseData = "data: {\"type\":\"chunk\",\"content\":\(self?.jsonEscape(text) ?? "\"\"")}\n\n"
-                    self?.sendRaw(connection: connection, text: sseData)
-                },
-                onStderr: { _ in },
-                onEnd: { [weak self] _ in
-                    // Clean up the temp image file.
-                    if let imagePath = imagePath {
-                        try? FileManager.default.removeItem(atPath: imagePath)
-                    }
-                    // Send done event
-                    let sseData = "data: {\"type\":\"done\"}\n\n"
-                    self?.sendRaw(connection: connection, text: sseData)
-
-                    // Close connection after a brief delay
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
-                        connection.cancel()
-                        Task { @MainActor in
-                            self?.activeStreamConnections.removeAll { $0 === connection }
-                        }
-                    }
-                    
-                    // Refresh sessions
-                    Task { @MainActor in
-                        await AppState.shared.fetchSessions()
-                        if AppState.shared.currentSessionId == nil {
-                            if let first = AppState.shared.sessions.first {
-                                AppState.shared.currentSessionId = first.id
-                            }
-                        }
-                    }
+            // agy is text-only: handle its image guard / install check / persona prompt here
+            // (it shapes the user text and surfaces errors before the backend runs).
+            var agyPrompt = ""
+            if kind == .antigravity {
+                if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
+                if rawText.isEmpty {
+                    self.writeSSEJSON(connection: connection, ["type": "error", "content": "Antigravity CLI (agy) は画像入力に対応していません。テキストで指定してください。"])
+                    self.writeSSEJSON(connection: connection, ["type": "done", "tokens": 0]); teardown(); return
                 }
-            )
-            
-            if process == nil {
-                let errorSSE = "data: {\"type\":\"error\",\"content\":\"Failed to start chat process\"}\n\n"
-                self.sendRaw(connection: connection, text: errorSSE)
-                connection.cancel()
+                guard await AntigravityCLI.shared.resolveBinaryAsync() != nil else {
+                    self.writeSSEJSON(connection: connection, ["type": "error", "content": AntigravityCLI.installHint])
+                    self.writeSSEJSON(connection: connection, ["type": "done", "tokens": 0]); teardown(); return
+                }
+                let userText = imagePath != nil ? rawText + "\n\n（注: 添付画像は Antigravity CLI では無視されます）" : rawText
+                agyPrompt = AppState.shared.antigravityPrompt(userText, employee: mobileEmployee, mode: mode)
             }
+
+            let req = AgentRequest(
+                prompt: sentPrompt, agyPrompt: agyPrompt,
+                imagePath: (kind == .antigravity ? nil : imagePath),   // agy already cleaned the temp image
+                cwd: cwd, sessionId: effectiveSessionId, startFresh: effectiveSessionId == nil,
+                agyModel: AppState.shared.modelForFixedProvider(mobileEmployee))
+
+            let backend = BackendRouter.make(kind, acp: .mobile)
+            let agyAcc = AgyStore.ReplyAccumulator()
+
+            let result = await backend.send(req, onStart: { _ in }) { [weak self] event in
+                guard let self = self else { return }
+                switch event {
+                case .chunk(let t):
+                    if kind == .antigravity { agyAcc.append(t) }   // raw; client strips ANSI/noise
+                    self.writeSSEJSON(connection: connection, ["type": "chunk", "content": t])
+                case .thought(let t):
+                    self.writeSSEJSON(connection: connection, ["type": "thought", "content": t])
+                case .toolActivity(let calls):
+                    self.writeSSEJSON(connection: connection, ["type": "tool_activity", "calls": calls.map { $0.sseDict }])
+                }
+            }
+
+            // Per-kind terminal handling (persistence / session reconcile / errors).
+            // Capture the resolved session id so a phone-created employee chat is recorded
+            // under that employee (drives per-employee filtering on iOS AND the Mac sidebar).
+            var ownedSessionId: String? = nil
+            switch kind {
+            case .antigravity:
+                let reply = AntigravityCLI.clean(agyAcc.value)
+                if !reply.isEmpty {
+                    ownedSessionId = AgyStore.shared.record(sessionId: effectiveSessionId, employeeId: employeeId,
+                                               userText: rawText, assistantText: reply,
+                                               timestamp: Date().timeIntervalSince1970)
+                } else {
+                    ownedSessionId = effectiveSessionId
+                }
+                self.writeSSEJSON(connection: connection, ["type": "done", "tokens": 0])
+            case .acp:
+                if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
+                if !result.ok { self.writeSSEJSON(connection: connection, ["type": "error", "content": "ACP応答に失敗しました"]) }
+                self.writeSSEJSON(connection: connection, ["type": "done", "tokens": result.tokens ?? 0])
+                await AppState.shared.fetchSessions()
+                ownedSessionId = result.hermesSessionId ?? effectiveSessionId
+            case .hermesCLI:
+                if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
+                if !result.ok { self.writeSSEJSON(connection: connection, ["type": "error", "content": "Failed to start chat process"]) }
+                self.writeSSEJSON(connection: connection, ["type": "done"])
+                await AppState.shared.fetchSessions()
+                if AppState.shared.currentSessionId == nil, let first = AppState.shared.sessions.first {
+                    AppState.shared.currentSessionId = first.id
+                }
+                ownedSessionId = effectiveSessionId ?? AppState.shared.sessions.first?.id
+            }
+            // Bind the (new) session to the employee the phone is talking as, so it appears
+            // under that employee on every device. recordSessionOwner is idempotent.
+            if let eid = employeeId, let sid = ownedSessionId {
+                AppState.shared.recordSessionOwner(sid, eid)
+            }
+            teardown()
         }
     }
     
@@ -702,8 +807,373 @@ class MobileServer {
         }
     }
     
+    // MARK: - iOS parity handlers (Dashboard / Calendar / Apps / Tasks / Artifacts / Files / Gmail)
+
+    /// Shared JSON 200 responder (encodes a dict; 500 on failure).
+    private nonisolated func sendJSON(connection: NWConnection, _ obj: [String: Any], corsHeaders: String) {
+        if let data = try? JSONSerialization.data(withJSONObject: obj),
+           let str = String(data: data, encoding: .utf8) {
+            sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+        } else {
+            sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// Parse a POST/PUT JSON body into a dict (nil on failure).
+    private nonisolated func parseBody(_ body: String) -> [String: Any]? {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return json
+    }
+
+    // ScheduleEvent → JSON (device-safe; google events keep their "gcal:" id so iOS marks them read-only).
+    @MainActor private func eventDict(_ e: ScheduleEvent) -> [String: Any] {
+        var d: [String: Any] = [
+            "id": e.id, "title": e.title, "detail": e.detail, "date": e.date,
+            "allDay": e.allDay, "createdAt": e.createdAt, "updatedAt": e.updatedAt,
+            "source": e.id.hasPrefix("gcal:") ? "google" : "local"
+        ]
+        if let a = e.assigneeId { d["assigneeId"] = a }
+        return d
+    }
+
+    @MainActor private func taskDict(_ t: WorkTask, _ empById: [String: Employee]) -> [String: Any] {
+        var d: [String: Any] = [
+            "id": t.id, "title": t.title, "detail": t.detail, "status": t.status.rawValue,
+            "createdAt": t.createdAt, "updatedAt": t.updatedAt
+        ]
+        if let a = t.assigneeId { d["assigneeId"] = a
+            if let e = empById[a] { d["assigneeName"] = e.name; d["assigneeEmoji"] = e.role.emoji } }
+        return d
+    }
+
+    // AppProject → JSON. folderPath (device-local) is NEVER sent; only the folder name.
+    @MainActor private func appDict(_ a: AppProject, _ empById: [String: Employee]) -> [String: Any] {
+        var d: [String: Any] = [
+            "id": a.id, "name": a.name, "detail": a.detail, "status": a.status.rawValue,
+            "previewURL": a.previewURL, "runCommand": a.runCommand,
+            "folderName": (a.folderPath as NSString).lastPathComponent,
+            "createdAt": a.createdAt, "updatedAt": a.updatedAt
+        ]
+        if let id = a.assigneeId { d["assigneeId"] = id
+            if let e = empById[id] { d["assigneeName"] = e.name; d["assigneeEmoji"] = e.role.emoji } }
+        return d
+    }
+
+    private nonisolated func handleDashboard(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let s = AppState.shared
+            let empById = Dictionary(s.employees.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            let cal = Calendar.current
+            let todayLocal = s.todayEvents
+            let todayGoogle = GoogleCalendarSync.shared.events.filter {
+                cal.isDateInToday(Date(timeIntervalSince1970: $0.date))
+            }
+            let todayEvents = (todayLocal + todayGoogle).sorted { $0.date < $1.date }
+            let pending = s.workTasks.filter { $0.status == .todo || $0.status == .doing }
+            let json: [String: Any] = [
+                "brief": s.dailyBrief,
+                "briefAt": s.dailyBriefAt,
+                "events": todayEvents.map { self.eventDict($0) },
+                "tasks": pending.prefix(20).map { self.taskDict($0, empById) },
+                "apps": s.sortedApps.prefix(12).map { self.appDict($0, empById) }
+            ]
+            self.sendJSON(connection: connection, json, corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleCalendarList(connection: NWConnection, month: String?, corsHeaders: String) {
+        Task { @MainActor in
+            let all = AppState.shared.events + GoogleCalendarSync.shared.events
+            let cal = Calendar.current
+            let filtered: [ScheduleEvent]
+            if let month = month, !month.isEmpty {
+                filtered = all.filter { ev in
+                    let c = cal.dateComponents([.year, .month], from: Date(timeIntervalSince1970: ev.date))
+                    return String(format: "%04d-%02d", c.year ?? 0, c.month ?? 0) == month
+                }
+            } else {
+                filtered = all
+            }
+            let arr = filtered.sorted { $0.date < $1.date }.map { self.eventDict($0) }
+            self.sendJSON(connection: connection, ["events": arr], corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleCalendarCreate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body), let title = json["title"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing title\"}", corsHeaders: corsHeaders); return
+        }
+        let date = (json["date"] as? Double) ?? Date().timeIntervalSince1970
+        let allDay = (json["allDay"] as? Bool) ?? true
+        let detail = (json["detail"] as? String) ?? ""
+        let assigneeId = json["assigneeId"] as? String
+        Task { @MainActor in
+            let e = AppState.shared.addEvent(title: title, date: date, allDay: allDay, detail: detail, assigneeId: assigneeId)
+            self.sendJSON(connection: connection, ["event": self.eventDict(e)], corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleCalendarUpdate(connection: NWConnection, id: String, body: String, corsHeaders: String) {
+        if id.hasPrefix("gcal:") {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Google events are read-only from mobile\"}", corsHeaders: corsHeaders); return
+        }
+        guard let json = parseBody(body) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Bad body\"}", corsHeaders: corsHeaders); return
+        }
+        // assigneeId is String?? on updateEvent: absent → leave unchanged; present → set (incl. nil to clear).
+        let assignee: String?? = json.keys.contains("assigneeId") ? .some(json["assigneeId"] as? String) : nil
+        Task { @MainActor in
+            AppState.shared.updateEvent(id, title: json["title"] as? String, date: json["date"] as? Double,
+                                        allDay: json["allDay"] as? Bool, detail: json["detail"] as? String,
+                                        assigneeId: assignee)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleCalendarDelete(connection: NWConnection, id: String, corsHeaders: String) {
+        if id.hasPrefix("gcal:") {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Google events are read-only from mobile\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            AppState.shared.deleteEvent(id)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleAppsList(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let s = AppState.shared
+            let empById = Dictionary(s.employees.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            self.sendJSON(connection: connection, ["apps": s.sortedApps.map { self.appDict($0, empById) }], corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleAppCreate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body), let name = json["name"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing name\"}", corsHeaders: corsHeaders); return
+        }
+        let detail = (json["detail"] as? String) ?? ""
+        let assigneeId = json["assigneeId"] as? String
+        let previewURL = (json["previewURL"] as? String) ?? ""
+        let runCommand = (json["runCommand"] as? String) ?? ""
+        Task { @MainActor in
+            let s = AppState.shared
+            guard let a = s.createApp(name: name, detail: detail, assigneeId: assigneeId, previewURL: previewURL, runCommand: runCommand) else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"create failed\"}", corsHeaders: corsHeaders); return
+            }
+            let empById = Dictionary(s.employees.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            self.sendJSON(connection: connection, ["app": self.appDict(a, empById)], corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleAppUpdate(connection: NWConnection, id: String, body: String, corsHeaders: String) {
+        guard let json = parseBody(body) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Bad body\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            let s = AppState.shared
+            s.updateApp(id, name: json["name"] as? String, detail: json["detail"] as? String,
+                        previewURL: json["previewURL"] as? String, runCommand: json["runCommand"] as? String)
+            if let st = json["status"] as? String, let status = AppStatus(rawValue: st) { s.setAppStatus(id, status) }
+            if json.keys.contains("assigneeId") { s.assignApp(id, to: json["assigneeId"] as? String) }
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleAppDelete(connection: NWConnection, id: String, corsHeaders: String) {
+        Task { @MainActor in
+            AppState.shared.deleteApp(id)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleTasksList(connection: NWConnection, employeeId: String?, corsHeaders: String) {
+        Task { @MainActor in
+            let s = AppState.shared
+            let empById = Dictionary(s.employees.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            let tasks = (employeeId?.isEmpty == false)
+                ? s.workTasks.filter { $0.assigneeId == employeeId }
+                : s.workTasks
+            self.sendJSON(connection: connection, ["tasks": tasks.map { self.taskDict($0, empById) }], corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleTaskCreate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body), let title = json["title"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing title\"}", corsHeaders: corsHeaders); return
+        }
+        let assigneeId = json["assigneeId"] as? String
+        Task { @MainActor in
+            let s = AppState.shared
+            let t = s.createTask(title: title, assigneeId: assigneeId)
+            let empById = Dictionary(s.employees.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            self.sendJSON(connection: connection, ["task": self.taskDict(t, empById)], corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleTaskUpdate(connection: NWConnection, id: String, body: String, corsHeaders: String) {
+        guard let json = parseBody(body) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Bad body\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            let s = AppState.shared
+            if let st = json["status"] as? String, let status = TaskStatus(rawValue: st) { s.setTaskStatus(id, status) }
+            if json.keys.contains("assigneeId") { s.assignTask(id, to: json["assigneeId"] as? String) }
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleTaskDelete(connection: NWConnection, id: String, corsHeaders: String) {
+        Task { @MainActor in
+            AppState.shared.deleteTask(id)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    // Artifacts: file artifacts are device-local (body is an absolute path) → never synced.
+    @MainActor private func artifactDict(_ a: Artifact) -> [String: Any] {
+        [
+            "id": a.id, "employeeId": a.employeeId, "title": a.title, "kind": a.kind.rawValue,
+            "body": a.kind == .file ? "" : a.body,
+            "createdAt": a.createdAt, "updatedAt": a.updatedAt
+        ]
+    }
+
+    private nonisolated func handleArtifactsList(connection: NWConnection, employeeId: String?, corsHeaders: String) {
+        Task { @MainActor in
+            let s = AppState.shared
+            let list = (employeeId?.isEmpty == false) ? s.artifactsFor(employeeId!) : s.artifacts
+            // Note/link sync with body; file artifacts are listed (title/date) but carry no body.
+            self.sendJSON(connection: connection, ["artifacts": list.map { self.artifactDict($0) }], corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleArtifactCreate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body),
+              let employeeId = json["employeeId"] as? String,
+              let kindRaw = json["kind"] as? String, let kind = ArtifactKind(rawValue: kindRaw) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing employeeId/kind\"}", corsHeaders: corsHeaders); return
+        }
+        if kind == .file {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"File artifacts cannot be created from mobile\"}", corsHeaders: corsHeaders); return
+        }
+        let title = (json["title"] as? String) ?? ""
+        let artBody = (json["body"] as? String) ?? ""
+        Task { @MainActor in
+            let a = AppState.shared.addArtifact(employeeId: employeeId, title: title, kind: kind, body: artBody)
+            self.sendJSON(connection: connection, ["artifact": self.artifactDict(a)], corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleArtifactUpdate(connection: NWConnection, id: String, body: String, corsHeaders: String) {
+        guard let json = parseBody(body) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Bad body\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            AppState.shared.updateArtifact(id, title: json["title"] as? String, body: json["body"] as? String)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleArtifactDelete(connection: NWConnection, id: String, corsHeaders: String) {
+        Task { @MainActor in
+            AppState.shared.deleteArtifact(id)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// Read-only flat listing of an employee's workspace folder. The absolute path is
+    /// NEVER exposed (device-local); only the folder name + entries (name/isDir/size/modified).
+    private nonisolated func handleEmployeeFiles(connection: NWConnection, employeeId: String, corsHeaders: String) {
+        Task { @MainActor in
+            guard let emp = AppState.shared.employees.first(where: { $0.id == employeeId }),
+                  let path = emp.workspacePath, !path.isEmpty else {
+                self.sendJSON(connection: connection, ["hasWorkspace": false, "workspace": "", "files": []], corsHeaders: corsHeaders); return
+            }
+            let folderName = (path as NSString).lastPathComponent
+            let fm = FileManager.default
+            var files: [[String: Any]] = []
+            if let entries = try? fm.contentsOfDirectory(atPath: path) {
+                for name in entries.sorted() where !name.hasPrefix(".") {
+                    let full = (path as NSString).appendingPathComponent(name)
+                    var isDir: ObjCBool = false
+                    fm.fileExists(atPath: full, isDirectory: &isDir)
+                    let attrs = try? fm.attributesOfItem(atPath: full)
+                    let size = (attrs?[.size] as? Int) ?? 0
+                    let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                    files.append(["name": name, "isDir": isDir.boolValue, "size": size, "modified": modified])
+                }
+            }
+            // Directories first, then files (both already alphabetical).
+            files.sort { (($0["isDir"] as? Bool) ?? false ? 0 : 1, ($0["name"] as? String) ?? "")
+                      <  (($1["isDir"] as? Bool) ?? false ? 0 : 1, ($1["name"] as? String) ?? "") }
+            self.sendJSON(connection: connection, ["hasWorkspace": true, "workspace": folderName, "files": files], corsHeaders: corsHeaders)
+        }
+    }
+
+    // MARK: Gmail proxy (GmailThread/GmailMessage are not Codable → manual JSON)
+
+    private nonisolated func handleGmailList(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let iso = ISO8601DateFormatter()
+            let arr = GmailSync.shared.threads.map { t -> [String: Any] in
+                [
+                    "id": t.id, "subject": t.subject, "from": t.from, "snippet": t.snippet,
+                    "hasUnread": t.hasUnread, "messageCount": t.messages.count,
+                    "lastDate": iso.string(from: t.lastDate)
+                ]
+            }
+            self.sendJSON(connection: connection, ["threads": arr], corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleGmailThread(connection: NWConnection, threadId: String, corsHeaders: String) {
+        Task { @MainActor in
+            let gmail = GmailSync.shared
+            do {
+                let thread: GmailThread
+                if let cached = gmail.threads.first(where: { $0.id == threadId }),
+                   cached.messages.contains(where: { !$0.body.isEmpty }) {
+                    thread = cached
+                } else {
+                    thread = try await gmail.loadThread(threadId)
+                }
+                let iso = ISO8601DateFormatter()
+                let msgs = thread.messages.map { m -> [String: Any] in
+                    [
+                        "id": m.id, "from": m.from, "subject": m.subject ?? "",
+                        "date": iso.string(from: m.date), "isUnread": m.isUnread,
+                        "snippet": m.snippet, "body": m.body
+                    ]
+                }
+                let payload: [String: Any] = ["id": thread.id, "subject": thread.subject, "from": thread.from, "messages": msgs]
+                self.sendJSON(connection: connection, ["thread": payload], corsHeaders: corsHeaders)
+            } catch {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"load failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    private nonisolated func handleGmailSend(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body),
+              let to = json["to"] as? String, !to.isEmpty,
+              let subject = json["subject"] as? String,
+              let mailBody = json["body"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing to/subject/body\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            do {
+                try await GmailSync.shared.sendEmail(to: to, subject: subject, body: mailBody)
+                self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+            } catch {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"send failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
     // MARK: - HTTP Response Helpers
-    
+
     private nonisolated func sendResponse(connection: NWConnection, status: Int, body: String, corsHeaders: String = "") {
         let statusText: String
         switch status {

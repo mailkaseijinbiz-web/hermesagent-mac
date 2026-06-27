@@ -260,6 +260,8 @@ struct EmployeeCard: View {
     @EnvironmentObject var appState: AppState
     let employee: Employee
     @State private var generating = false
+    @State private var renaming = false
+    @State private var newName = ""
 
     private var isActive: Bool { appState.activeEmployeeId == employee.id }
     private var shortModel: String {
@@ -299,8 +301,19 @@ struct EmployeeCard: View {
             }
             if generating { ProgressView().controlSize(.small) }
 
+            Button { appState.openEmployeePanel(employee.id) } label: {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 13)).foregroundColor(.secondary)
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.plain)
+            .help("タスク・成果物・ファイルを右パネルで管理")
+
             Menu {
+                Button { appState.openEmployeePanel(employee.id) } label: { Label("右パネルで管理", systemImage: "sidebar.right") }
+                Button { appState.openEmployeeDetail(employee.id) } label: { Label("全画面で管理", systemImage: "square.grid.2x2") }
                 Button { appState.switchEmployee(employee.id) } label: { Label("この社員と話す", systemImage: "bubble.left") }
+                Button { newName = employee.name; renaming = true } label: { Label("名前を変更", systemImage: "pencil") }
                 Menu {
                     Button { appState.assignEmployee(employee.id, toTeam: nil) } label: {
                         Label("未配属", systemImage: employee.teamId == nil ? "checkmark" : "minus")
@@ -316,6 +329,9 @@ struct EmployeeCard: View {
                         appState.assignEmployee(employee.id, toTeam: t.id)
                     }
                 } label: { Label("チームに配属", systemImage: "person.3") }
+                Button { appState.registerAutomationForEmployee(employee.id) } label: {
+                    Label("オートメーションに登録", systemImage: "clock.badge.plus")
+                }
                 Button {
                     generating = true
                     Task { await appState.generateAIAvatar(for: employee.id); generating = false }
@@ -339,6 +355,13 @@ struct EmployeeCard: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { appState.switchEmployee(employee.id) }
+        .alert("名前を変更", isPresented: $renaming) {
+            TextField("名前", text: $newName)
+            Button("変更") { appState.renameEmployee(employee.id, name: newName) }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("「\(employee.name)」の表示名を変更します。")
+        }
     }
 }
 
@@ -431,7 +454,7 @@ struct MeetingSheet: View {
             Text("参加者").font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
             ScrollView {
                 VStack(spacing: 4) {
-                    ForEach(appState.employees) { e in
+                    ForEach(appState.sortedEmployees) { e in
                         Button {
                             if selected.contains(e.id) { selected.remove(e.id) } else { selected.insert(e.id) }
                         } label: {

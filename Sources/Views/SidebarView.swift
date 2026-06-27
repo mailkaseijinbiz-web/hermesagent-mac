@@ -15,6 +15,9 @@ struct SidebarView: View {
             
             // Core Menu Actions
             VStack(spacing: 2) {
+                SidebarMenuButton(icon: "square.grid.2x2", title: "ダッシュボード") {
+                    appState.view = "dashboard"
+                }
                 SidebarMenuButton(icon: "doc.text", title: "新しいチャット") {
                     appState.handleNewChat()
                     appState.view = "chat"
@@ -22,8 +25,20 @@ struct SidebarView: View {
                 SidebarMenuButton(icon: "person.3", title: "会社（AI社員）") {
                     appState.view = "company"
                 }
+                SidebarMenuButton(icon: "newspaper", title: "ニュース") {
+                    appState.view = "news"
+                }
+                SidebarMenuButton(icon: "envelope", title: "Gmail") {
+                    appState.view = "gmail"
+                }
+                SidebarMenuButton(icon: "calendar", title: "スケジュール") {
+                    appState.view = "schedule"
+                }
                 SidebarMenuButton(icon: "checklist", title: "タスク") {
                     appState.view = "tasks"
+                }
+                SidebarMenuButton(icon: "hammer", title: "アプリ") {
+                    appState.view = "apps"
                 }
                 SidebarMenuButton(icon: "clock", title: "オートメーション") {
                     appState.view = "automations"
@@ -47,6 +62,7 @@ struct SidebarView: View {
                         .padding(.horizontal, 16)
                         .padding(.bottom, 2)
 
+                    // Stored order (not managers-first) so drag-and-drop reordering sticks.
                     ForEach(appState.employees) { emp in
                         let active = appState.activeEmployeeId == emp.id
                         HStack(spacing: 8) {
@@ -65,6 +81,23 @@ struct SidebarView: View {
                         .cornerRadius(6)
                         .contentShape(Rectangle())
                         .onTapGesture { appState.switchEmployee(emp.id) }
+                        // Drag-and-drop reorder: drag a row onto another to move it before it.
+                        .draggable(emp.id) {
+                            HStack(spacing: 6) {
+                                EmployeeAvatar(employee: emp, size: 18)
+                                Text(emp.name).font(.system(size: 12, weight: .medium))
+                            }.padding(6)
+                        }
+                        .dropDestination(for: String.self) { items, _ in
+                            guard let dragged = items.first, dragged != emp.id else { return false }
+                            appState.moveEmployee(dragged, before: emp.id)
+                            return true
+                        }
+                        .contextMenu {
+                            Button { appState.switchEmployee(emp.id) } label: { Label("この社員と話す", systemImage: "bubble.left") }
+                            Button { appState.openEmployeePanel(emp.id) } label: { Label("右パネルで管理", systemImage: "sidebar.right") }
+                            Button { appState.openEmployeeDetail(emp.id) } label: { Label("全画面で管理", systemImage: "square.grid.2x2") }
+                        }
                     }
 
                     HStack(spacing: 8) {

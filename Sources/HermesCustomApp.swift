@@ -10,6 +10,16 @@ struct HermesCustomApp: App {
                 .environmentObject(appState)
                 .frame(minWidth: 1000, minHeight: 650)
                 .background(VisualEffectView(material: .sidebar, blendingMode: .withinWindow))
+                .task {
+                    // Auto version-up: check the git remote on launch (+ every 6h). When a
+                    // new version exists, the auto-update toggle applies it, else we notify.
+                    let updater = UpdateManager.shared
+                    updater.startPeriodic()
+                    await updater.checkForUpdates(auto: true)
+                    if updater.updateAvailable && !updater.autoUpdate {
+                        appState.triggerToast(message: "新しいバージョンがあります（設定 → 一般 → アップデート）")
+                    }
+                }
         }
         .windowStyle(.hiddenTitleBar)
     }

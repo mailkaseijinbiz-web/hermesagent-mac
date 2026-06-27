@@ -19,6 +19,20 @@ enum MessageRole {
     case system
 }
 
+/// A file staged for the next chat message (composer attachment). `url` is a local path the
+/// agent can read; `imageData` is set when the file is an image (drives the preview + vision).
+struct AttachedFile: Identifiable, Equatable {
+    let id = UUID()
+    let url: URL
+    var imageData: Data? = nil
+    var name: String { url.lastPathComponent }
+    var ext: String { url.pathExtension.isEmpty ? "FILE" : url.pathExtension.uppercased() }
+    var isImage: Bool { imageData != nil }
+
+    static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "bmp", "tiff", "tif"]
+    static func isImagePath(_ url: URL) -> Bool { imageExtensions.contains(url.pathExtension.lowercased()) }
+}
+
 struct Message: Identifiable, Equatable {
     let id: UUID
     let role: MessageRole
@@ -34,8 +48,11 @@ struct Message: Identifiable, Equatable {
     // specialist who handled it (drives the avatar + "委譲" header).
     var delegatedName: String? = nil
     var delegatedRole: EmployeeRole? = nil
+    /// The id of the employee a delegated reply is attributed to (names aren't unique,
+    /// so this is the reliable key — e.g. for "成果物として保存").
+    var delegatedId: String? = nil
 
-    init(id: UUID = UUID(), role: MessageRole, content: String, isError: Bool = false, imageData: Data? = nil, typewriter: Bool = false, tokens: Int? = nil, elapsed: Double? = nil, toolCalls: [ACPToolCall] = [], thinking: String = "", delegatedName: String? = nil, delegatedRole: EmployeeRole? = nil) {
+    init(id: UUID = UUID(), role: MessageRole, content: String, isError: Bool = false, imageData: Data? = nil, typewriter: Bool = false, tokens: Int? = nil, elapsed: Double? = nil, toolCalls: [ACPToolCall] = [], thinking: String = "", delegatedName: String? = nil, delegatedRole: EmployeeRole? = nil, delegatedId: String? = nil) {
         self.id = id
         self.role = role
         self.content = content
@@ -48,6 +65,7 @@ struct Message: Identifiable, Equatable {
         self.thinking = thinking
         self.delegatedName = delegatedName
         self.delegatedRole = delegatedRole
+        self.delegatedId = delegatedId
     }
 }
 
@@ -203,16 +221,30 @@ class AppState: ObservableObject {
     @Published var currentSessionId: String? = nil
     @Published var messages: [Message] = []
     @Published var inputValue: String = ""
-    @Published var attachedImageData: Data? = nil  // dropped/attached image for the next message
+    // Files attached to the next message (drag-drop / picker / paste). Shown as composer
+    // thumbnails the user can remove. Images also feed --image (vision); all files' local
+    // paths are referenced in the sent prompt so the agent can read them.
+    @Published var attachedFiles: [AttachedFile] = []
+    /// The first attached image's bytes (for vision / the message bubble), or nil.
+    var attachedImageData: Data? { attachedFiles.first(where: { $0.isImage })?.imageData }
 
     // Channels (messaging platform recipients in ~/.hermes/channel_directory.json)
     @Published var channels: [HermesChannel] = []
     @Published var newChannelPlatform: String = "telegram"
     @Published var newChannelId: String = ""
     @Published var newChannelName: String = ""
-    @Published var isStreaming: Bool = false
+    /// True when the CURRENTLY ACTIVE employee has an in-flight turn.
+    /// Computed from `streamingEmployeeIds` (which IS @Published) so SwiftUI re-renders correctly.
+    var isStreaming: Bool { streamingEmployeeIds.contains(activeEmployeeId ?? "") }
     @Published var streamText: String = ""
     @Published var activeStatus: String = "online" // "online" | "thinking"
+    // Liveness of the visible streaming turn: when it started, and when the last chunk/thought/
+    // tool event actually arrived. Drives the "受信中 / 応答待ち / 遅延" indicator so the user can
+    // tell whether the agent is progressing or stalled (vs a purely decorative spinner).
+    @Published var streamStartedAt: Date? = nil
+    @Published var lastStreamActivityAt: Date? = nil
+    /// Bytes/chars streamed so far in the visible turn (a rising count = data is flowing).
+    @Published var streamedCharCount: Int = 0
     
     // Dashboard (Mobile Sync) State
     @Published var isDashboardRunning: Bool = false
@@ -221,6 +253,29 @@ class AppState: ObservableObject {
     
     // Mobile Server State
     @Published var isMobileServerRunning: Bool = false
+
+    // LINE bridge (bridge.py on :8650) — auto-started with the app so LINE always works.
+    @Published var isLineBridgeRunning: Bool = false
+    @Published var lineBridgeStatus: String = ""
+
+    /// Ensure the LINE bridge is running, then reflect its live state in the UI.
+    func startLineBridge() async {
+        lineBridgeStatus = LineBridge.shared.ensureRunning()
+        try? await Task.sleep(nanoseconds: 1_800_000_000)   // give bridge.py time to bind :8650
+        let up = LineBridge.shared.isPortUp()
+        isLineBridgeRunning = up
+        if up {
+            lineBridgeStatus = "LINEブリッジ稼働中（:\(LineBridge.shared.port)）"
+        } else if LineBridge.shared.isInstalled && !lineBridgeStatus.contains("失敗") {
+            lineBridgeStatus = "起動を試みました（応答待ち / ~/.hermes/line-bridge/bridge.log を確認）"
+        }
+    }
+
+    func restartLineBridge() async {
+        LineBridge.shared.stop()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        await startLineBridge()
+    }
 
     // Mobile Server Auth (Google Sign-In access gate)
     // When enabled, only requests carrying a valid Google ID token whose verified
@@ -279,6 +334,10 @@ class AppState: ObservableObject {
     @Published var agentMode: AgentMode = AgentMode(rawValue: UserDefaults.standard.string(forKey: "agentMode") ?? "") ?? .code {
         didSet { UserDefaults.standard.set(agentMode.rawValue, forKey: "agentMode") }
     }
+    // 出力ビューのモード（チャット内のその場切替）。`.chat` は従来の会話表示。
+    @Published var chatOutputMode: OutputViewMode = OutputViewMode(rawValue: UserDefaults.standard.string(forKey: "chatOutputMode") ?? "") ?? .chat {
+        didSet { UserDefaults.standard.set(chatOutputMode.rawValue, forKey: "chatOutputMode") }
+    }
     // The tool-permission request currently awaiting the user's decision (drives the dialog).
     @Published var pendingPermission: ACPPermission? = nil
     private var permissionCont: CheckedContinuation<String?, Never>? = nil
@@ -289,8 +348,14 @@ class AppState: ObservableObject {
     private var lastPushedMessageId: Int64 = 0
     
     // Settings Form State
-    @Published var provider: String = "openrouter"
-    @Published var defaultModel: String = "nvidia/nemotron-3-super-120b-a12b:free"
+    // Persisted to UserDefaults so a global Antigravity selection (deliberately never
+    // written to the Hermes config) survives a restart instead of reverting to Hermes.
+    @Published var provider: String = UserDefaults.standard.string(forKey: "globalProvider") ?? "openrouter" {
+        didSet { UserDefaults.standard.set(provider, forKey: "globalProvider") }
+    }
+    @Published var defaultModel: String = UserDefaults.standard.string(forKey: "globalDefaultModel") ?? "nvidia/nemotron-3-super-120b-a12b:free" {
+        didSet { UserDefaults.standard.set(defaultModel, forKey: "globalDefaultModel") }
+    }
     @Published var apiKey: String = ""
     @Published var personality: String = "kawaii"
     @Published var isSavingSettings: Bool = false
@@ -298,12 +363,29 @@ class AppState: ObservableObject {
     // New Feature States
     @Published var showRightSidebar: Bool = false
     // Which panel the right sidebar shows.
-    enum RightTab { case terminal, browser }
+    enum RightTab { case terminal, browser, employee }
     @Published var rightTab: RightTab = .terminal
     // Side terminal
     @Published var terminalOutput: String = ""
     @Published var terminalCwd: String = NSHomeDirectory()
     @Published var isRunningTerminalCommand: Bool = false
+    // One-click app launch (Phase F): id → live dev-server process, so 起動/停止 works
+    // and a running app shows a spinner. `appPreviewOpened` dedupes the auto-preview.
+    @Published var runningAppIds: Set<String> = []
+    private var appProcesses: [String: Process] = [:]
+    private var appPreviewOpened: Set<String> = []
+    // The URL a running app actually bound to (detected from its banner) — drives "別ウィンドウ".
+    private var detectedAppURL: [String: String] = [:]
+    // Auto-repair: how many times we've auto-fixed this app's launch (caps the loop), and the
+    // app to re-launch once the in-flight repair chat turn finishes.
+    private var appRepairAttempts: [String: Int] = [:]
+    private var pendingRelaunchAppId: String? = nil
+    // Monotonic launch token per app — a stale process's handlers bail if it changed (so a
+    // rapid 停止→起動 can't let the OLD process's terminationHandler clobber the NEW one's state).
+    private var appGenerations: [String: Int] = [:]
+    // When true, handleSendMessage skips local command interception (used by runAppAction to
+    // forward an augmented prompt to the agent without re-matching its own command pattern).
+    private var bypassCommandIntercept = false
     @Published var pluginsList: [HermesPlugin] = []
     @Published var isFetchingPlugins: Bool = false
     @Published var pluginInstallInput: String = ""
@@ -326,7 +408,7 @@ class AppState: ObservableObject {
     }
     // AI employees ("会社のメタファー"): each has isolated session/persona/model/cwd.
     @Published var employees: [Employee] = AppState.loadEmployees() {
-        didSet { AppState.saveEmployees(employees) }
+        didSet { AppState.saveEmployees(employees); scheduleICloudPush() }
     }
     @Published var activeEmployeeId: String? = UserDefaults.standard.string(forKey: "activeEmployeeId") {
         didSet { UserDefaults.standard.set(activeEmployeeId, forKey: "activeEmployeeId") }
@@ -335,13 +417,43 @@ class AppState: ObservableObject {
 
     // Teams (Phase A) and tasks (Phase B), persisted like employees.
     @Published var teams: [Team] = AppState.loadTeams() {
-        didSet { AppState.saveJSON(teams, "teams") }
+        didSet { AppState.saveJSON(teams, "teams"); scheduleICloudPush() }
     }
     @Published var workTasks: [WorkTask] = AppState.loadTasks() {
-        didSet { AppState.saveJSON(workTasks, "workTasks") }
+        didSet { AppState.saveJSON(workTasks, "workTasks"); scheduleICloudPush() }
     }
+    // Per-employee deliverables (Phase E), persisted + synced like tasks.
+    @Published var artifacts: [Artifact] = AppState.loadArtifacts() {
+        didSet { AppState.saveJSON(artifacts, "artifacts"); scheduleICloudPush() }
+    }
+    // AI-developed app projects (Phase F), persisted + synced like tasks.
+    @Published var apps: [AppProject] = AppState.loadApps() {
+        didSet { AppState.saveJSON(apps, "apps"); scheduleICloudPush() }
+    }
+    static func loadApps() -> [AppProject] { loadJSON("apps") ?? [] }
+    var sortedApps: [AppProject] { apps.sorted { $0.updatedAt > $1.updatedAt } }
+    // Calendar events (Phase G), persisted + synced like tasks.
+    @Published var events: [ScheduleEvent] = AppState.loadEvents() {
+        didSet { AppState.saveJSON(events, "events"); scheduleICloudPush() }
+    }
+    static func loadEvents() -> [ScheduleEvent] { loadJSON("events") ?? [] }
+
+    // Dashboard daily brief: an AI-written narrative summary of today, persisted with its
+    // timestamp so the dashboard can show "as of HH:mm" and auto-refresh when stale.
+    @Published var dailyBrief: String = UserDefaults.standard.string(forKey: "dailyBrief") ?? "" {
+        didSet { UserDefaults.standard.set(dailyBrief, forKey: "dailyBrief") }
+    }
+    @Published var dailyBriefAt: Double = UserDefaults.standard.double(forKey: "dailyBriefAt") {
+        didSet { UserDefaults.standard.set(dailyBriefAt, forKey: "dailyBriefAt") }
+    }
+    @Published var isGeneratingBrief: Bool = false
+
+    // The employee whose detail/management screen is open (view == "employee").
+    @Published var detailEmployeeId: String? = nil
+    var detailEmployee: Employee? { employees.first { $0.id == detailEmployeeId } }
     static func loadTeams() -> [Team] { loadJSON("teams") ?? [] }
     static func loadTasks() -> [WorkTask] { loadJSON("workTasks") ?? [] }
+    static func loadArtifacts() -> [Artifact] { loadJSON("artifacts") ?? [] }
     static func loadJSON<T: Decodable>(_ key: String) -> T? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
@@ -352,11 +464,112 @@ class AppState: ObservableObject {
 
     // Employees currently handling a delegated task (so they show a spinner too).
     @Published var busyEmployeeIds: Set<String> = []
+    /// All employee keys (id, or "" for 全体) that have an in-flight streaming turn.
+    /// Multiple employees can stream simultaneously — true parallel sends.
+    @Published var streamingEmployeeIds: Set<String> = []
 
-    /// True if this employee is actively working now (its own turn streaming, or a
-    /// delegated task running) — drives the spinner in the sidebar / company view.
+    // Per-employee backing stores for parallel streaming:
+    //   empStreamTexts  — raw accumulated chunk text per turn
+    //   empProcesses    — the CLI/agy Process per turn (for cancelStreaming)
+    //   empACPClients   — a dedicated ACPClient per employee (enables truly parallel ACP)
+    //   empMessages     — shadow message array (accumulates chunks in background)
+    private var empStreamTexts:  [String: String]   = [:]
+    private var empProcesses:    [String: Process]  = [:]
+    private var empACPClients:   [String: ACPClient] = [:]
+    private var empMessages:     [String: [Message]] = [:]
+
+    /// Convenience — stable key for an employee id (nil → "全体").
+    private func empKey(_ id: String?) -> String { id ?? "" }
+    /// Convenience — key for the currently active employee.
+    private func empKey() -> String { empKey(activeEmployeeId) }
+
+    // MARK: - 構造化出力（ニュース等）
+
+    /// メモ化キー：最新アシスタントメッセージの id + content 長。変化したときだけ再パース。
+    private var _entriesKey: String = ""
+    private var _entriesCache: [NewsEntry] = []
+
+    /// 現在の会話の「最新アシスタント出力（非エラー）」を解析した構造化エントリ。
+    /// メモ化済み：ストリーミング中の毎フレーム呼び出しでも再パースしない。
+    var latestAssistantEntries: [NewsEntry] {
+        guard let last = messages.last(where: { $0.role == .assistant && !$0.isError && !$0.content.isEmpty })
+        else { _entriesKey = ""; _entriesCache = []; return [] }
+        let key = last.id.uuidString + ":\(last.content.count)"
+        if key == _entriesKey { return _entriesCache }
+        _entriesKey = key
+        _entriesCache = NewsParser.parse(last.content)
+        return _entriesCache
+    }
+
+    /// チャット内ピッカーで実際に構造化できる出力があるか（あるときだけピッカーを出す）。
+    var hasStructurableOutput: Bool { !latestAssistantEntries.isEmpty }
+
+    /// メモ化キー：各キーの最新アシスタントメッセージ数を連結した文字列。
+    private var _newsKey: String = ""
+    private var _newsCache: [NewsFeedItem] = []
+
+    /// 読み込み済みの各会話（empMessages ＋現在の messages）から、解析で2件以上得られた
+    /// アシスタント出力を社員名タグ付きで集約。トップレベル Newsページの入力。
+    /// 現在会話を優先し、社員名でソートして決定的な順序を保証する。
+    var allNewsEntries: [NewsFeedItem] {
+        // 内容が変わったときだけ再パース（Newsページ毎描画での O(N) 回避）
+        var sources: [(key: String, msgs: [Message])] = empMessages
+            .sorted { $0.key < $1.key }
+            .map { ($0.key, $0.value) }
+        let curKey = empKey()
+        // 現在会話を後に追加（seenKeys により優先されて上書き）
+        sources.append((curKey, messages))
+
+        let newKey = sources.map { "\($0.key):\($0.msgs.count)" }.joined(separator: "|")
+        if newKey == _newsKey { return _newsCache }
+        _newsKey = newKey
+
+        var feed: [NewsFeedItem] = []
+        var seenKeys = Set<String>()
+
+        func nameForKey(_ key: String) -> String {
+            if key.isEmpty { return "全体チャット" }
+            return employees.first(where: { $0.id == key })?.name ?? "チャット"
+        }
+
+        // 現在会話を最後に追加するため reversed() で走査すると current が先勝ち
+        for src in sources.reversed() {
+            guard !seenKeys.contains(src.key) else { continue }
+            for msg in src.msgs.reversed() where msg.role == .assistant && !msg.isError && !msg.content.isEmpty {
+                let entries = NewsParser.parse(msg.content)
+                if entries.count >= 2 {
+                    feed.append(NewsFeedItem(employeeName: nameForKey(src.key),
+                                             employeeId: src.key.isEmpty ? nil : src.key,
+                                             entries: entries))
+                    seenKeys.insert(src.key)
+                    break
+                }
+            }
+        }
+        // 社員名で昇順ソートして表示順を安定させる
+        _newsCache = feed.sorted { $0.employeeName < $1.employeeName }
+        return _newsCache
+    }
+
+    /// True if this employee is actively working now (streaming or delegated task).
     func isEmployeeBusy(_ id: String) -> Bool {
-        busyEmployeeIds.contains(id) || (activeEmployeeId == id && isStreaming)
+        busyEmployeeIds.contains(id) || streamingEmployeeIds.contains(id)
+    }
+
+    /// Lazily create (or return existing) a dedicated ACPClient for an employee.
+    private func getOrCreateACPClient(for key: String) -> ACPClient {
+        if let c = empACPClients[key] { return c }
+        let c = ACPClient()
+        c.autoAllow = acpAutoAllow
+        c.onPermission = { [weak self] perm in
+            guard let self else { return nil }
+            return await withCheckedContinuation { cont in
+                self.permissionCont = cont
+                self.pendingPermission = perm
+            }
+        }
+        empACPClients[key] = c
+        return c
     }
 
     // sessionId → owning employeeId, so the sidebar can show only the active
@@ -613,9 +826,363 @@ class AppState: ObservableObject {
     @Published var cloudSyncStatus: String = ""
     @Published var isTestingCloud: Bool = false
 
-    /// The working directory the agent runs in: active employee's workspace, else the
-    /// selected GitHub repo, else home.
-    var effectiveCwd: String { activeEmployee?.workspacePath ?? selectedRepoPath ?? NSHomeDirectory() }
+    // iCloud (CloudKit) — Stage 0 foundation test. Proves the signed build can reach
+    // the private CloudKit DB before we build the real sync on top of it.
+    @Published var icloudStatus: String = ""
+    @Published var isTestingICloud: Bool = false
+
+    /// Write+read+delete one probe record in CloudKit to verify entitlements + account.
+    func testICloud() async {
+        isTestingICloud = true
+        defer { isTestingICloud = false }
+        icloudStatus = "テスト中…"
+        do {
+            icloudStatus = try await CloudKitSync.smokeTest()
+        } catch {
+            icloudStatus = "失敗: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - iCloud roster sync (Stage 1: employees / teams / tasks)
+
+    @Published var icloudSyncEnabled: Bool = UserDefaults.standard.bool(forKey: "icloudSyncEnabled") {
+        didSet {
+            UserDefaults.standard.set(icloudSyncEnabled, forKey: "icloudSyncEnabled")
+            if icloudUsable { Task { await syncRosterNow() }; startICloudLiveSync() }
+            else { stopICloudLiveSync() }
+        }
+    }
+    /// iCloud 同期が有効かつ entitlement が利用可能（未署名ビルドでのトラップ防止）。
+    var icloudUsable: Bool { icloudSyncEnabled && CloudKitSync.isAvailable }
+    @Published var isSyncingICloud: Bool = false
+    /// id → deletion time, so deletes propagate across devices (resurrection guard).
+    @Published var syncTombstones: [String: Double] = AppState.loadJSON("syncTombstones") ?? [:] {
+        didSet { AppState.saveJSON(syncTombstones, "syncTombstones") }
+    }
+    /// Set while applying a remote pull so the array didSets don't echo a push back.
+    private var isApplyingRemote = false
+    private var icloudPushTask: Task<Void, Never>? = nil
+    private var lastPushedRosterSig: Int = 0
+
+    /// Record a delete so it wins over stale copies on other devices.
+    func tombstone(_ id: String) { syncTombstones[id] = Date().timeIntervalSince1970 }
+
+    /// True if `id` was deleted at/after the item's own last edit (so the delete wins).
+    private func tombstoneWins(_ id: String, _ itemUpdated: Double) -> Bool {
+        if let ts = syncTombstones[id], ts >= itemUpdated { return true }
+        return false
+    }
+
+    /// Drop tombstones older than 60 days so the record doesn't grow without bound.
+    private func prunedTombstones() -> [String: Double] {
+        let cutoff = Date().timeIntervalSince1970 - 60 * 24 * 3600
+        return syncTombstones.filter { $0.value >= cutoff }
+    }
+
+    /// Build the shared-fields payload from current local state (call after merge).
+    private func localRosterPayload() -> CloudKitSync.RosterPayload {
+        let emps = employees.map {
+            CloudKitSync.EmployeeShared(
+                id: $0.id, name: $0.name, role: $0.role.rawValue,
+                provider: $0.provider, model: $0.model, mode: $0.mode.rawValue,
+                personaOverride: $0.personaOverride, teamId: $0.teamId,
+                createdAt: $0.createdAt, updatedAt: $0.updatedAt ?? $0.createdAt)
+        }
+        // .file artifacts hold a device-local absolute path (like workspacePath, which
+        // is deliberately not synced) — they'd render as broken rows on other devices, so
+        // only sync the portable kinds (note/link). Their deletes still propagate via tombstones.
+        return CloudKitSync.RosterPayload(employees: emps, teams: teams,
+                                          tasks: workTasks,
+                                          artifacts: artifacts.filter { $0.kind != .file },
+                                          apps: apps, events: events,
+                                          tombstones: prunedTombstones())
+    }
+
+    /// Merge a fetched cloud roster into local state (item-level last-write-wins + tombstones).
+    private func mergeRoster(_ cloud: CloudKitSync.RosterPayload) {
+        isApplyingRemote = true
+        defer { isApplyingRemote = false }
+
+        // Union tombstones (keep the newest deletion time per id).
+        for (id, ts) in cloud.tombstones where (syncTombstones[id] ?? 0) < ts { syncTombstones[id] = ts }
+
+        // Employees — LWW on shared fields; keep device-local fields (avatar/cwd/session).
+        for ce in cloud.employees {
+            guard let role = EmployeeRole(rawValue: ce.role) else { continue }
+            if tombstoneWins(ce.id, ce.updatedAt) { continue }
+            if let idx = employees.firstIndex(where: { $0.id == ce.id }) {
+                let local = employees[idx].updatedAt ?? employees[idx].createdAt
+                if ce.updatedAt > local {
+                    employees[idx].name = ce.name
+                    employees[idx].provider = ce.provider
+                    employees[idx].model = ce.model
+                    employees[idx].mode = AgentMode(rawValue: ce.mode) ?? role.defaultMode
+                    employees[idx].personaOverride = ce.personaOverride
+                    employees[idx].teamId = ce.teamId
+                    employees[idx].updatedAt = ce.updatedAt
+                }
+            } else {
+                var e = Employee(name: ce.name, role: role, provider: ce.provider,
+                                 model: ce.model, mode: AgentMode(rawValue: ce.mode) ?? role.defaultMode)
+                e.id = ce.id
+                e.personaOverride = ce.personaOverride
+                e.teamId = ce.teamId
+                e.createdAt = ce.createdAt
+                e.updatedAt = ce.updatedAt
+                employees.append(e)
+            }
+        }
+        employees.removeAll { tombstoneWins($0.id, $0.updatedAt ?? $0.createdAt) }
+
+        // Teams
+        for ct in cloud.teams {
+            if tombstoneWins(ct.id, ct.updatedAt ?? 0) { continue }
+            if let idx = teams.firstIndex(where: { $0.id == ct.id }) {
+                if (ct.updatedAt ?? 0) > (teams[idx].updatedAt ?? 0) { teams[idx] = ct }
+            } else {
+                teams.append(ct)
+            }
+        }
+        teams.removeAll { tombstoneWins($0.id, $0.updatedAt ?? 0) }
+
+        // Tasks
+        for ck in cloud.tasks {
+            if tombstoneWins(ck.id, ck.updatedAt) { continue }
+            if let idx = workTasks.firstIndex(where: { $0.id == ck.id }) {
+                if ck.updatedAt > workTasks[idx].updatedAt { workTasks[idx] = ck }
+            } else {
+                workTasks.append(ck)
+            }
+        }
+        workTasks.removeAll { tombstoneWins($0.id, $0.updatedAt) }
+
+        // Artifacts (Phase E)
+        for ca in cloud.artifacts {
+            if tombstoneWins(ca.id, ca.updatedAt) { continue }
+            if let idx = artifacts.firstIndex(where: { $0.id == ca.id }) {
+                if ca.updatedAt > artifacts[idx].updatedAt { artifacts[idx] = ca }
+            } else {
+                artifacts.append(ca)
+            }
+        }
+        artifacts.removeAll { tombstoneWins($0.id, $0.updatedAt) }
+
+        // Apps (Phase F)
+        for ca in cloud.apps {
+            if tombstoneWins(ca.id, ca.updatedAt) { continue }
+            if let idx = apps.firstIndex(where: { $0.id == ca.id }) {
+                if ca.updatedAt > apps[idx].updatedAt { apps[idx] = ca }
+            } else {
+                apps.append(ca)
+            }
+        }
+        apps.removeAll { tombstoneWins($0.id, $0.updatedAt) }
+
+        // Events (Phase G)
+        for ce in cloud.events {
+            if tombstoneWins(ce.id, ce.updatedAt) { continue }
+            if let idx = events.firstIndex(where: { $0.id == ce.id }) {
+                if ce.updatedAt > events[idx].updatedAt { events[idx] = ce }
+            } else {
+                events.append(ce)
+            }
+        }
+        events.removeAll { tombstoneWins($0.id, $0.updatedAt) }
+    }
+
+    /// Full sync: pull cloud, merge, then push the merged result.
+    func syncRosterNow() async {
+        guard icloudUsable else { icloudStatus = "iCloud同期がオフです"; return }
+        isSyncingICloud = true
+        defer { isSyncingICloud = false }
+        icloudStatus = "iCloud同期中…"
+        let ws = effectiveCloudWorkspace
+        do {
+            if let cloud = try await CloudKitSync.fetchRoster(workspace: ws) { mergeRoster(cloud) }
+            let payload = localRosterPayload()
+            try await CloudKitSync.pushRoster(payload, workspace: ws)
+            lastPushedRosterSig = rosterSignature(payload)
+            icloudStatus = "iCloud同期完了（社員\(employees.count)・チーム\(teams.count)・タスク\(workTasks.count)）"
+        } catch {
+            icloudStatus = "iCloud同期 失敗: \(error.localizedDescription)"
+        }
+    }
+
+    /// Debounced push triggered by local edits (skips device-local-only churn).
+    func scheduleICloudPush() {
+        guard icloudUsable, !isApplyingRemote else { return }
+        icloudPushTask?.cancel()
+        icloudPushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled, let self else { return }
+            await self.pushRosterOnly()
+        }
+    }
+
+    private func pushRosterOnly() async {
+        guard icloudUsable else { return }
+        let payload = localRosterPayload()
+        let sig = rosterSignature(payload)
+        guard sig != lastPushedRosterSig else { return }   // shared fields unchanged → skip
+        do {
+            try await CloudKitSync.pushRoster(payload, workspace: effectiveCloudWorkspace)
+            lastPushedRosterSig = sig
+        } catch {
+            icloudStatus = "iCloud push失敗: \(error.localizedDescription)"
+        }
+    }
+
+    private func rosterSignature(_ p: CloudKitSync.RosterPayload) -> Int {
+        (try? JSONEncoder().encode(p))?.hashValue ?? 0
+    }
+
+    // MARK: - iCloud message mirror (Stage 2: one-way; state.db is CLI-owned / read-only)
+
+    @Published var icloudMirrorMessages: Bool = UserDefaults.standard.bool(forKey: "icloudMirrorMessages") {
+        didSet {
+            UserDefaults.standard.set(icloudMirrorMessages, forKey: "icloudMirrorMessages")
+            if icloudMirrorMessages { Task { await mirrorMessagesNow() } }
+        }
+    }
+    @Published var isMirroringMessages: Bool = false
+    /// sessionId → last message id already mirrored (so only changed sessions re-push).
+    private var mirroredSessionMsgId: [String: Int64] = AppState.loadJSON("mirroredSessionMsgId") ?? [:] {
+        didSet { AppState.saveJSON(mirroredSessionMsgId, "mirroredSessionMsgId") }
+    }
+    private var mirrorPushTask: Task<Void, Never>? = nil
+    /// At most this many session logs per run (bounds latency; rest picked up next pass).
+    private let mirrorLogsPerRun = 40
+
+    /// Cap one session's mirrored messages under CloudKit's ~1MB record limit: keep the
+    /// most recent, dropping oldest until the JSON fits.
+    private func capMessages(_ rows: [StateDB.MessageRow]) -> [CloudKitSync.MessageDTO] {
+        var dtos = rows.suffix(1000).map {
+            CloudKitSync.MessageDTO(id: $0.id, role: $0.role, content: $0.content,
+                                    timestamp: $0.timestamp, tokenCount: $0.tokenCount)
+        }
+        while dtos.count > 1, let data = try? JSONEncoder().encode(dtos), data.count > 950_000 {
+            dtos.removeFirst(max(1, dtos.count / 10))
+        }
+        return dtos
+    }
+
+    /// Mirror sessions + (changed) messages up to CloudKit. One-way — never written back.
+    func mirrorMessagesNow() async {
+        guard icloudUsable else { icloudStatus = "iCloud同期がオフです"; return }
+        isMirroringMessages = true
+        defer { isMirroringMessages = false }
+        icloudStatus = "メッセージをミラー中…"
+        let ws = effectiveCloudWorkspace
+        let sessions = StateDB.shared.sessions(limit: 500)
+        do {
+            var metas: [CloudKitSync.SessionMeta] = []
+            var pushed = 0, remaining = 0
+            for s in sessions {
+                metas.append(CloudKitSync.SessionMeta(
+                    id: s.id, title: s.title, preview: s.preview, source: s.source,
+                    archived: s.archived, messageCount: s.messageCount,
+                    lastMessageId: s.lastMessageId, updatedAt: s.updatedAt))
+                guard s.lastMessageId > (mirroredSessionMsgId[s.id] ?? -1) else { continue }
+                if pushed >= mirrorLogsPerRun { remaining += 1; continue }
+                let msgs = capMessages(StateDB.shared.messages(sessionId: s.id))
+                try await CloudKitSync.pushSessionLog(ws: ws, sessionId: s.id, messages: msgs)
+                mirroredSessionMsgId[s.id] = s.lastMessageId
+                pushed += 1
+            }
+            try await CloudKitSync.pushSessionIndex(ws: ws, sessions: metas)
+            icloudStatus = remaining > 0
+                ? "メッセージをミラー（セッション\(metas.count)・更新\(pushed)、残り\(remaining)件は次回）"
+                : "メッセージをミラーしました（セッション\(metas.count)・更新\(pushed)）"
+            if remaining > 0 {   // more changed sessions remain → continue shortly
+                mirrorPushTask?.cancel()
+                mirrorPushTask = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    guard !Task.isCancelled, let self else { return }
+                    await self.mirrorMessagesNow()
+                }
+            }
+        } catch {
+            icloudStatus = "メッセージミラー失敗: \(error.localizedDescription)"
+        }
+    }
+
+    /// Debounced auto-mirror, triggered by store changes when the toggle is on.
+    func scheduleMessageMirror() {
+        guard icloudUsable, icloudMirrorMessages, !isMirroringMessages else { return }
+        mirrorPushTask?.cancel()
+        mirrorPushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            await self.mirrorMessagesNow()
+        }
+    }
+
+    /// Read the mirror back from CloudKit to confirm the one-way round-trip works.
+    func verifyCloudHistory() async {
+        guard icloudUsable else { icloudStatus = "iCloud同期がオフです"; return }
+        icloudStatus = "クラウド履歴を確認中…"
+        do {
+            let ws = effectiveCloudWorkspace
+            let metas = try await CloudKitSync.fetchSessionIndex(ws: ws)
+            let total = metas.reduce(0) { $0 + $1.messageCount }
+            if let first = metas.first {
+                let log = try await CloudKitSync.fetchSessionLog(ws: ws, sessionId: first.id)
+                icloudStatus = "クラウド履歴: セッション\(metas.count)件・メタ合計\(total)msg（先頭「\(first.title)」のミラー\(log.count)msg）"
+            } else {
+                icloudStatus = "クラウド履歴: セッション0件（まだミラーされていません）"
+            }
+        } catch {
+            icloudStatus = "履歴確認失敗: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - iCloud live sync (Stage 3: near-realtime via lightweight polling)
+    //
+    // The public DB can't use CKDatabaseSubscription (private/shared only), and
+    // CKQuerySubscription would need queryable indexes + a Push entitlement + an
+    // AppDelegate. Polling while the app is open gives ~realtime reflection of other
+    // devices' roster edits with zero extra setup. True APNs push is a later option.
+
+    private var livePollTask: Task<Void, Never>? = nil
+    private let livePollInterval: UInt64 = 20_000_000_000   // 20s
+
+    /// Pull + merge the roster without pushing (live poll / on focus). The
+    /// `isApplyingRemote` guard inside `mergeRoster` prevents an echo push.
+    private func pullRosterOnly() async {
+        guard icloudUsable else { return }
+        do {
+            if let cloud = try await CloudKitSync.fetchRoster(workspace: effectiveCloudWorkspace) {
+                mergeRoster(cloud)
+            }
+        } catch {
+            // transient (offline / throttled) — the next tick retries
+        }
+    }
+
+    /// Reflect other devices' roster changes in ~realtime while the app is open.
+    func startICloudLiveSync() {
+        livePollTask?.cancel()
+        guard icloudUsable else { livePollTask = nil; return }
+        let interval = livePollInterval
+        livePollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: interval)
+                guard let self, self.icloudUsable else { break }
+                await self.pullRosterOnly()
+            }
+        }
+    }
+
+    func stopICloudLiveSync() { livePollTask?.cancel(); livePollTask = nil }
+
+    /// Transient cwd override for "develop this app" — points the agent at the app folder
+    /// for this thread WITHOUT permanently changing the employee's own workspace. Cleared
+    /// on employee switch / new chat / session select.
+    @Published var cwdOverride: String? = nil
+
+    /// The working directory the agent runs in: develop-app override, else the active
+    /// employee's workspace, else the selected GitHub repo, else home.
+    var effectiveCwd: String { cwdOverride ?? activeEmployee?.workspacePath ?? selectedRepoPath ?? NSHomeDirectory() }
 
     // MARK: Employee persistence
     static func loadEmployees() -> [Employee] {
@@ -654,6 +1221,11 @@ class AppState: ObservableObject {
     // Phase D: the AI employee a scheduled task runs as (persona-wrapped).
     @Published var newCronAssigneeId: String? = nil
 
+    // 株モニタリング: 保有銘柄リスト & 株価APIキー(Twelve Data)。ディスク(~/.hermes/scripts/)が真実、
+    // これらは編集用バッファ。保存で書き出し、スクリプト(stock-monitor.py)が読む。
+    @Published var stockPortfolioText: String = AppState.loadPortfolioText()
+    @Published var stockApiKey: String = AppState.loadStockApiKey()
+
     // Automation suggestions (proactive proposals the user can one-tap into the form).
     @Published var aiSuggestions: [AutomationSuggestion] = []
     @Published var isGeneratingSuggestions: Bool = false
@@ -668,7 +1240,8 @@ class AppState: ObservableObject {
     // Workspace badge (header): the selected GitHub repo slug, else the app name.
     var workspaceName: String { selectedRepoSlug ?? "hermesagent-mac" }
 
-    private var activeProcess: Process? = nil
+    // Delegation-only process (separate from per-employee empProcesses used in handleSendMessage).
+    private var delegationProcess: Process? = nil
 
     // Store-sync: detect state.db changes (from iPhone/cron/etc.) and refresh the UI.
     private var storeSyncTimer: Task<Void, Never>? = nil
@@ -679,6 +1252,15 @@ class AppState: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.shutdown() }
         }
+        // Pull other devices' roster edits the moment the app regains focus.
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.icloudUsable else { return }
+                Task { await self.pullRosterOnly() }
+            }
+        }
+        // Auto-assign a working folder to every employee that doesn't have one (migration).
+        ensureAllEmployeeWorkspaces()
         Task {
             await fetchSessions()
             await fetchConfig()
@@ -686,12 +1268,18 @@ class AppState: ObservableObject {
             await updateDashboardURL()
             await fetchPlugins()
             await fetchAvailableModels()
+            fetchChannels()   // load registered channels (LINE etc.) so "LINEに〜送って" works
             setupACPPermissions()
             if cloudSyncEnabled { await syncEmployeesNow() }
+            if icloudUsable { await syncRosterNow() }
+            startICloudLiveSync()
 
             // Auto-start mobile server for iOS connectivity
             MobileServer.shared.start()
             self.isMobileServerRunning = true
+
+            // Keep the LINE bridge (bridge.py on :8650) running so LINE always works.
+            await startLineBridge()
 
             // Reflect changes made from other devices (iPhone/iPad) or sources (cron).
             startStoreSync()
@@ -720,8 +1308,18 @@ class AppState: ObservableObject {
 
     /// Terminate child processes and cancel timers on app quit.
     func shutdown() {
-        activeProcess?.terminate(); activeProcess = nil
+        delegationProcess?.terminate(); delegationProcess = nil
+        for proc in appProcesses.values {
+            let pid = proc.processIdentifier
+            proc.terminate()
+            if pid > 0 { AppState.terminateTree(pid) }
+        }
+        appProcesses.removeAll(); runningAppIds.removeAll()
+        for proc in empProcesses.values { proc.terminate() }; empProcesses.removeAll()
+        for client in empACPClients.values { client.shutdown() }; empACPClients.removeAll()
         storeSyncTimer?.cancel(); storeSyncTimer = nil
+        livePollTask?.cancel(); livePollTask = nil
+        LineBridge.shared.stop()
         ACPClient.shared.shutdown()
         ACPClient.mobile.shutdown()   // the mobile relay's own hermes acp process
         MobileServer.shared.stop()
@@ -749,6 +1347,7 @@ class AppState: ObservableObject {
                         self.lastStoreToken = d.token
                         await self.refreshFromStore()
                     }
+                    self.scheduleMessageMirror()   // mirror history on store change (toggle-gated)
                 }
                 if d.maxMessageId > self.lastPushedMessageId {
                     self.checkAndPush(currentMaxId: d.maxMessageId)
@@ -881,6 +1480,15 @@ class AppState: ObservableObject {
     /// Map persisted (user/assistant) messages from state.db to the UI model,
     /// attaching token count and elapsed time (vs the preceding message) to replies.
     func messagesFromStore(_ sessionId: String) -> [Message] {
+        // agy sessions live in the writable AgyStore, not the read-only Hermes state.db.
+        if AgyStore.isAgySession(sessionId) {
+            return AgyStore.shared.messages(sessionId).compactMap { m in
+                let role: MessageRole = m.role == "user" ? .user : .assistant
+                let content = role == .assistant ? stripNoiseLines(m.content) : m.content
+                guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return Message(role: role, content: content)
+            }
+        }
         let rows = StateDB.shared.messages(sessionId: sessionId)
         var result: [Message] = []
         var prevTimestamp: Double? = nil
@@ -911,16 +1519,24 @@ class AppState: ObservableObject {
     // leading digit → "Session not found"). The store gives exact IDs.
     func fetchSessions() async {
         let rows = StateDB.shared.sessions()
+        let agy = AgyStore.shared.sessions()
         // Keep the existing list on a transient empty read (e.g. DB momentarily locked),
         // rather than clearing the sidebar.
-        guard !rows.isEmpty || sessions.isEmpty else { return }
-        self.sessions = rows.map { r in
-            // Defensive: strip any mode-directive sentinel that leaked into title/preview.
+        guard !rows.isEmpty || !agy.isEmpty || sessions.isEmpty else { return }
+        // Union Hermes + agy sessions, newest first by last-updated.
+        let hermesItems: [(id: String, title: String, preview: String, updatedAt: Double)] = rows.map { r in
             let cleanTitle = AgentMode.strip(r.title)
             let cleanPreview = AgentMode.strip(r.preview)
             let title = cleanTitle.isEmpty ? (cleanPreview.isEmpty ? "(無題)" : String(cleanPreview.prefix(30))) : cleanTitle
-            return Session(id: r.id, title: title, preview: String(cleanPreview.prefix(60)), lastActive: "")
+            return (r.id, title, String(cleanPreview.prefix(60)), r.updatedAt)
         }
+        let agyItems: [(id: String, title: String, preview: String, updatedAt: Double)] = agy.map { s in
+            let preview = s.messages.last?.content ?? ""
+            return (s.id, s.title.isEmpty ? "(無題)" : s.title, String(preview.prefix(60)), s.updatedAt)
+        }
+        self.sessions = (hermesItems + agyItems)
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .map { Session(id: $0.id, title: $0.title, preview: $0.preview, lastActive: "") }
     }
     
     // Fetch configuration
@@ -935,10 +1551,13 @@ class AppState: ObservableObject {
                         .replacingOccurrences(of: "'", with: "\"")
                     if let data = jsonStr.data(using: .utf8),
                        let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        if let prov = dict["provider"] as? String {
-                            self.provider = prov
-                        }
-                        if let def = dict["default"] as? String {
+                        // The provider is a Settings-only, fixed value — never overwrite it
+                        // from the Hermes config. Only pick up a model change when the config
+                        // still matches the fixed provider (so it can't apply a stale model
+                        // from a different provider). Compare against the Hermes-side provider id
+                        // (cerebras → "custom"), since that's what's written to disk.
+                        let cfgProvider = dict["provider"] as? String
+                        if let def = dict["default"] as? String, cfgProvider == AppState.hermesProviderId(self.provider) {
                             self.defaultModel = def
                         }
                     }
@@ -965,15 +1584,21 @@ class AppState: ObservableObject {
         self.currentSessionId = nil
         self.messages = []
         self.inputValue = ""
+        self.chatOutputMode = .chat   // 新しい会話は従来のチャット表示から
+        self.cwdOverride = nil   // a fresh chat is not an app-develop thread
         // A new chat for the active employee starts a fresh isolated thread.
         if let empId = activeEmployeeId, let idx = employees.firstIndex(where: { $0.id == empId }) {
             employees[idx].sessionId = nil
         }
-        ACPClient.shared.resetSession()   // start a fresh ACP session for the new chat
+        // Reset both the shared client and this employee's dedicated client.
+        ACPClient.shared.resetSession()
+        empACPClients[empKey()]?.resetSession()
+        empMessages.removeValue(forKey: empKey())  // clear any stale shadow for this employee
     }
-    
+
     func handleSelectSession(_ session: Session) {
         self.currentSessionId = session.id
+        self.cwdOverride = nil   // viewing an existing chat is not an app-develop thread
         // Load the real conversation history from the store (was a placeholder before).
         let stored = messagesFromStore(session.id)
         self.messages = stored.isEmpty
@@ -991,8 +1616,9 @@ class AppState: ObservableObject {
                 activeEmployeeId = nil
             }
         }
-        // Drop any live ACP session so the next send resumes THIS session (resumeHermesSessionId).
+        // Drop any live ACP session so the next send resumes THIS session.
         ACPClient.shared.resetSession()
+        empACPClients[empKey()]?.resetSession()
     }
     
     // Overload for mobile API — select session by ID string
@@ -1009,6 +1635,13 @@ class AppState: ObservableObject {
     }
     
     func handleDeleteSession(id: String) async {
+        // agy sessions live in the AgyStore, not the Hermes CLI's store.
+        if AgyStore.isAgySession(id) {
+            AgyStore.shared.delete(id)
+            if self.currentSessionId == id { handleNewChat() }
+            await fetchSessions()
+            return
+        }
         let res = await HermesCLI.shared.exec(args: ["sessions", "delete", "--yes", id])
         if res.success {
             if self.currentSessionId == id {
@@ -1023,164 +1656,362 @@ class AppState: ObservableObject {
         return parseResponseText(raw)
     }
     
+    /// Send a tapped quick-reply choice as the next message (from the choice chips).
+    func sendQuickReply(_ text: String) {
+        guard !isStreaming, !text.isEmpty else { return }
+        inputValue = text
+        handleSendMessage()
+    }
+
     func handleSendMessage() {
         let text = inputValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let imgData = attachedImageData
-        guard (!text.isEmpty || imgData != nil) && !isStreaming else { return }
+        let files = attachedFiles
+        let imgData = files.first(where: { $0.isImage })?.imageData
+        guard !text.isEmpty || !files.isEmpty else { return }
+        // Block only if THIS employee already has an in-flight turn (other employees can still send).
+        let curKey = empKey()
+        if streamingEmployeeIds.contains(curKey) {
+            triggerToast(message: "応答中です。完了までお待ちください。"); return
+        }
 
-        // Optional image → temp file for the CLI's --image flag.
-        let imagePath: String? = imgData.flatMap { writeTempImage($0) }
-
-        self.messages.append(Message(role: .user, content: text, imageData: imgData))
-        self.inputValue = ""
-        self.attachedImageData = nil
-        self.isStreaming = true
-        self.activeStatus = "thinking"
-        self.streamText = ""
-
-        // Single assistant bubble updated in place (stable id) so the typewriter
-        // animation reveals characters continuously without restarting.
-        let assistantId = UUID()
-        self.messages.append(Message(id: assistantId, role: .assistant, content: "", typewriter: true))
-
-        let effectivePrompt = (text.isEmpty && imagePath != nil) ? "添付した画像について説明してください。" : text
-        // Append the active employee's persona + chat/code mode directive (sentinel-stripped from display).
-        let sentPrompt = wrapForSend(effectivePrompt)
-
-        // H1: structured ACP transport (clean text + tokens, foundation for tool viz).
-        if useACPTransport {
-            sendViaACP(assistantId: assistantId, prompt: sentPrompt, imagePath: imagePath)
+        // App-managed task command: "…のタスクを追加" / "タスク追加: …" actually creates a
+        // WorkTask assigned to the active employee. The chat agent runs in a separate
+        // process and can't touch the app's task store, so without this it just hallucinates
+        // a "added it" reply (the bug). Handled locally → real task + deterministic confirm.
+        if !bypassCommandIntercept, files.isEmpty, let title = parseTaskAddCommand(text) {
+            let task = createTask(title: title, assigneeId: activeEmployeeId)
+            messages.append(Message(role: .user, content: text))
+            let who = activeEmployee.map { "（\($0.name)）" } ?? ""
+            messages.append(Message(role: .system, content: "✅ タスクを追加しました\(who)：「\(task.title)」（未着手）"))
+            inputValue = ""
+            attachedFiles = []
+            triggerToast(message: "タスクを追加：\(task.title)")
             return
         }
 
-        self.activeProcess = HermesCLI.shared.streamPrompt(
-            prompt: sentPrompt,
-            sessionId: currentSessionId,
-            imagePath: imagePath,
-            cwd: effectiveCwd,
-            onData: { [weak self] chunk in
-                guard let self = self else { return }
-                DispatchQueue.main.async {
-                    self.streamText += chunk
-                    let cleaned = self.parseResponseText(self.streamText)
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        self.messages[idx].content = cleaned
-                    }
+        // App-managed action command: "〇〇アプリで〜を作成/更新して" performs a REAL data
+        // operation inside the registered app — routed to the agent running in the app's folder
+        // (which uses the app's HTTP API or data files; see chatControllableRequirement).
+        if !bypassCommandIntercept, files.isEmpty, let action = parseAppActionCommand(text) {
+            inputValue = ""
+            attachedFiles = []
+            if action.destructive {
+                // Deletes/overwrites of real data → require an explicit confirmation tap.
+                let app = action.app
+                messages.append(Message(role: .user, content: text))
+                messages.append(Message(role: .system, content: "⚠️ これは「\(app.name)」の実データを変更・削除する操作です。問題なければ実行してください。"))
+                triggerToast(message: "データ変更を含む操作です", actionLabel: "実行する") { [weak self] in
+                    self?.runAppAction(app: app, command: text)
                 }
-            },
-            onStderr: { chunk in
-                print("CLI stderr: \(chunk)")
-            },
-            onEnd: { [weak self] code in
-                guard let self = self else { return }
-                DispatchQueue.main.async {
-                    self.isStreaming = false
-                    self.activeStatus = "online"
-                    self.activeProcess = nil
+            } else {
+                runAppAction(app: action.app, command: text)
+            }
+            return
+        }
 
-                    let cleaned = self.parseResponseText(self.streamText)
-                    self.streamText = ""
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        if cleaned.isEmpty {
-                            // Empty reply → show a clear error + retry (was silently dropped).
-                            self.messages[idx].content = "応答がありませんでした。モデルが応答していない可能性があります（モデルを確認）。"
-                            self.messages[idx].isError = true
-                            self.messages[idx].typewriter = false
+        // App-managed launch command: "〇〇アプリを開いて / 起動して" actually launches the
+        // registered app (starts its dev-server + opens the preview). Handled locally so the
+        // chat agent doesn't just describe it.
+        if !bypassCommandIntercept, files.isEmpty, let app = parseAppLaunchCommand(text) {
+            messages.append(Message(role: .user, content: text))
+            let running = isAppRunning(app.id)
+            messages.append(Message(role: .system, content: running
+                ? "🪟 「\(app.name)」を開きます（起動中）"
+                : "▶️ 「\(app.name)」を起動します…"))
+            inputValue = ""
+            attachedFiles = []
+            launchApp(app.id)
+            return
+        }
+
+        // App-managed send command: "LINEに〜を送って" actually delivers the message to the
+        // registered LINE channel via the bridge (the chat agent can't reach it). Handled
+        // locally → real send + deterministic confirmation. The user typed the instruction
+        // themselves, so acting on it is authorized.
+        if !bypassCommandIntercept, files.isEmpty, looksLikeLineSend(text) {
+            if let cmd = parseLineSendCommand(text) {
+                messages.append(Message(role: .user, content: text))
+                inputValue = ""
+                attachedFiles = []
+                let sendingId = UUID()
+                messages.append(Message(id: sendingId, role: .system, content: "📤 LINE（\(cmd.channel.name)）に送信中…「\(cmd.message)」"))
+                Task { @MainActor in
+                    let r = await self.sendToChannel(cmd.channel, text: cmd.message)
+                    if let idx = self.messages.firstIndex(where: { $0.id == sendingId }) {
+                        if r.ok {
+                            self.messages[idx].content = "✅ LINE（\(cmd.channel.name)）に送信しました：「\(cmd.message)」"
                         } else {
-                            self.messages[idx].content = cleaned
+                            self.messages[idx].content = "⚠️ LINE送信に失敗しました：\(String(r.detail.prefix(120)))"
+                            self.messages[idx].isError = true
                         }
                     }
-                    if let imagePath = imagePath {
-                        try? FileManager.default.removeItem(atPath: imagePath)
-                    }
+                    self.triggerToast(message: r.ok ? "LINEに送信しました" : "LINE送信に失敗しました")
+                }
+                return
+            }
+            // Looks like a LINE-send request but no LINE channel is registered.
+            if !channels.contains(where: { $0.platform.lowercased() == "line" }) {
+                messages.append(Message(role: .user, content: text))
+                messages.append(Message(role: .system, content: "⚠️ 送信先のLINEチャンネルが登録されていません。設定 → チャンネル でLINEのIDを追加してください。"))
+                inputValue = ""; attachedFiles = []
+                return
+            }
+        }
 
-                    Task {
-                        await self.fetchSessions()
+        let imagePath: String? = imgData.flatMap { writeTempImage($0) }
+        // Show the attached file names in the user bubble so the history reflects them.
+        let displayText: String = {
+            guard !files.isEmpty else { return text }
+            let names = files.map { "📎 \($0.name)" }.joined(separator: "  ")
+            return text.isEmpty ? names : "\(text)\n\(names)"
+        }()
 
-                        // If it was a new session, auto-resume the latest one (exact id from the store)
-                        if self.currentSessionId == nil {
-                            try? await Task.sleep(nanoseconds: 1_000_000_000)
-                            await self.fetchSessions()
-                            if let first = self.sessions.first {
-                                self.currentSessionId = first.id
+        self.messages.append(Message(role: .user, content: displayText, imageData: imgData))
+        self.inputValue = ""
+        self.attachedFiles = []
+        streamingEmployeeIds.insert(curKey)  // mark THIS employee as streaming
+        self.activeStatus = "thinking"
+        self.streamText = ""
+        empStreamTexts[curKey] = ""
+        let now = Date()
+        self.streamStartedAt = now
+        self.lastStreamActivityAt = now
+        self.streamedCharCount = 0
+
+        // Stable id for the streaming bubble — updated in place by chunk events.
+        let assistantId = UUID()
+        self.messages.append(Message(id: assistantId, role: .assistant, content: "", typewriter: true))
+        // Snapshot current messages into the shadow (background streaming keeps chunks here).
+        empMessages[curKey] = messages
+
+        // Reference attached files by their local path so the agent (which has file tools) can
+        // open them. Images beyond the first — and all non-image files — go here; the first
+        // image additionally rides --image for vision.
+        let fileRefs: String = {
+            let paths = files.map { $0.url.path }
+            guard !paths.isEmpty else { return "" }
+            let list = paths.map { "- \($0)" }.joined(separator: "\n")
+            return "\n\n【添付ファイル】以下のローカルファイルを読んで対応してください:\n\(list)"
+        }()
+        var effectivePrompt = text
+        if effectivePrompt.isEmpty { effectivePrompt = imagePath != nil ? "添付した画像について説明してください。" : "添付したファイルを確認してください。" }
+        effectivePrompt += fileRefs
+        let sentPrompt = wrapForSend(effectivePrompt)
+        let kind = BackendRouter.selectKind(provider: provider, useACP: useACPTransport)
+
+        var agyPrompt = ""
+        if kind == .antigravity {
+            if imagePath != nil && text.trimmingCharacters(in: .whitespaces).isEmpty {
+                finishSendError(assistantId, imagePath, "Antigravity CLI (agy) は画像入力に対応していません。テキストで指定してください。", owningKey: curKey)
+                return
+            }
+            var userText = text.isEmpty ? "添付したファイルを確認してください。" : text
+            userText += fileRefs
+            if imagePath != nil { userText += "\n\n（注: 添付画像は Antigravity CLI では無視されます）" }
+            agyPrompt = antigravityPrompt(userText, employee: activeEmployee, mode: agentMode)
+        }
+
+        let req = AgentRequest(
+            prompt: sentPrompt, agyPrompt: agyPrompt,
+            imagePath: (kind == .antigravity ? nil : imagePath),
+            cwd: effectiveCwd, sessionId: currentSessionId, startFresh: currentSessionId == nil,
+            agyModel: modelForFixedProvider(activeEmployee))
+        let userText = text
+        let started = Date()
+        // Capture owning context at send time — survives any mid-stream switch.
+        let owningEmployeeId = activeEmployeeId
+        let owningSessionId = currentSessionId
+        let owningKey = curKey
+
+        Task { @MainActor in
+            if kind != .antigravity { await self.modelApplyTask?.value }
+            if kind == .antigravity, await AntigravityCLI.shared.resolveBinaryAsync() == nil {
+                self.finishSendError(assistantId, imagePath, AntigravityCLI.installHint, owningKey: owningKey)
+                return
+            }
+
+            // Dedicated ACP client per employee enables truly parallel ACP turns.
+            // HermesCLI/agy already spawn independent processes — no sharing needed.
+            let acp = kind == .acp ? self.getOrCreateACPClient(for: owningKey) : ACPClient.shared
+            let backend = BackendRouter.make(kind, acp: acp)
+
+            let result = await backend.send(
+                req,
+                onStart: { [weak self] proc in
+                    guard let proc = proc else { return }
+                    self?.empProcesses[owningKey] = proc
+                },
+                onEvent: { [weak self] event in
+                    guard let self = self else { return }
+                    DispatchQueue.main.async {
+                        let isActive = (self.activeEmployeeId == owningEmployeeId)
+                        // Heartbeat: a real event just arrived → the turn is progressing, not stuck.
+                        if isActive {
+                            self.lastStreamActivityAt = Date()
+                            if case .chunk(let t) = event { self.streamedCharCount += t.count }
+                            else if case .thought(let t) = event { self.streamedCharCount += t.count }
+                        }
+                        switch event {
+                        case .chunk(let t):
+                            self.empStreamTexts[owningKey, default: ""] += t
+                            let rawText = self.empStreamTexts[owningKey] ?? ""
+                            let parsed: String
+                            switch kind {
+                            case .hermesCLI:   parsed = self.parseResponseText(rawText)
+                            case .antigravity: parsed = AntigravityCLI.clean(rawText)
+                            case .acp:         parsed = rawText
+                            }
+                            // Always update the shadow (background streaming).
+                            if let idx = self.empMessages[owningKey]?.firstIndex(where: { $0.id == assistantId }) {
+                                self.empMessages[owningKey]![idx].content = parsed
+                            }
+                            // Update visible messages + streamText only when this is the active employee.
+                            if isActive {
+                                if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
+                                    self.messages[idx].content = parsed
+                                }
+                                self.streamText = rawText
+                            }
+                        case .thought(let t):
+                            if let idx = self.empMessages[owningKey]?.firstIndex(where: { $0.id == assistantId }) {
+                                self.empMessages[owningKey]![idx].thinking += t
+                            }
+                            if isActive, let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
+                                self.messages[idx].thinking += t
+                            }
+                        case .toolActivity(let calls):
+                            if let idx = self.empMessages[owningKey]?.firstIndex(where: { $0.id == assistantId }) {
+                                self.empMessages[owningKey]![idx].toolCalls = calls
+                            }
+                            if isActive, let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
+                                self.messages[idx].toolCalls = calls
                             }
                         }
-                        self.bindCurrentSessionToActiveEmployee()
                     }
+                })
+
+            // Clean up this employee's streaming state.
+            self.streamingEmployeeIds.remove(owningKey)
+            self.empProcesses.removeValue(forKey: owningKey)
+            let rawStream = self.empStreamTexts.removeValue(forKey: owningKey) ?? ""
+
+            let isActive = (self.activeEmployeeId == owningEmployeeId)
+            if isActive { self.streamText = ""; self.streamStartedAt = nil; self.lastStreamActivityAt = nil }
+            if self.streamingEmployeeIds.isEmpty { self.activeStatus = "online" }
+
+            let final: String
+            switch kind {
+            case .hermesCLI:   final = self.parseResponseText(rawStream)
+            case .antigravity: final = AntigravityCLI.clean(rawStream)
+            case .acp:         final = rawStream
+            }
+
+            // Finalize the bubble in the shadow array (always — needed if user switches back).
+            if let idx = self.empMessages[owningKey]?.firstIndex(where: { $0.id == assistantId }) {
+                self.empMessages[owningKey]![idx].elapsed = Date().timeIntervalSince(started)
+                if final.isEmpty {
+                    self.empMessages[owningKey]![idx].content = self.emptyTurnMessage(kind: kind, ok: result.ok, raw: rawStream)
+                    self.empMessages[owningKey]![idx].isError = true
+                    self.empMessages[owningKey]![idx].typewriter = false
+                } else {
+                    self.empMessages[owningKey]![idx].content = final
+                    if kind == .acp { self.empMessages[owningKey]![idx].tokens = result.tokens }
                 }
             }
-        )
-    }
-    
-    /// H1 thin slice: stream a reply via the ACP transport (structured, clean text + tokens).
-    private func sendViaACP(assistantId: UUID, prompt: String, imagePath: String?) {
-        Task { [weak self] in
-            guard let self = self else { return }
-            // Ensure the active employee's model config is applied before the session starts.
-            await self.modelApplyTask?.value
-            var acc = ""
-            let (tokens, ok) = await ACPClient.shared.prompt(
-                prompt,
-                imagePath: imagePath,
-                cwd: effectiveCwd,
-                // Resume the active session (employee/selected) so context isn't lost;
-                // no id → a brand-new session.
-                resumeHermesSessionId: currentSessionId,
-                startFresh: currentSessionId == nil,
-                onChunk: { [weak self] chunk in
-                    guard let self = self else { return }
-                    acc += chunk
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        self.messages[idx].content = acc   // ACP text is already clean (no banner/ANSI)
-                    }
-                },
-                onThought: { [weak self] t in
-                    guard let self = self else { return }
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        self.messages[idx].thinking += t
-                    }
-                },
-                onToolActivity: { [weak self] calls in
-                    guard let self = self else { return }
-                    if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                        self.messages[idx].toolCalls = calls
-                    }
-                }
-            )
-            self.isStreaming = false
-            self.activeStatus = "online"
-            if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
-
-            if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                if acc.isEmpty {
-                    // Empty reply (failed or model returned nothing) → show a clear error + retry.
-                    self.messages[idx].content = ok
-                        ? "応答がありませんでした。モデルが応答していない可能性があります（モデルを確認）。"
-                        : "応答に失敗しました。接続やモデル設定を確認してください。"
+            // Finalize visible messages only when still viewing this employee.
+            if isActive, let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
+                self.messages[idx].elapsed = Date().timeIntervalSince(started)
+                if final.isEmpty {
+                    self.messages[idx].content = self.emptyTurnMessage(kind: kind, ok: result.ok, raw: rawStream)
                     self.messages[idx].isError = true
                     self.messages[idx].typewriter = false
+                    if self.rawIndicatesNoToolSupport(rawStream) { self.modelHealth[self.defaultModel] = false }
                 } else {
-                    self.messages[idx].content = acc
-                    self.messages[idx].tokens = tokens
+                    self.messages[idx].content = final
+                    if kind == .acp { self.messages[idx].tokens = result.tokens }
                 }
             }
-            // Reconcile to the session ACP actually used (new or resumed) so the UI and
-            // the employee record both follow it — not a stale id.
-            if let hsid = ACPClient.shared.hermesSessionId {
-                self.currentSessionId = hsid
+            if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
+
+            // Session reconcile attributed to the owning employee.
+            let stillViewing = isActive
+            var turnSession: String? = owningSessionId
+            switch kind {
+            case .acp:
+                turnSession = acp.hermesSessionId ?? owningSessionId
+                if stillViewing, let s = turnSession { self.currentSessionId = s }
+                await self.fetchSessions()
+            case .antigravity:
+                if !final.isEmpty {
+                    let sid = AgyStore.shared.record(sessionId: owningSessionId, employeeId: owningEmployeeId,
+                                                     userText: userText, assistantText: final, timestamp: Date().timeIntervalSince1970)
+                    turnSession = sid
+                    if stillViewing { self.currentSessionId = sid }
+                    await self.fetchSessions()
+                }
+            case .hermesCLI:
+                await self.fetchSessions()
+                if turnSession == nil {
+                    if self.sessions.first == nil {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        await self.fetchSessions()
+                    }
+                    turnSession = self.sessions.first?.id
+                    if stillViewing, self.currentSessionId == nil { self.currentSessionId = turnSession }
+                }
             }
-            self.bindCurrentSessionToActiveEmployee()
-            await self.fetchSessions()
+            self.bindSession(turnSession, toEmployee: owningEmployeeId)
+            // Turn complete — the store is authoritative; clear the in-flight shadow.
+            self.empMessages.removeValue(forKey: owningKey)
+
+            // If the agent produced a PDF (e.g. an invoice), surface it — open the file so it
+            // "comes back" to the user. Only opens a real on-disk .pdf the reply names.
+            if !final.isEmpty, owningEmployeeId == self.activeEmployeeId {
+                self.openReferencedPDF(in: final)
+            }
+
+            // Auto-repair follow-through: this turn was an AI fix for a failed app launch —
+            // re-launch the app now that the fix is done (a brief pause lets files settle).
+            if let relaunchId = self.pendingRelaunchAppId {
+                self.pendingRelaunchAppId = nil
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    self.terminalOutput += "\n🔄 修復が完了しました。再起動します…\n"
+                    self.launchApp(relaunchId)
+                }
+            }
         }
+    }
+
+    /// Finalize a send turn with an error bubble (agy image-only / not-installed pre-checks).
+    private func finishSendError(_ assistantId: UUID, _ imagePath: String?, _ msg: String, owningKey: String) {
+        if let idx = messages.firstIndex(where: { $0.id == assistantId }) {
+            messages[idx].content = msg
+            messages[idx].isError = true
+            messages[idx].typewriter = false
+        }
+        streamingEmployeeIds.remove(owningKey)
+        streamText = ""
+        empStreamTexts.removeValue(forKey: owningKey)
+        empMessages.removeValue(forKey: owningKey)
+        if owningKey == empKey() { streamStartedAt = nil; lastStreamActivityAt = nil }
+        if streamingEmployeeIds.isEmpty { activeStatus = "online" }
+        if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
     }
 
     func cancelStreaming() {
-        if let proc = activeProcess {
-            proc.terminate()
-            activeProcess = nil
-        }
-        self.isStreaming = false
-        self.activeStatus = "online"
+        let key = empKey()
+        empProcesses[key]?.terminate()
+        empProcesses.removeValue(forKey: key)
+        // Shut down and remove the dedicated ACP client (will be recreated on next send).
+        empACPClients[key]?.shutdown()
+        empACPClients.removeValue(forKey: key)
+        streamingEmployeeIds.remove(key)
+        streamText = ""
+        empStreamTexts.removeValue(forKey: key)
+        empMessages.removeValue(forKey: key)
+        streamStartedAt = nil; lastStreamActivityAt = nil
+        if streamingEmployeeIds.isEmpty { activeStatus = "online" }
     }
 
     /// Re-send the most recent user message (after a failed/empty reply). Drops the
@@ -1192,7 +2023,10 @@ class AppState: ObservableObject {
         let img = messages[userIdx].imageData
         messages.removeSubrange(userIdx...)   // drop the failed user+assistant turn
         inputValue = text
-        attachedImageData = img
+        attachedFiles = []
+        if let img = img, let path = writeTempImage(img) {
+            attachedFiles = [AttachedFile(url: URL(fileURLWithPath: path), imageData: img)]
+        }
         handleSendMessage()
     }
 
@@ -1206,6 +2040,29 @@ class AppState: ObservableObject {
             return nil
         }
     }
+
+    // MARK: - Composer attachments
+
+    /// Stage a file (drop / picker) as a composer attachment. De-dupes by path; loads image
+    /// bytes for a preview when it's an image. Capped so the composer can't be flooded.
+    func attachFileURL(_ url: URL) {
+        guard attachedFiles.count < 10,
+              !attachedFiles.contains(where: { $0.url.path == url.path }) else { return }
+        var imgData: Data? = nil
+        if AttachedFile.isImagePath(url), let img = NSImage(contentsOf: url) {
+            imgData = img.jpegData() ?? (try? Data(contentsOf: url))
+        }
+        attachedFiles.append(AttachedFile(url: url, imageData: imgData))
+    }
+
+    /// Stage raw image bytes (dragged from a browser / pasted) → write a temp file so the
+    /// attachment has a local path the agent can read.
+    func attachImageData(_ data: Data) {
+        guard attachedFiles.count < 10, let path = writeTempImage(data) else { return }
+        attachedFiles.append(AttachedFile(url: URL(fileURLWithPath: path), imageData: data))
+    }
+
+    func removeAttachment(_ id: UUID) { attachedFiles.removeAll { $0.id == id } }
     
     // Quick model presets for the in-composer switcher.
     struct ModelPreset: Identifiable {
@@ -1215,11 +2072,12 @@ class AppState: ObservableObject {
         let model: String
     }
 
-    /// One model from the live OpenRouter catalog (dynamic list).
+    /// One model from a live provider catalog (dynamic list).
     struct ModelOption: Identifiable, Equatable {
-        let id: String      // "anthropic/claude-opus-4.8"
+        let id: String      // "anthropic/claude-opus-4.8" or "llama-3.3-70b"
         let name: String    // display name
-        var provider: String { id.contains("/") ? String(id.split(separator: "/")[0]) : "other" }
+        var group: String? = nil   // explicit grouping label (e.g. "cerebras" when ids have no "/")
+        var provider: String { group ?? (id.contains("/") ? String(id.split(separator: "/")[0]) : "other") }
     }
 
     /// Live catalog (fetched from OpenRouter) so the picker never goes stale/404.
@@ -1232,12 +2090,18 @@ class AppState: ObservableObject {
             .sorted { $0.provider < $1.provider }
     }
 
-    /// Fetch the OpenRouter model catalog (valid, current IDs) for the picker.
+    /// Fetch the live model catalog for the CURRENT provider (valid, current IDs) for the
+    /// picker. Provider-aware: OpenRouter, Cerebras (and any OpenAI-compatible base URL).
     func fetchAvailableModels() async {
-        guard let url = URL(string: "https://openrouter.ai/api/v1/models") else { return }
+        // Antigravity has its own preset list (no HTTP catalog).
+        guard provider != AntigravityCLI.providerId,
+              let urlStr = AppState.providerModelsURL(provider),
+              let url = URL(string: urlStr) else { self.availableModels = []; return }
+        // Cerebras ids have no "/", so group them explicitly under the provider name.
+        let groupLabel: String? = provider == "openrouter" ? nil : provider
         var req = URLRequest(url: url)
         req.timeoutInterval = 12
-        let key = HermesCLI.shared.getApiKey(provider: "openrouter")
+        let key = HermesCLI.shared.getApiKey(provider: provider)
         if !key.isEmpty { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         do {
             let (data, _) = try await URLSession.shared.data(for: req)
@@ -1246,10 +2110,10 @@ class AppState: ObservableObject {
             var opts: [ModelOption] = []
             for m in arr {
                 guard let id = m["id"] as? String else { continue }
-                opts.append(ModelOption(id: id, name: (m["name"] as? String) ?? id))
+                opts.append(ModelOption(id: id, name: (m["name"] as? String) ?? id, group: groupLabel))
             }
             self.availableModels = opts.sorted { $0.id < $1.id }
-            Log.app.info("loaded \(self.availableModels.count) models from OpenRouter")
+            Log.app.info("loaded \(self.availableModels.count) models from \(self.provider)")
         } catch {
             Log.app.error("fetchAvailableModels failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -1265,6 +2129,93 @@ class AppState: ObservableObject {
         .init(label: "GPT-4o mini（画像対応・安価）", provider: "openrouter", model: "openai/gpt-4o-mini"),
         .init(label: "Gemini 3.5 Flash（画像対応・要クレジット）", provider: "openrouter", model: "google/gemini-3.5-flash"),
     ]
+
+    /// Curated Cerebras models (very fast inference; tool-calling capable). Availability
+    /// depends on the account/tier — use "すべてのモデル" (the live catalog from
+    /// fetchAvailableModels) for the authoritative, account-specific list.
+    static let cerebrasPresets: [ModelPreset] = [
+        .init(label: "GLM 4.7（推奨・強力）", provider: "cerebras", model: "zai-glm-4.7"),
+        .init(label: "GPT-OSS 120B", provider: "cerebras", model: "gpt-oss-120b"),
+        .init(label: "Qwen3 235B Instruct", provider: "cerebras", model: "qwen-3-235b-a22b-instruct-2507"),
+        .init(label: "Qwen3 Coder 480B（コーディング）", provider: "cerebras", model: "qwen-3-coder-480b"),
+        .init(label: "Llama 3.3 70B（高速）", provider: "cerebras", model: "llama-3.3-70b"),
+    ]
+
+    /// Presets for the currently selected inference provider (composer / palette).
+    var currentModelPresets: [ModelPreset] {
+        switch provider {
+        case "cerebras": return AppState.cerebrasPresets
+        default:         return AppState.modelPresets
+        }
+    }
+
+    // MARK: - Inference provider routing (app provider id → Hermes config)
+
+    /// The OpenAI-compatible base URL written to Hermes `model.base_url` for an app
+    /// provider. "" means "let Hermes use its built-in default for this provider".
+    static func providerBaseURL(_ provider: String) -> String {
+        switch provider {
+        case "openrouter": return "https://openrouter.ai/api/v1"
+        case "cerebras":   return "https://api.cerebras.ai/v1"
+        default:           return ""
+        }
+    }
+
+    /// The value written to Hermes `model.provider`. Cerebras is NOT a built-in Hermes
+    /// provider, so it routes through Hermes' generic "custom" path: model.provider=custom
+    /// + base_url=api.cerebras.ai, where Hermes derives CEREBRAS_API_KEY from the host
+    /// (hermes_cli/runtime_provider._host_derived_api_key). Verified against hermes v0.17.
+    static func hermesProviderId(_ provider: String) -> String {
+        provider == "cerebras" ? "custom" : provider
+    }
+
+    /// api_mode to pin for OpenAI chat-completions providers (nil = let Hermes auto-detect).
+    static func providerAPIMode(_ provider: String) -> String? {
+        switch provider {
+        case "openrouter", "cerebras": return "chat_completions"
+        default:                       return nil
+        }
+    }
+
+    /// The OpenAI-compatible model-catalog endpoint for a provider (for the picker).
+    static func providerModelsURL(_ provider: String) -> String? {
+        let base = providerBaseURL(provider)
+        return base.isEmpty ? nil : base + "/models"
+    }
+
+    /// Human-readable provider name for user-facing messages.
+    static func providerDisplayName(_ provider: String) -> String {
+        switch provider {
+        case "openrouter":   return "OpenRouter"
+        case "cerebras":     return "Cerebras"
+        case "openai":       return "OpenAI"
+        case "anthropic":    return "Anthropic"
+        case "gemini":       return "Google Gemini"
+        case AntigravityCLI.providerId: return "Antigravity"
+        default:             return provider.isEmpty ? "選択中のプロバイダー" : provider
+        }
+    }
+
+    /// Write the full Hermes model config for an app provider + model in one place:
+    /// handles the cerebras→custom routing, base_url, api_mode, and clears a stale
+    /// `model.api_key` on the custom route so Hermes resolves the host-derived key
+    /// (a leftover key would otherwise leak to the wrong endpoint — verified). Antigravity
+    /// is a separate backend and must never be written into the Hermes config.
+    func writeHermesModelConfig(provider: String, model: String) async {
+        guard provider != AntigravityCLI.providerId else { return }
+        let hermesProvider = AppState.hermesProviderId(provider)
+        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.provider", hermesProvider])
+        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.default", model])
+        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.base_url", AppState.providerBaseURL(provider)])
+        if let mode = AppState.providerAPIMode(provider) {
+            _ = await HermesCLI.shared.exec(args: ["config", "set", "model.api_mode", mode])
+        }
+        // Custom route (cerebras): clear any persisted model.api_key so Hermes falls through
+        // to the host-derived CEREBRAS_API_KEY instead of leaking a stale OpenRouter key.
+        if hermesProvider == "custom" {
+            _ = await HermesCLI.shared.exec(args: ["config", "set", "model.api_key", ""])
+        }
+    }
 
     // MARK: - GitHub workspace
 
@@ -1353,20 +2304,68 @@ class AppState: ObservableObject {
     func hireEmployee(name: String, role: EmployeeRole) -> Employee {
         let emp = Employee.make(name: name.trimmingCharacters(in: .whitespacesAndNewlines), role: role)
         employees.append(emp)
+        ensureEmployeeWorkspace(emp.id)   // auto-assign a working folder on hire
         triggerToast(message: "\(emp.role.title)「\(emp.name)」を採用しました")
         if cloudSyncEnabled { Task { await pushEmployees() } }
         return emp
     }
 
     /// Fire (remove) an employee, with an Undo toast (avatar kept for restore).
+    /// Cascades to the employee's per-employee data so nothing is orphaned: their
+    /// artifacts are tombstoned+removed and their tasks are unassigned (kept on the
+    /// board as 未割当). Undo restores all of it.
     func fireEmployee(_ id: String) {
         guard let removed = employees.first(where: { $0.id == id }) else { return }
+        // Capture owned data before removal (for cascade + undo).
+        let removedArtifacts = artifacts.filter { $0.employeeId == id }
+        let unassignedTaskIds = workTasks.filter { $0.assigneeId == id }.map { $0.id }
+        let unassignedAppIds = apps.filter { $0.assigneeId == id }.map { $0.id }
+        let unassignedEventIds = events.filter { $0.assigneeId == id }.map { $0.id }
+
         employees.removeAll { $0.id == id }
+        tombstone(id)
+        // Cascade: tombstone+remove the employee's artifacts; unassign tasks/apps/events.
+        for a in removedArtifacts { tombstone(a.id) }
+        artifacts.removeAll { $0.employeeId == id }
+        let nowFire = Date().timeIntervalSince1970
+        for i in workTasks.indices where workTasks[i].assigneeId == id {
+            workTasks[i].assigneeId = nil; workTasks[i].updatedAt = nowFire
+        }
+        for i in apps.indices where apps[i].assigneeId == id {
+            apps[i].assigneeId = nil; apps[i].updatedAt = nowFire
+        }
+        for i in events.indices where events[i].assigneeId == id {
+            events[i].assigneeId = nil; events[i].updatedAt = nowFire
+        }
+
         if activeEmployeeId == id { switchEmployee(nil) }
         if cloudSyncEnabled { Task { await deleteCloudEmployee(id) } }
         triggerToast(message: "\(removed.role.title)「\(removed.name)」を解雇しました", actionLabel: "取り消し") { [weak self] in
             guard let self = self, !self.employees.contains(where: { $0.id == removed.id }) else { return }
-            self.employees.append(removed)
+            self.syncTombstones[removed.id] = nil      // undo the delete: clear its tombstone
+            var restored = removed
+            restored.updatedAt = Date().timeIntervalSince1970   // beat any stale tombstone on other devices
+            self.employees.append(restored)
+            // Restore cascaded data: clear tombstones, re-add artifacts, re-assign tasks.
+            let now = Date().timeIntervalSince1970
+            for a in removedArtifacts { self.syncTombstones[a.id] = nil }
+            self.artifacts.append(contentsOf: removedArtifacts.map { var x = $0; x.updatedAt = now; return x })
+            for tid in unassignedTaskIds {
+                if let idx = self.workTasks.firstIndex(where: { $0.id == tid }) {
+                    self.workTasks[idx].assigneeId = removed.id
+                    self.workTasks[idx].updatedAt = now
+                }
+            }
+            for aid in unassignedAppIds {
+                if let idx = self.apps.firstIndex(where: { $0.id == aid }) {
+                    self.apps[idx].assigneeId = removed.id; self.apps[idx].updatedAt = now
+                }
+            }
+            for eid in unassignedEventIds {
+                if let idx = self.events.firstIndex(where: { $0.id == eid }) {
+                    self.events[idx].assigneeId = removed.id; self.events[idx].updatedAt = now
+                }
+            }
             if self.cloudSyncEnabled { Task { await self.pushEmployees() } }
             self.triggerToast(message: "「\(removed.name)」を戻しました")
         }
@@ -1387,26 +2386,66 @@ class AppState: ObservableObject {
     /// Make an employee active: apply their model/persona/mode/cwd and load THEIR
     /// isolated session. nil → back to the default single-agent (no employee).
     func switchEmployee(_ id: String?) {
-        guard !isStreaming else { triggerToast(message: "応答中は切り替えできません"); return }
-        // Persist the current conversation's session onto the outgoing employee.
+        cwdOverride = nil
+        chatOutputMode = .chat   // 社員切替で構造化モードをリセット
+        // Save the outgoing employee's current messages to their shadow (preserves streaming bubble).
+        let outKey = empKey(activeEmployeeId)
+        empMessages[outKey] = messages
         if let curId = activeEmployeeId, let idx = employees.firstIndex(where: { $0.id == curId }) {
             employees[idx].sessionId = currentSessionId
             recordSessionOwner(currentSessionId, curId)
         }
         activeEmployeeId = id
+        let newKey = empKey(id)
+
         if let emp = activeEmployee {
             agentMode = emp.mode
             currentSessionId = emp.sessionId
-            messages = emp.sessionId.map { messagesFromStore($0) } ?? []
-            modelApplyTask = Task { await applyModelSilently(provider: emp.provider, model: emp.model) }
+            // If the incoming employee has an in-flight turn, show their live shadow messages
+            // (includes the streaming bubble). Otherwise load from the store as usual.
+            if streamingEmployeeIds.contains(newKey), let live = empMessages[newKey], !live.isEmpty {
+                messages = live
+                streamText = empStreamTexts[newKey] ?? ""
+            } else {
+                messages = emp.sessionId.map { messagesFromStore($0) } ?? []
+                streamText = ""
+            }
+            let m = modelForFixedProvider(emp)
+            modelApplyTask = Task { await applyModelSilently(model: m) }
         } else {
             currentSessionId = nil
-            messages = []
+            if streamingEmployeeIds.contains(newKey), let live = empMessages[newKey], !live.isEmpty {
+                messages = live
+                streamText = empStreamTexts[newKey] ?? ""
+            } else {
+                messages = []
+                streamText = ""
+            }
             modelApplyTask = nil
         }
         inputValue = ""
-        ACPClient.shared.resetSession()   // next prompt uses the new model/cwd/session
+        // Liveness indicator: if the employee we switched to is mid-stream, we don't know the
+        // original start time — approximate it as "now" so the elapsed/heartbeat keeps working;
+        // otherwise clear it.
+        if streamingEmployeeIds.contains(newKey) {
+            streamStartedAt = Date()   // real start is unknown post-switch — approximate
+            lastStreamActivityAt = Date()
+        } else {
+            streamStartedAt = nil; lastStreamActivityAt = nil
+        }
+        // Only reset this employee's dedicated ACP client if they are NOT currently streaming.
+        // The shared ACP client (used for delegation) is independent — never reset here.
+        if !streamingEmployeeIds.contains(newKey) { empACPClients[newKey]?.resetSession() }
         view = "chat"
+    }
+
+    /// Bind a session to a specific employee (context isolation) — used by the in-flight
+    /// turn reconcile so a turn that finished after you switched away is attributed correctly.
+    func bindSession(_ sid: String?, toEmployee empId: String?) {
+        guard let empId = empId, let sid = sid,
+              let idx = employees.firstIndex(where: { $0.id == empId }) else { return }
+        if employees[idx].sessionId != sid { employees[idx].sessionId = sid }
+        recordSessionOwner(sid, empId)
     }
 
     /// Bind the just-created hermes session to the active employee (context isolation).
@@ -1429,8 +2468,10 @@ class AppState: ObservableObject {
         messages.append(Message(role: .user, content: "［委譲→\(target.role.title)・\(target.name)］\(trimmed)"))
         let msgId = UUID()
         messages.append(Message(id: msgId, role: .assistant, content: "", typewriter: true,
-                                delegatedName: target.name, delegatedRole: target.role))
-        isStreaming = true
+                                delegatedName: target.name, delegatedRole: target.role,
+                                delegatedId: employeeId))
+        let delegateKey = empKey()
+        streamingEmployeeIds.insert(delegateKey)  // manager's chat slot is occupied
         activeStatus = "thinking"
         busyEmployeeIds.insert(employeeId)   // the specialist is now working (spinner)
         recordSessionOwner(target.sessionId, employeeId)
@@ -1439,101 +2480,143 @@ class AppState: ObservableObject {
         let directive = "あなたは「\(target.name)」という名前の\(target.role.title)です。\(target.persona) \(target.mode.directive)"
         let wrapped = "\(trimmed)\n\n\(AgentMode.sentinelOpen)\(directive)\(AgentMode.sentinelClose)"
         let cwd = target.workspacePath ?? effectiveCwd
+        let kind = BackendRouter.selectKind(provider: provider, useACP: useACPTransport)
+
+        func finishDelegate() {
+            busyEmployeeIds.remove(employeeId)
+            streamingEmployeeIds.remove(delegateKey)
+            if streamingEmployeeIds.isEmpty && busyEmployeeIds.isEmpty { activeStatus = "online" }
+        }
+
+        // agy install check (clear hint) at the call site.
+        if kind == .antigravity, await AntigravityCLI.shared.resolveBinaryAsync() == nil {
+            if let i = messages.firstIndex(where: { $0.id == msgId }) {
+                messages[i].content = AntigravityCLI.installHint; messages[i].isError = true; messages[i].typewriter = false
+            }
+            finishDelegate(); await fetchSessions(); return
+        }
+
+        // Run on the specialist's MODEL (provider fixed), then restore the manager's —
+        // Hermes/ACP only (agy carries its model in the request, no Hermes config swap).
+        var swapModel = false
+        var mgrModel = defaultModel
+        if kind != .antigravity {
+            await modelApplyTask?.value
+            mgrModel = defaultModel
+            let targetModel = modelForFixedProvider(target)
+            swapModel = (targetModel != mgrModel)
+            if swapModel { await setHermesModelConfig(model: targetModel) }
+        }
+
+        let req = AgentRequest(
+            prompt: wrapped,
+            agyPrompt: antigravityPrompt(trimmed, employee: target, mode: target.mode),
+            imagePath: nil, cwd: cwd,
+            sessionId: target.sessionId, startFresh: target.sessionId == nil,
+            agyModel: modelForFixedProvider(target))
+
         var acc = ""
-
-        // Run the delegated task on the specialist's own model, then restore the
-        // manager's. Best-effort: a resumed ACP session may keep its original model.
-        await modelApplyTask?.value
-        let mgrProvider = provider, mgrModel = defaultModel
-        let swapModel = (target.provider != mgrProvider || target.model != mgrModel)
-        if swapModel { await setHermesModelConfig(provider: target.provider, model: target.model) }
-
-        if useACPTransport {
-            let (delTokens, ok) = await ACPClient.shared.prompt(
-                wrapped, cwd: cwd,
-                resumeHermesSessionId: target.sessionId,
-                startFresh: target.sessionId == nil,
-                onChunk: { [weak self] chunk in
-                    guard let self = self else { return }
-                    acc += chunk
-                    if let i = self.messages.firstIndex(where: { $0.id == msgId }) { self.messages[i].content = acc }
+        let backend = BackendRouter.make(kind, acp: .shared)
+        let result = await backend.send(
+            req,
+            onStart: { [weak self] proc in self?.delegationProcess = proc },
+            onEvent: { [weak self] event in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    guard case .chunk(let t) = event,
+                          let i = self.messages.firstIndex(where: { $0.id == msgId }) else { return }
+                    acc += t
+                    switch kind {       // delegation UI shows only the reply (no reasoning/tool cards)
+                    case .hermesCLI:   self.messages[i].content = self.parseResponseText(acc)
+                    case .antigravity: self.messages[i].content = AntigravityCLI.clean(acc)
+                    case .acp:         self.messages[i].content = acc
+                    }
                 }
-            )
-            // Only adopt a brand-new specialist session; never overwrite an existing id
-            // (a silently-forked failed session/load must not orphan the real session).
-            if target.sessionId == nil,
-               let ti = employees.firstIndex(where: { $0.id == employeeId }),
-               let hsid = ACPClient.shared.hermesSessionId {
-                employees[ti].sessionId = hsid
-                recordSessionOwner(hsid, employeeId)
-            }
-            if let i = messages.firstIndex(where: { $0.id == msgId }) {
-                messages[i].typewriter = false
-                messages[i].elapsed = Date().timeIntervalSince(started)
-                if let t = delTokens { messages[i].tokens = t }
-                if acc.isEmpty { messages[i].content = ok ? "(空の応答)" : "委譲に失敗しました"; messages[i].isError = !ok }
-            }
-            // The shared ACP client now holds the specialist's session; reset so the
-            // manager's next message resumes the manager's session.
-            ACPClient.shared.resetSession()
-        } else {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                _ = HermesCLI.shared.streamPrompt(
-                    prompt: wrapped, sessionId: target.sessionId, cwd: cwd,
-                    onData: { [weak self] chunk in
-                        DispatchQueue.main.async {
-                            guard let self = self else { return }
-                            acc += chunk
-                            if let i = self.messages.firstIndex(where: { $0.id == msgId }) {
-                                self.messages[i].content = self.parseResponseText(acc)
-                            }
-                        }
-                    },
-                    onStderr: { _ in },
-                    onEnd: { _ in DispatchQueue.main.async { cont.resume() } }
-                )
-            }
-            if target.sessionId == nil {
-                await fetchSessions()
-                if let ti = employees.firstIndex(where: { $0.id == employeeId }), let first = sessions.first {
-                    employees[ti].sessionId = first.id
-                    recordSessionOwner(first.id, employeeId)
+            })
+
+        self.delegationProcess = nil
+        let final: String
+        switch kind {
+        case .hermesCLI:   final = parseResponseText(acc)
+        case .antigravity: final = AntigravityCLI.clean(acc)
+        case .acp:         final = acc
+        }
+        if let i = messages.firstIndex(where: { $0.id == msgId }) {
+            messages[i].typewriter = false
+            messages[i].elapsed = Date().timeIntervalSince(started)
+            if kind == .acp, let t = result.tokens { messages[i].tokens = t }
+            if final.isEmpty {
+                if kind == .acp {
+                    messages[i].content = result.ok ? "(空の応答)" : "委譲に失敗しました"; messages[i].isError = !result.ok
+                } else {
+                    messages[i].content = "委譲に失敗しました"; messages[i].isError = true
                 }
-            }
-            if let i = messages.firstIndex(where: { $0.id == msgId }) {
-                messages[i].typewriter = false
-                messages[i].elapsed = Date().timeIntervalSince(started)
-                let cleaned = parseResponseText(acc)
-                if cleaned.isEmpty { messages[i].content = "委譲に失敗しました"; messages[i].isError = true }
-                else { messages[i].content = cleaned }
+            } else {
+                messages[i].content = final
             }
         }
 
-        if swapModel { await setHermesModelConfig(provider: mgrProvider, model: mgrModel) }
-        busyEmployeeIds.remove(employeeId)
-        isStreaming = false
-        activeStatus = "online"
+        // Per-kind specialist-session adoption.
+        switch kind {
+        case .antigravity:
+            if !final.isEmpty {
+                let sid = AgyStore.shared.record(sessionId: target.sessionId, employeeId: employeeId,
+                                                 userText: trimmed, assistantText: final, timestamp: Date().timeIntervalSince1970)
+                if let ti = employees.firstIndex(where: { $0.id == employeeId }) {
+                    employees[ti].sessionId = sid; recordSessionOwner(sid, employeeId)
+                }
+            }
+        case .acp:
+            // Only adopt a brand-new specialist session; never overwrite an existing id.
+            if target.sessionId == nil, let ti = employees.firstIndex(where: { $0.id == employeeId }),
+               let hsid = result.hermesSessionId {
+                employees[ti].sessionId = hsid; recordSessionOwner(hsid, employeeId)
+            }
+            // Reset the shared ACP client so the manager's next message resumes their session.
+            ACPClient.shared.resetSession()
+        case .hermesCLI:
+            if target.sessionId == nil {
+                await fetchSessions()
+                if let ti = employees.firstIndex(where: { $0.id == employeeId }), let first = sessions.first {
+                    employees[ti].sessionId = first.id; recordSessionOwner(first.id, employeeId)
+                }
+            }
+        }
+
+        if swapModel { await setHermesModelConfig(model: mgrModel) }
+        finishDelegate()
         await fetchSessions()
     }
 
-    /// Set the hermes model config WITHOUT touching the published provider/defaultModel
-    /// (used to temporarily run a delegated task on a specialist's model, then restore).
-    private func setHermesModelConfig(provider: String, model: String) async {
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.provider", provider])
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.default", model])
-        let baseUrl = provider == "openrouter" ? "https://openrouter.ai/api/v1" : ""
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.base_url", baseUrl])
+    /// Temporarily set the hermes MODEL (provider is fixed) WITHOUT touching the published
+    /// provider/defaultModel — used to run a delegated task on a specialist's model, then
+    /// restore the manager's.
+    private func setHermesModelConfig(model: String) async {
+        // Antigravity isn't a Hermes provider — it runs via `agy`, not the Hermes config.
+        guard provider != AntigravityCLI.providerId else { return }
+        await writeHermesModelConfig(provider: provider, model: model)
     }
 
     // MARK: - Teams (Phase A)
 
-    func employees(inTeam teamId: String) -> [Employee] { employees.filter { $0.teamId == teamId } }
-    var unassignedEmployees: [Employee] { employees.filter { $0.teamId == nil } }
+    /// Display ordering for any employee list: マネージャー float to the top, everyone
+    /// else keeps their existing (insertion) relative order. Routed through every
+    /// roster / picker / switcher so managers always appear first.
+    func managersFirst(_ list: [Employee]) -> [Employee] {
+        list.filter { $0.role == .manager } + list.filter { $0.role != .manager }
+    }
+
+    /// All employees with managers ordered first (see `managersFirst`).
+    var sortedEmployees: [Employee] { managersFirst(employees) }
+
+    func employees(inTeam teamId: String) -> [Employee] { managersFirst(employees.filter { $0.teamId == teamId }) }
+    var unassignedEmployees: [Employee] { managersFirst(employees.filter { $0.teamId == nil }) }
 
     @discardableResult
     func createTeam(name: String) -> Team {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let t = Team(name: n.isEmpty ? "新しいチーム" : n)
+        var t = Team(name: n.isEmpty ? "新しいチーム" : n)
+        t.updatedAt = Date().timeIntervalSince1970
         teams.append(t)
         return t
     }
@@ -1546,14 +2629,20 @@ class AppState: ObservableObject {
     func setTeamManager(_ teamId: String, managerId: String?) {
         guard let idx = teams.firstIndex(where: { $0.id == teamId }) else { return }
         teams[idx].managerId = managerId
+        teams[idx].updatedAt = Date().timeIntervalSince1970
     }
     func renameTeam(_ teamId: String, name: String) {
         guard let idx = teams.firstIndex(where: { $0.id == teamId }) else { return }
         teams[idx].name = name
+        teams[idx].updatedAt = Date().timeIntervalSince1970
     }
     func deleteTeam(_ teamId: String) {
+        tombstone(teamId)
         teams.removeAll { $0.id == teamId }
-        for i in employees.indices where employees[i].teamId == teamId { employees[i].teamId = nil }
+        for i in employees.indices where employees[i].teamId == teamId {
+            employees[i].teamId = nil
+            employees[i].updatedAt = Date().timeIntervalSince1970
+        }
     }
 
     // MARK: - Tasks (Phase B)
@@ -1565,17 +2654,881 @@ class AppState: ObservableObject {
         workTasks.insert(t, at: 0)
         return t
     }
+
+    /// Detect an imperative "register this as a task" chat message → the task title (else nil).
+    /// Deliberately conservative so ordinary chat *about* tasks isn't hijacked: only fires on
+    /// an explicit leading command ("タスク追加: …" / "/task …") or a trailing imperative
+    /// ("…のタスクを追加[して]"). See `handleSendMessage`.
+    func parseTaskAddCommand(_ text: String) -> String? {
+        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !t.contains("\n") else { return nil }   // single-line commands only
+
+        // Leading explicit form.
+        for p in ["/task ", "タスク追加:", "タスク追加：", "タスク作成:", "タスク作成：", "タスク:", "タスク："] {
+            if t.hasPrefix(p) {
+                let title = String(t.dropFirst(p.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                return title.isEmpty ? nil : title
+            }
+        }
+
+        // Trailing imperative form: strip politeness/punctuation, then a task-verb suffix.
+        for tail in ["。", "．", ".", "！", "!", "？", "?", "してください", "して下さい", "してね",
+                     "してくれ", "してほしい", "して", "お願いします", "おねがいします", "お願い",
+                     "よろしく", "頼む", "たのむ"] {
+            while t.hasSuffix(tail) { t = String(t.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
+        }
+        let verbs = ["タスクとして追加", "タスクを追加", "タスクに追加", "タスクを作成", "タスクを登録",
+                     "タスク追加", "タスク作成", "タスク登録", "TODOに追加", "ToDoに追加", "todoに追加"]
+        for v in verbs where t.hasSuffix(v) {
+            var title = String(t.dropLast(v.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            for tail in ["の", "を", "、", ",", "という", "って"] {
+                if title.hasSuffix(tail) { title = String(title.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
+            }
+            // Reject underspecified titles (demonstratives/adjectives) so we don't create junk.
+            let stop: Set<String> = ["新しい", "この", "その", "あの", "次の", "新規", "ここに",
+                                     "それ", "これ", "あれ", "タスク"]
+            if title.count < 2 || stop.contains(title) { return nil }
+            return title
+        }
+        return nil
+    }
     func setTaskStatus(_ taskId: String, _ status: TaskStatus) {
         guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
         workTasks[idx].status = status
         workTasks[idx].updatedAt = Date().timeIntervalSince1970
     }
+
+    /// Drag-and-drop move on the task board. Sets the task's `status` and repositions it in
+    /// the backing `workTasks` array: dropping on a card inserts just before it (`beforeId`),
+    /// dropping on a column body (beforeId == nil) lands at the top of that column. Bumps
+    /// `updatedAt` only on a real status change — array order is device-local (iCloud merge is
+    /// by id/updatedAt, see the CloudKit merge), so a pure reorder shouldn't churn sync.
+    func moveTask(_ taskId: String, to status: TaskStatus, before beforeId: String? = nil) {
+        guard beforeId != taskId,
+              let from = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
+        var task = workTasks.remove(at: from)
+        if task.status != status {
+            task.status = status
+            task.updatedAt = Date().timeIntervalSince1970
+        }
+        let insertAt: Int
+        if let beforeId, let target = workTasks.firstIndex(where: { $0.id == beforeId }) {
+            insertAt = target
+        } else {
+            insertAt = workTasks.firstIndex(where: { $0.status == status }) ?? workTasks.count
+        }
+        workTasks.insert(task, at: min(max(0, insertAt), workTasks.count))
+    }
     func assignTask(_ taskId: String, to assigneeId: String?) {
         guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
         workTasks[idx].assigneeId = assigneeId
+        workTasks[idx].updatedAt = Date().timeIntervalSince1970
     }
-    func deleteTask(_ taskId: String) { workTasks.removeAll { $0.id == taskId } }
+    func deleteTask(_ taskId: String) {
+        tombstone(taskId)
+        workTasks.removeAll { $0.id == taskId }
+    }
     func tasks(status: TaskStatus) -> [WorkTask] { workTasks.filter { $0.status == status } }
+
+    // MARK: - Per-employee management (Phase E)
+
+    /// Open the per-employee detail as a FULL-SCREEN screen (タスク / 成果物 / ファイル).
+    func openEmployeeDetail(_ employeeId: String) {
+        guard employees.contains(where: { $0.id == employeeId }) else { return }
+        detailEmployeeId = employeeId
+        view = "employee"
+    }
+
+    /// Open the active employee's management in the RIGHT side panel — so you can keep
+    /// chatting on the left while checking that employee's tasks / 成果物 / files.
+    func openEmployeePanel(_ employeeId: String) {
+        guard employees.contains(where: { $0.id == employeeId }) else { return }
+        // Make this the active employee (switchEmployee jumps to chat) so the panel,
+        // which is scoped to the active employee, shows the right person.
+        if activeEmployeeId != employeeId { switchEmployee(employeeId) }
+        rightTab = .employee
+        showRightSidebar = true
+    }
+
+    /// This employee's tasks (newest first — createTask inserts at index 0).
+    func tasks(for employeeId: String) -> [WorkTask] {
+        workTasks.filter { $0.assigneeId == employeeId }
+    }
+    func tasks(for employeeId: String, status: TaskStatus) -> [WorkTask] {
+        workTasks.filter { $0.assigneeId == employeeId && $0.status == status }
+    }
+
+    /// This employee's artifacts, most-recently-updated first.
+    func artifactsFor(_ employeeId: String) -> [Artifact] {
+        artifacts.filter { $0.employeeId == employeeId }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    @discardableResult
+    func addArtifact(employeeId: String, title: String, kind: ArtifactKind, body: String = "",
+                     taskId: String? = nil, sessionId: String? = nil) -> Artifact {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        var a = Artifact(employeeId: employeeId,
+                         title: t.isEmpty ? defaultArtifactTitle(kind: kind, body: body) : t,
+                         kind: kind, body: body)
+        a.taskId = taskId
+        a.sessionId = sessionId
+        artifacts.insert(a, at: 0)
+        triggerToast(message: "\(kind.title)を追加しました")
+        return a
+    }
+
+    func updateArtifact(_ id: String, title: String? = nil, body: String? = nil) {
+        guard let idx = artifacts.firstIndex(where: { $0.id == id }) else { return }
+        if let body = body { artifacts[idx].body = body }
+        if let title = title {
+            let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Mirror addArtifact: fall back to a derived title rather than persisting blank.
+            artifacts[idx].title = t.isEmpty
+                ? defaultArtifactTitle(kind: artifacts[idx].kind, body: artifacts[idx].body)
+                : t
+        }
+        artifacts[idx].updatedAt = Date().timeIntervalSince1970
+    }
+
+    func deleteArtifact(_ id: String) {
+        tombstone(id)
+        artifacts.removeAll { $0.id == id }
+    }
+
+    private func defaultArtifactTitle(kind: ArtifactKind, body: String) -> String {
+        switch kind {
+        case .file: return (body as NSString).lastPathComponent
+        case .link: return body.isEmpty ? "リンク" : body
+        case .note:
+            let first = body.split(separator: "\n").first.map(String.init) ?? "メモ"
+            let trimmed = first.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? "メモ" : String(trimmed.prefix(60))
+        }
+    }
+
+    /// Save an assistant reply as a note artifact for a given employee (defaults to the
+    /// active one). Used by the chat "成果物として保存" action.
+    func saveReplyAsArtifact(_ content: String, employeeId: String? = nil) {
+        let eid = employeeId ?? activeEmployeeId
+        guard let eid = eid else { triggerToast(message: "先に社員を選択してください"); return }
+        addArtifact(employeeId: eid, title: "", kind: .note, body: content, sessionId: currentSessionId)
+    }
+
+    /// Set (or clear) an employee's working folder (cwd). Device-local — `workspacePath`
+    /// is deliberately not synced (it's a path on this machine), so this won't push to iCloud.
+    func setEmployeeWorkspace(_ employeeId: String, path: String?) {
+        guard let idx = employees.firstIndex(where: { $0.id == employeeId }) else { return }
+        employees[idx].workspacePath = path
+        triggerToast(message: path == nil ? "作業フォルダを解除しました" : "作業フォルダを設定しました")
+    }
+
+    /// Base dir holding auto-assigned per-employee working folders.
+    var employeeWorkspaceBase: String { (githubCloneBase as NSString).appendingPathComponent("employees") }
+
+    /// Ensure an employee has a working folder, auto-creating one named after them if unset.
+    /// Device-local (workspacePath isn't synced), so each machine keeps its own folder.
+    @discardableResult
+    func ensureEmployeeWorkspace(_ employeeId: String) -> String? {
+        guard let idx = employees.firstIndex(where: { $0.id == employeeId }) else { return nil }
+        if let p = employees[idx].workspacePath, !p.trimmingCharacters(in: .whitespaces).isEmpty { return p }
+        let base = employeeWorkspaceBase
+        let slug = appSlug(employees[idx].name.isEmpty ? employees[idx].role.title : employees[idx].name)
+        var folder = (base as NSString).appendingPathComponent(slug)
+        var i = 2
+        while employees.contains(where: { $0.id != employeeId && $0.workspacePath == folder }) {
+            folder = (base as NSString).appendingPathComponent("\(slug)-\(i)"); i += 1
+        }
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        employees[idx].workspacePath = folder
+        return folder
+    }
+
+    /// Auto-assign a working folder to every employee that lacks one (hire + launch migration).
+    func ensureAllEmployeeWorkspaces() {
+        for e in employees where (e.workspacePath ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
+            ensureEmployeeWorkspace(e.id)
+        }
+    }
+
+    /// Rename an employee (shared field → bump updatedAt so the new name syncs).
+    func renameEmployee(_ employeeId: String, name: String) {
+        guard let idx = employees.firstIndex(where: { $0.id == employeeId }) else { return }
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty, employees[idx].name != n else { return }
+        employees[idx].name = n
+        employees[idx].updatedAt = Date().timeIntervalSince1970
+        if cloudSyncEnabled { Task { await pushEmployees() } }
+    }
+
+    /// Reorder employees (sidebar drag-and-drop): move `id` to just before `targetId`
+    /// (nil → end). Order is device-local (not part of the synced shared fields).
+    func moveEmployee(_ id: String, before targetId: String?) {
+        guard id != targetId, let from = employees.firstIndex(where: { $0.id == id }) else { return }
+        let moved = employees.remove(at: from)
+        if let targetId = targetId, let to = employees.firstIndex(where: { $0.id == targetId }) {
+            employees.insert(moved, at: to)
+        } else {
+            employees.append(moved)
+        }
+    }
+
+    // MARK: - Apps (Phase F — AI-developed app projects)
+
+    /// Filesystem-safe folder slug for an app name (keeps JP characters; HFS+ allows them).
+    private func appSlug(_ name: String) -> String {
+        var s = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Drop control characters / newlines that would make hostile or unusable folder names.
+        s = String(s.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0) && !CharacterSet.newlines.contains($0)
+        })
+        for ch in ["/", " ", "\t", ":", "\\", "?", "%", "*", "|", "\"", "<", ">"] {
+            s = s.replacingOccurrences(of: ch, with: "-")
+        }
+        while s.contains("--") { s = s.replacingOccurrences(of: "--", with: "-") }   // collapse runs
+        s = s.trimmingCharacters(in: CharacterSet(charactersIn: ".-"))   // no hidden/dotfolder, no edge dashes
+        if s.count > 60 { s = String(s.prefix(60)) }
+        return s.isEmpty ? "app-\(Int(Date().timeIntervalSince1970))" : s
+    }
+
+    /// Resolve an app's project folder for THIS device. The synced `folderPath` is an
+    /// absolute path from the originating Mac; re-derive it under the local dev base by
+    /// folder name so develop/open target a sane local path cross-device (mirrors how
+    /// workspacePath/.file-artifacts are kept device-local).
+    func appFolder(_ app: AppProject) -> String {
+        let name = (app.folderPath as NSString).lastPathComponent
+        return (githubCloneBase as NSString).appendingPathComponent(name.isEmpty ? appSlug(app.name) : name)
+    }
+
+    /// Create an app project: auto-make a folder under the shared dev base (collision-safe),
+    /// seed a README from the spec, and register it (newest first).
+    @discardableResult
+    func createApp(name: String, detail: String, assigneeId: String?,
+                   previewURL: String = "", runCommand: String = "") -> AppProject? {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = n.isEmpty ? "新しいアプリ" : n
+        let slug = appSlug(display)
+        var folder = (githubCloneBase as NSString).appendingPathComponent(slug)
+        var i = 2
+        while FileManager.default.fileExists(atPath: folder) {
+            folder = (githubCloneBase as NSString).appendingPathComponent("\(slug)-\(i)"); i += 1
+        }
+        // Surface failure instead of registering an app whose folder doesn't exist.
+        do {
+            try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        } catch {
+            triggerToast(message: "フォルダを作成できませんでした: \(error.localizedDescription)")
+            return nil
+        }
+        let spec = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !spec.isEmpty {
+            let readme = "# \(display)\n\n\(spec)\n"
+            try? readme.write(toFile: (folder as NSString).appendingPathComponent("README.md"),
+                              atomically: true, encoding: .utf8)
+        }
+        var a = AppProject(name: display, detail: detail, folderPath: folder)
+        a.assigneeId = assigneeId
+        a.previewURL = previewURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        a.runCommand = runCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        apps.insert(a, at: 0)
+        triggerToast(message: "アプリを作成しました：\(a.name)")
+        return a
+    }
+
+    func updateApp(_ id: String, name: String? = nil, detail: String? = nil,
+                   previewURL: String? = nil, runCommand: String? = nil) {
+        guard let idx = apps.firstIndex(where: { $0.id == id }) else { return }
+        if let v = name?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty { apps[idx].name = v }
+        if let v = detail { apps[idx].detail = v }
+        if let v = previewURL { apps[idx].previewURL = v.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if let v = runCommand { apps[idx].runCommand = v.trimmingCharacters(in: .whitespacesAndNewlines) }
+        apps[idx].updatedAt = Date().timeIntervalSince1970
+    }
+    func setAppStatus(_ id: String, _ s: AppStatus) {
+        guard let idx = apps.firstIndex(where: { $0.id == id }) else { return }
+        apps[idx].status = s; apps[idx].updatedAt = Date().timeIntervalSince1970
+    }
+    func assignApp(_ id: String, to assigneeId: String?) {
+        guard let idx = apps.firstIndex(where: { $0.id == id }) else { return }
+        apps[idx].assigneeId = assigneeId; apps[idx].updatedAt = Date().timeIntervalSince1970
+    }
+    func deleteApp(_ id: String) {
+        if runningAppIds.contains(id) { stopApp(id) }   // don't orphan a running dev-server
+        tombstone(id); apps.removeAll { $0.id == id }
+    }
+
+    func app(_ id: String) -> AppProject? { apps.first { $0.id == id } }
+
+    /// Start developing an app: run the agent in the app folder (via a transient cwd
+    /// override, so the employee's own workspace is untouched), in a FRESH chat thread, in
+    /// code mode, with a build instruction prefilled. (Never deletes the folder.)
+    func developApp(_ id: String) {
+        guard let app = apps.first(where: { $0.id == id }) else { return }
+        guard !isStreaming else { triggerToast(message: "応答中は開始できません"); return }
+        let folder = appFolder(app)   // device-local resolution (cross-device safe)
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+
+        // Switch to the developer (or 全体) and start a clean thread for this build.
+        // Guard against a dangling assigneeId (e.g. fired) so we don't set an unresolvable active id.
+        let validAssignee = app.assigneeId.flatMap { aid in employees.contains { $0.id == aid } ? aid : nil }
+        switchEmployee(validAssignee)
+        handleNewChat()                  // fresh isolated session for the app
+
+        cwdOverride = folder             // agent cwd = the app folder, just for this thread
+        agentMode = .code
+        terminalCwd = folder
+        if app.status == .idea { setAppStatus(id, .building) }
+
+        let spec = app.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = spec.isEmpty
+            ? "「\(app.name)」というアプリをこのフォルダ（\(folder)）で開発してください。まず構成案を出し、最小構成から実装を進めてください。"
+            : "「\(app.name)」というアプリを開発します。次の仕様でこのフォルダ（\(folder)）に実装してください。\n\n【仕様】\n\(spec)\n\nまず構成案を出し、最小構成から実装してください。"
+        inputValue = base + "\n\n" + AppState.chatControllableRequirement
+        view = "chat"
+        triggerToast(message: "「\(app.name)」の開発を開始します")
+    }
+
+    /// Standard requirement baked into every app build so the finished app can be operated —
+    /// and have data written to it — from this app's chat WITHOUT needing an MCP server: the
+    /// agent already has file + terminal access in the app folder, so file-based data + a
+    /// curl-able HTTP API are enough.
+    static let chatControllableRequirement = """
+    【チャット連携の必須要件】このアプリは、後からこのアプリのチャットで操作・データ書き込みができるように作ってください：
+    1. データはこのフォルダ内のファイル（例: data/*.json）に保存し、外部DBに依存しないこと（エージェントが直接読み書きできるように）。
+    2. 主要な操作（作成・更新・取得など）を HTTP API（例: POST /api/items）として公開し、`curl` から実行できるようにすること。
+    3. README.md に「データの保存場所」「起動コマンド」「API一覧と curl の使用例」を必ず記載すること。
+    """
+
+    /// Reveal the app folder in Finder (creating it locally if it doesn't exist here).
+    func openAppFolder(_ id: String) {
+        guard let app = apps.first(where: { $0.id == id }) else { return }
+        let folder = appFolder(app)
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder)])
+    }
+
+    /// Open the app folder in the side terminal panel (cwd set to the project folder).
+    func openAppInTerminal(_ id: String) {
+        guard let app = apps.first(where: { $0.id == id }) else { return }
+        terminalCwd = appFolder(app)
+        rightTab = .terminal
+        showRightSidebar = true
+    }
+
+    /// Preview the app's URL in the internal browser side panel.
+    func previewApp(_ id: String) {
+        guard let app = apps.first(where: { $0.id == id }) else { return }
+        let url = app.previewURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else { triggerToast(message: "プレビューURLが未設定です（アプリの編集で指定してください）"); return }
+        BrowserModel.shared.load(url)
+        rightTab = .browser
+        showRightSidebar = true
+    }
+
+    // MARK: - One-click app launch (Phase F: 起動 / 停止)
+
+    /// True if this app's dev-server is currently running.
+    func isAppRunning(_ id: String) -> Bool { runningAppIds.contains(id) }
+
+    /// Detect "〇〇（アプリ）を開いて/起動して" in a chat prompt and return the registered app to
+    /// launch. Returns nil for develop/edit intents (those go through 開発する), or when no
+    /// registered app name appears, so the prompt falls through to the AI.
+    func parseAppLaunchCommand(_ text: String) -> AppProject? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.count >= 3, t.count < 200, !t.contains("\n"), !apps.isEmpty else { return nil }
+        // Develop/edit intents are not "launch" — let those go elsewhere.
+        for dev in ["開発", "実装", "作って", "作成して", "修正", "直して", "編集", "デバッグ", "ビルド"] where t.contains(dev) {
+            return nil
+        }
+        let launchVerbs = ["開いて", "ひらいて", "起動", "立ち上げ", "たちあげ", "表示して", "見せて", "ひらく", "開く", "プレビュー", "launch", "open", "run", "start"]
+        guard launchVerbs.contains(where: { t.localizedCaseInsensitiveContains($0) }) else { return nil }
+        // Match a registered app whose name appears in the text; prefer the longest name.
+        let candidates = apps.filter { $0.name.count >= 2 && t.contains($0.name) }
+        return candidates.max(by: { $0.name.count < $1.name.count })
+    }
+
+    /// Detect "〇〇アプリで〜を作成/更新/削除して" — a real data operation inside a registered
+    /// app — and return the target app + whether it's destructive (delete/overwrite → needs
+    /// confirmation). Excludes how-to questions and develop/code-fix intents. nil → AI.
+    func parseAppActionCommand(_ text: String) -> (app: AppProject, action: String, destructive: Bool)? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.count >= 4, t.count < 600, !apps.isEmpty else { return nil }
+        let quoted = t.contains("「") || t.contains("『")
+        // How-to / explanation questions are NOT commands (unless an explicit quote is given).
+        if !quoted {
+            for q in ["教えて", "方法", "流れ", "説明", "手順", "使い方", "とは", "どうやって", "作り方", "やり方", "?", "？"] where t.contains(q) { return nil }
+        }
+        // Develop / code-fix intents go through 開発する (edit code), not a data op.
+        for dev in ["開発", "実装", "デバッグ", "ビルド", "リファクタ", "修正", "直して", "なおして",
+                    "バグ", "不具合", "コードを", "ソースを", "編集"] where t.contains(dev) { return nil }
+        // Additive verbs run immediately; destructive/overwriting verbs require confirmation.
+        let additive = ["作成", "作って", "つくって", "追加", "登録", "発行", "記録", "入力", "書き込",
+                        "書いて", "セット", "設定して", "集計", "計算して", "出力", "エクスポート", "create", "add"]
+        let destructive = ["削除", "消して", "更新", "変更", "上書き", "リセット", "delete", "update", "remove"]
+        let isAdd = additive.contains { t.localizedCaseInsensitiveContains($0) }
+        let isDel = destructive.contains { t.localizedCaseInsensitiveContains($0) }
+        guard isAdd || isDel else { return nil }
+        // Require app-referential framing ("会計アプリで…" / "…に" / prefix) so an unrelated
+        // sentence merely containing a common-word app name can't hijack into a data op.
+        let app = apps
+            .filter { $0.name.count >= 2 }
+            .filter { a in t.hasPrefix(a.name) || ["で", "に", "を", "へ", "の", "アプリ"].contains { t.contains(a.name + $0) } }
+            .max(by: { $0.name.count < $1.name.count })
+        guard let app = app else { return nil }
+        return (app, t, isDel && !isAdd)
+    }
+
+    /// Perform a data operation inside an app via the AI agent: point it at the app folder
+    /// (cwd), start the dev-server, and forward the instruction — the agent uses the app's HTTP
+    /// API (curl) or data files to actually create/update the data, then reports back.
+    func runAppAction(app: AppProject, command: String) {
+        let folder = appFolder(app)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder, isDirectory: &isDir), isDir.boolValue else {
+            messages.append(Message(role: .user, content: command))
+            messages.append(Message(role: .system, content: "⚠️ 「\(app.name)」のフォルダが見つかりません。先に「開発する」で作成してください。"))
+            return
+        }
+        let validAssignee = app.assigneeId.flatMap { aid in employees.contains { $0.id == aid } ? aid : nil }
+        // Don't destroy / collide with an in-flight turn (the current view's or the target
+        // employee's) — guard BEFORE any side effect (switch / launch / send).
+        if streamingEmployeeIds.contains(empKey()) || streamingEmployeeIds.contains(empKey(validAssignee)) {
+            messages.append(Message(role: .system, content: "⚠️ 応答中のため実行できません。完了後にもう一度お試しください。"))
+            triggerToast(message: "応答中のため実行できませんでした")
+            return
+        }
+        // Context: the app's developer, fresh thread, cwd = app folder, code mode.
+        switchEmployee(validAssignee)
+        handleNewChat()
+        cwdOverride = folder
+        agentMode = .code
+        terminalCwd = folder
+        view = "chat"
+        // Start the dev-server (idempotent) so a curl-able API is available + the preview
+        // reflects the change. Safe: launchApp doesn't reset the chat or cwdOverride.
+        launchApp(app.id)
+
+        let runHint = app.runCommand.isEmpty ? "適切な起動コマンドで起動し" : "`\(app.runCommand)` で起動し"
+        inputValue = """
+        \(command)
+
+        【実行指示】上記は、このフォルダにある「\(app.name)」アプリでの実データ操作の依頼です。説明だけで終わらせず、実際にデータを作成・更新してください。手順:
+        1. README とソース（API ルート / データ保存先）を確認し、操作方法を把握する。
+        2. 開発サーバーが起動していなければ \(runHint)、必要なら少し待つ。
+        3. アプリの HTTP API を `curl` で呼ぶ、またはデータファイル（例: data/*.json）を直接編集して、実際にデータを作成/更新する。金額や項目は依頼の内容に合わせる。
+        4. 請求書・帳票など印刷可能なものを作成した場合は、PDF生成APIがあれば `curl` でPDFを生成してファイルに保存し（例: `curl -s "http://localhost:<PORT>/api/pdf/invoice/<id>" -o ~/Downloads/invoice-<番号>.pdf`）、保存した**PDFの絶対パスを1行で明記**してください。
+        5. 反映を確認し、「何を・どこに・どのAPI/ファイルで」作成したか、PDFがあればその絶対パスを簡潔に報告する。
+        対象フォルダ: \(folder)
+        """
+        bypassCommandIntercept = true
+        handleSendMessage()
+        bypassCommandIntercept = false
+        triggerToast(message: "「\(app.name)」で操作を実行します…")
+    }
+
+    /// ONE-CLICK LAUNCH: run the app's start command as a live background process in its
+    /// folder, stream output to the side terminal, and auto-open the preview the moment the
+    /// server announces its localhost URL. Re-launch just surfaces the running app's panels.
+    func launchApp(_ id: String) {
+        guard let app = apps.first(where: { $0.id == id }) else { return }
+        let folder = appFolder(app)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder, isDirectory: &isDir), isDir.boolValue else {
+            triggerToast(message: "フォルダが見つかりません。先に「開発する」で作成してください。"); return
+        }
+        // Already running → just bring the output + preview forward.
+        if runningAppIds.contains(id) {
+            rightTab = .terminal; showRightSidebar = true
+            let pv = effectiveAppURL(app)
+            if !pv.isEmpty { BrowserModel.shared.load(pv); rightTab = .browser }
+            return
+        }
+        // Resolve the command: explicit runCommand, else auto-detect from the project files.
+        let serverCmd = {
+            let c = app.runCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+            return c.isEmpty ? (autoDetectRunCommand(folder) ?? "") : c
+        }()
+        guard !serverCmd.isEmpty else {
+            triggerToast(message: "起動コマンドを判定できませんでした。アプリの編集で「起動コマンド」を設定してください。"); return
+        }
+        // Resolve a dependency-install prefix (+ a venv PATH prefix for Python).
+        var installPrefix = ""
+        let fm = FileManager.default
+        func projHas(_ f: String) -> Bool { fm.fileExists(atPath: (folder as NSString).appendingPathComponent(f)) }
+
+        // Node: install deps if missing so a freshly-built app "just runs".
+        if serverCmd.hasPrefix("npm ") || serverCmd.hasPrefix("pnpm ") || serverCmd.hasPrefix("yarn") {
+            if !projHas("node_modules") {
+                let installer = serverCmd.hasPrefix("pnpm") ? "pnpm install" : (serverCmd.hasPrefix("yarn") ? "yarn" : "npm install")
+                installPrefix = "\(installer) && "
+            }
+        }
+        // Python (not the stdlib http.server fallback): run inside a virtualenv so deps install
+        // cleanly (no system pollution / PEP 668). Reuse an existing venv/.venv, else create
+        // .venv + install requirements.txt on first run. Prepend the venv's bin to PATH (rather
+        // than rewriting just the `python3` token) so venv-backed runners — uvicorn, gunicorn,
+        // flask, streamlit, … — resolve there too.
+        // The venv's bin dir to prepend to PATH — passed via the process ENVIRONMENT (not the
+        // shell string) so an app folder path with spaces/quotes can't break or inject.
+        var venvBinPath: String? = nil
+        if (serverCmd.hasPrefix("python") || serverCmd.hasPrefix("uvicorn") || serverCmd.hasPrefix("gunicorn")
+            || serverCmd.hasPrefix("flask") || serverCmd.hasPrefix("streamlit")), !serverCmd.contains("http.server") {
+            func venvHasPython(_ name: String) -> Bool { fm.isExecutableFile(atPath: (folder as NSString).appendingPathComponent("\(name)/bin/python")) }
+            let venvName = venvHasPython("venv") ? "venv" : ".venv"
+            venvBinPath = (folder as NSString).appendingPathComponent("\(venvName)/bin")
+            if !venvHasPython(venvName) {
+                installPrefix = "python3 -m venv \(venvName) && \(venvName)/bin/python -m pip install --upgrade pip -q && "
+                if projHas("requirements.txt") {
+                    installPrefix += "\(venvName)/bin/python -m pip install -q -r requirements.txt && "
+                }
+            }
+        }
+        // `exec` the long-running server so the tracked PID IS the server (not the wrapping
+        // shell) — terminate() then reliably kills it once the install prefix (if any) has
+        // finished. (During install the whole subtree is killed via terminateTree on stop.)
+        let shellCmd = "\(installPrefix)exec \(serverCmd)"
+        // A static-server default has a known URL even though it prints no banner.
+        var preview = app.previewURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if preview.isEmpty, serverCmd.contains("http.server 8000") { preview = "http://localhost:8000" }
+
+        terminalCwd = folder
+        rightTab = .terminal
+        showRightSidebar = true
+        terminalOutput += "\n\(folder) $ \(installPrefix)\(serverCmd)\n"
+        appPreviewOpened.remove(id)
+        detectedAppURL[id] = preview.isEmpty ? nil : preview
+        // Only mark the app running once the process actually spawned (see streamAppProcess).
+        guard streamAppProcess(id: id, cmd: shellCmd, folder: folder, pathPrepend: venvBinPath) else {
+            triggerToast(message: "「\(app.name)」の起動に失敗しました"); return
+        }
+        // If a preview URL is known but the server prints no detectable banner, open it once it
+        // becomes reachable (poll, not a blind fixed delay → never loads a dead page).
+        if !preview.isEmpty {
+            let gen = appGenerations[id]
+            Task { @MainActor in
+                let opened = await self.waitAndOpenPreview(id: id, url: preview, gen: gen)
+                if !opened { /* server never came up in the window — auto-repair handles the exit */ }
+            }
+        }
+        triggerToast(message: "「\(app.name)」を起動しています…")
+    }
+
+    /// Poll the preview URL until it answers (server bound the port), then open it in the
+    /// side panel. Bails if the app was stopped/relaunched or already previewed. Returns
+    /// whether it opened.
+    private func waitAndOpenPreview(id: String, url: String, gen: Int?) async -> Bool {
+        for _ in 0..<50 {   // ~25s max (50 × 500ms)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard appGenerations[id] == gen, runningAppIds.contains(id) else { return false }
+            if appPreviewOpened.contains(id) { return false }   // detected-URL path already opened it
+            if await AppState.urlReachable(url) {
+                guard appGenerations[id] == gen, runningAppIds.contains(id), !appPreviewOpened.contains(id) else { return false }
+                appPreviewOpened.insert(id)
+                BrowserModel.shared.load(url)
+                rightTab = .browser
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True if an HTTP request to `urlStr` gets ANY response (the server is up — a 404/500
+    /// still counts; only a refused/timed-out connection is "not up yet").
+    nonisolated static func urlReachable(_ urlStr: String) async -> Bool {
+        guard let u = URL(string: urlStr) else { return false }
+        var req = URLRequest(url: u); req.httpMethod = "HEAD"; req.timeoutInterval = 1.5
+        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        do { _ = try await URLSession.shared.data(for: req); return true }
+        catch let e as URLError {
+            // A response with an HTTP error still means the server is up.
+            return e.code != .cannotConnectToHost && e.code != .timedOut && e.code != .networkConnectionLost
+        } catch { return true }
+    }
+
+    /// Stop a running app's dev-server (and any in-flight install/child processes).
+    func stopApp(_ id: String) {
+        // Bump the generation so the dying process's handlers become stale no-ops (a relaunch
+        // under the same id can't be clobbered by the old terminationHandler).
+        appGenerations[id] = (appGenerations[id] ?? 0) + 1
+        if let p = appProcesses[id] {
+            let pid = p.processIdentifier
+            p.terminate()                       // SIGTERM the tracked (exec'd) server
+            if pid > 0 { AppState.terminateTree(pid) }   // + any install/children still running
+        }
+        appProcesses.removeValue(forKey: id)
+        runningAppIds.remove(id)
+        appPreviewOpened.remove(id)
+        appRepairAttempts[id] = 0   // a manual stop ends any auto-repair cycle
+        if let app = apps.first(where: { $0.id == id }) {
+            terminalOutput += "\n[\(app.name)] 停止しました\n"
+        }
+    }
+
+    /// SIGTERM a process and all of its descendants (bounded). Foundation's `terminate()` only
+    /// signals the tracked PID, so a still-running `npm install`/`pip` child (before the server
+    /// `exec`s) would orphan — this walks `pgrep -P` and kills the whole subtree.
+    nonisolated static func terminateTree(_ pid: Int32) {
+        func children(of p: Int32) -> [Int32] {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            task.arguments = ["-P", String(p)]
+            let pipe = Pipe(); task.standardOutput = pipe; task.standardError = FileHandle.nullDevice
+            do { try task.run(); task.waitUntilExit() } catch { return [] }
+            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            return out.split(whereSeparator: \.isNewline).compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+        }
+        var frontier = [pid], all: [Int32] = [], depth = 0
+        while !frontier.isEmpty, depth < 6 {
+            let next = frontier.flatMap { children(of: $0) }
+            all.append(contentsOf: next); frontier = next; depth += 1
+        }
+        // Kill leaves first (children before parents) so they don't get reparented mid-kill.
+        for c in all.reversed() where c > 1 { kill(c, SIGTERM) }
+    }
+
+    /// AUTO-REPAIR: hand a failed launch's error to the assigned AI in a fresh code-mode
+    /// thread, auto-send it (no click), and flag the app to re-launch when that turn finishes.
+    func autoRepairApp(_ id: String, errorTail: String) {
+        guard let app = apps.first(where: { $0.id == id }) else { return }
+        let folder = appFolder(app)
+        let validAssignee = app.assigneeId.flatMap { aid in employees.contains { $0.id == aid } ? aid : nil }
+        // Don't hijack the user mid-conversation: if any turn is streaming (the user is busy),
+        // offer the fix via a toast instead of switching employees + view out from under them.
+        if !streamingEmployeeIds.isEmpty {
+            self.appRepairAttempts[id] = max(0, (self.appRepairAttempts[id] ?? 1) - 1)   // don't burn an attempt
+            triggerToast(message: "「\(app.name)」の起動に失敗しました。AIに修復を依頼できます。",
+                         actionLabel: "AIに修復を依頼") { [weak self] in self?.requestAppFix(id) }
+            return
+        }
+        switchEmployee(validAssignee)
+        handleNewChat()
+        cwdOverride = folder
+        agentMode = .code
+        terminalCwd = folder
+        pendingRelaunchAppId = id   // re-launch automatically once this fix turn completes
+        let runHint = app.runCommand.isEmpty ? "（起動コマンドは未設定。適切なものを判断してください）" : "`\(app.runCommand)`"
+        inputValue = """
+        「\(app.name)」をこのフォルダ（\(folder)）で起動したところ、次のエラーで失敗しました。原因を特定し、不足している依存の追加（requirements.txt / package.json の修正と実際のインストール）やコードの修正を行い、\(runHint) で起動できる状態にしてください。修正が終わったら簡潔に何を直したか教えてください。
+
+        【エラー出力】
+        \(errorTail)
+        """
+        view = "chat"
+        triggerToast(message: "「\(app.name)」をAIが自動修復しています…")
+        handleSendMessage()   // auto-send — no user click needed
+    }
+
+    /// Detect a PDF the agent saved (an absolute `.pdf` path named in its reply) and open it
+    /// so it "comes back" to the user. Only opens a path that actually exists on disk (so a
+    /// passing mention can't pop a window); a localhost PDF URL is opened in the side browser.
+    func openReferencedPDF(in text: String) {
+        // Absolute local .pdf paths (handles ~ and spaces up to the .pdf extension).
+        if let re = try? NSRegularExpression(pattern: #"(/[^\s"'`]+?\.pdf|~/[^\s"'`]+?\.pdf)"#, options: [.caseInsensitive]) {
+            let range = NSRange(text.startIndex..., in: text)
+            for m in re.matches(in: text, range: range) {
+                guard let r = Range(m.range, in: text) else { continue }
+                let path = (String(text[r]) as NSString).expandingTildeInPath
+                if FileManager.default.fileExists(atPath: path) {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                    triggerToast(message: "PDFを開きました：\((path as NSString).lastPathComponent)")
+                    return
+                }
+            }
+        }
+        // A localhost PDF URL → open in the internal browser panel.
+        if let re = try? NSRegularExpression(pattern: #"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?/[^\s"'`]*pdf[^\s"'`]*"#, options: [.caseInsensitive]) {
+            let range = NSRange(text.startIndex..., in: text)
+            if let m = re.firstMatch(in: text, range: range), let r = Range(m.range, in: text) {
+                BrowserModel.shared.load(String(text[r]))
+                rightTab = .browser; showRightSidebar = true
+                triggerToast(message: "PDFをプレビューで開きました")
+            }
+        }
+    }
+
+    /// Open the app's preview in its OWN macOS window (separate from the side browser).
+    /// Uses the app's preview URL, else the URL the running server actually bound to.
+    func openAppInWindow(_ id: String) {
+        guard let app = apps.first(where: { $0.id == id }) else { return }
+        let url = effectiveAppURL(app)
+        guard !url.isEmpty else {
+            triggerToast(message: "URLが不明です。先に「起動」するか、アプリ編集でプレビューURLを設定してください。"); return
+        }
+        AppPreviewWindow.show(url: url, title: app.name, appId: app.id)
+    }
+
+    /// The best URL to open for an app: its configured preview URL, else the live-detected one.
+    private func effectiveAppURL(_ app: AppProject) -> String {
+        let pv = app.previewURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !pv.isEmpty { return pv }
+        return detectedAppURL[app.id] ?? ""
+    }
+
+    /// Hand a failed launch to the assigned AI employee to fix (e.g. missing deps / wrong
+    /// requirements.txt). Opens a fresh code-mode thread in the app folder with a fix prompt.
+    func requestAppFix(_ id: String) {
+        guard let app = apps.first(where: { $0.id == id }) else { return }
+        // The user explicitly asked for the fix — route through autoRepairApp so it also
+        // auto-sends and re-launches when done. Reset the attempt counter for a fresh cycle.
+        appRepairAttempts[id] = 0
+        let errorTail = String(terminalOutput.suffix(1600))
+        // If the user is busy on another turn, still honor the click but warn it'll switch.
+        autoRepairApp(id, errorTail: errorTail.isEmpty ? "（直近のエラー出力は取得できませんでした。フォルダ内のコードと依存定義を確認してください）" : errorTail)
+    }
+
+    /// Spawn the app's command as a long-running process, streaming output LIVE (unlike
+    /// `runShell`, which waits for termination — useless for a dev-server that never exits).
+    /// Returns true only if the process actually spawned (so the caller marks it running).
+    /// Uses DispatchQueue.main.async (strict FIFO) so the "[終了]" line + dep-scan land AFTER
+    /// the last streamed output, and a generation token so a stale process can't clobber a
+    /// relaunch's state.
+    @discardableResult
+    private func streamAppProcess(id: String, cmd: String, folder: String, pathPrepend: String? = nil) -> Bool {
+        let gen = (appGenerations[id] ?? 0) + 1
+        appGenerations[id] = gen
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = ["-lc", cmd]
+        p.currentDirectoryURL = URL(fileURLWithPath: folder)
+        var env = HermesCLI.shared.mergedEnvironment
+        if let pp = pathPrepend, !pp.isEmpty {   // venv bin → resolve python/uvicorn/etc there
+            env["PATH"] = pp + ":" + (env["PATH"] ?? "/usr/bin:/bin")
+        }
+        p.environment = env
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] fh in
+            let data = fh.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                guard let self = self, self.appGenerations[id] == gen else { return }
+                self.terminalOutput += text
+                let lines = self.terminalOutput.components(separatedBy: .newlines)
+                if lines.count > 1200 { self.terminalOutput = lines.suffix(1200).joined(separator: "\n") }
+                // The instant the dev-server prints its URL: remember it (for 別ウィンドウ),
+                // auto-open the in-app preview, and treat the successful bind as "repaired".
+                if let url = self.detectLocalURL(text), self.runningAppIds.contains(id) {
+                    self.detectedAppURL[id] = url
+                    self.appRepairAttempts[id] = 0   // came up cleanly → reset the auto-repair counter
+                    if !self.appPreviewOpened.contains(id) {
+                        self.appPreviewOpened.insert(id)
+                        BrowserModel.shared.load(url)
+                        self.rightTab = .browser
+                    }
+                }
+            }
+        }
+        p.terminationHandler = { [weak self] proc in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            let rest = pipe.fileHandleForReading.readDataToEndOfFile()
+            DispatchQueue.main.async {
+                // Stale (the app was stopped/relaunched under the same id) → don't touch state.
+                guard let self = self, self.appGenerations[id] == gen else { return }
+                if !rest.isEmpty, let t = String(data: rest, encoding: .utf8) { self.terminalOutput += t }
+                self.terminalOutput += "\n[終了: code \(proc.terminationStatus)]\n"
+                let wasRunning = self.runningAppIds.contains(id)
+                self.runningAppIds.remove(id)
+                self.appProcesses.removeValue(forKey: id)
+                self.appPreviewOpened.remove(id)
+                // A non-clean exit → AUTO-REPAIR: hand the error to the assigned AI to fix, then
+                // re-launch. Capped at 2 attempts per app so it can't loop forever.
+                guard wasRunning, proc.terminationStatus != 0 else { return }
+                let errorTail = String(self.terminalOutput.suffix(1600))
+                let attempts = self.appRepairAttempts[id, default: 0]
+                if attempts < 2 {
+                    self.appRepairAttempts[id] = attempts + 1
+                    self.terminalOutput += "\n🔧 起動に失敗しました。AIが自動で修復します（試行 \(attempts + 1)/2）…\n"
+                    self.autoRepairApp(id, errorTail: errorTail)
+                } else {
+                    self.terminalOutput += "\n⚠️ 自動修復を2回試みましたが起動できませんでした。チャットで担当社員に相談してください。\n"
+                    self.triggerToast(message: "自動修復に失敗しました。手動で確認してください。",
+                                      actionLabel: "チャットを開く") { [weak self] in self?.requestAppFix(id) }
+                    self.appRepairAttempts[id] = 0   // allow a fresh cycle on the next manual launch
+                }
+            }
+        }
+        do {
+            try p.run()
+            appProcesses[id] = p
+            runningAppIds.insert(id)   // only NOW is the app truly running
+            return true
+        } catch {
+            terminalOutput += "起動失敗: \(error.localizedDescription)\n"
+            return false
+        }
+    }
+
+    /// Pull the first http://localhost:PORT (or 127.0.0.1) URL out of a dev-server banner.
+    private func detectLocalURL(_ text: String) -> String? {
+        let pattern = #"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:/[^\s"']*)?"#
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let m = re.firstMatch(in: text, range: range), let r = Range(m.range, in: text) else { return nil }
+        // 0.0.0.0 isn't browsable — normalize to localhost.
+        return String(text[r]).replacingOccurrences(of: "0.0.0.0", with: "localhost")
+    }
+
+    /// Best-effort run command from the project's files (used when runCommand is unset).
+    private func autoDetectRunCommand(_ folder: String) -> String? {
+        let fm = FileManager.default
+        func has(_ f: String) -> Bool { fm.fileExists(atPath: (folder as NSString).appendingPathComponent(f)) }
+        if has("package.json") {
+            if let data = fm.contents(atPath: (folder as NSString).appendingPathComponent("package.json")),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let scripts = json["scripts"] as? [String: Any] {
+                if scripts["dev"] != nil { return "npm run dev" }
+                if scripts["start"] != nil { return "npm start" }
+                if scripts["serve"] != nil { return "npm run serve" }
+                if scripts["preview"] != nil { return "npm run preview" }
+            }
+            return "npm start"
+        }
+        if has("Cargo.toml") { return "cargo run" }
+        if has("manage.py") { return "python3 manage.py runserver" }
+        if has("app.py") { return "python3 app.py" }
+        if has("main.py") { return "python3 main.py" }
+        if has("index.html") { return "python3 -m http.server 8000" }
+        return nil
+    }
+
+    // MARK: - Schedule (Phase G — calendar events)
+
+    /// Events on a given calendar day (local time), earliest first.
+    func events(on day: Date) -> [ScheduleEvent] {
+        let cal = Calendar.current
+        return events
+            .filter { cal.isDate(Date(timeIntervalSince1970: $0.date), inSameDayAs: day) }
+            .sorted { ($0.allDay ? 0 : 1, $0.date) < ($1.allDay ? 0 : 1, $1.date) }
+    }
+    /// True if a day has any events (for the calendar dot).
+    func hasEvents(on day: Date) -> Bool {
+        let cal = Calendar.current
+        return events.contains { cal.isDate(Date(timeIntervalSince1970: $0.date), inSameDayAs: day) }
+    }
+
+    @discardableResult
+    func addEvent(title: String, date: Double, allDay: Bool, detail: String = "", assigneeId: String? = nil) -> ScheduleEvent {
+        var e = ScheduleEvent(title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "予定" : title.trimmingCharacters(in: .whitespacesAndNewlines), date: date)
+        e.allDay = allDay; e.detail = detail; e.assigneeId = assigneeId
+        events.append(e)
+        triggerToast(message: "予定を追加しました")
+        return e
+    }
+    func updateEvent(_ id: String, title: String? = nil, date: Double? = nil, allDay: Bool? = nil,
+                     detail: String? = nil, assigneeId: String?? = nil) {
+        guard let idx = events.firstIndex(where: { $0.id == id }) else { return }
+        if let v = title?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty { events[idx].title = v }
+        if let v = date { events[idx].date = v }
+        if let v = allDay { events[idx].allDay = v }
+        if let v = detail { events[idx].detail = v }
+        if let v = assigneeId { events[idx].assigneeId = v }
+        events[idx].updatedAt = Date().timeIntervalSince1970
+    }
+    func deleteEvent(_ id: String) {
+        tombstone(id); events.removeAll { $0.id == id }
+    }
 
     /// Phase C — a meeting: ask each participant the topic (in their isolated context),
     /// then optionally have a manager synthesize. Reuses `delegate` per participant.
@@ -1600,6 +3553,22 @@ class AppState: ObservableObject {
             let prompt = "次の会議の各メンバーの意見をまとめ、結論と次のアクションを簡潔に示してください。\n\n\(body)"
             await delegate(to: mgr.id, task: prompt)
         }
+    }
+
+    /// Register an automation (cron) for a specific employee: preset the assignee (and
+    /// optionally the prompt/name) and jump to the Automations screen to set the schedule.
+    func registerAutomationForEmployee(_ employeeId: String, prompt: String? = nil) {
+        newCronAssigneeId = employeeId
+        if let p = prompt?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty {
+            newCronPrompt = p
+        }
+        if let emp = employees.first(where: { $0.id == employeeId }),
+           newCronName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            newCronName = "\(emp.name)の定期タスク"
+        }
+        view = "automations"
+        Task { await fetchCronJobs() }
+        triggerToast(message: "担当者を設定しました。スケジュールと指示を入力して作成してください。")
     }
 
     /// Hand a task to its assignee: switch to that employee, prefill the task as the
@@ -1633,6 +3602,28 @@ class AppState: ObservableObject {
         }
         directive += agentMode.directive
         return "\(text)\n\n\(AgentMode.sentinelOpen)\(directive)\(AgentMode.sentinelClose)"
+    }
+
+    // MARK: - Antigravity CLI backend (agy)
+
+    /// Build a plain (sentinel-free) prompt for `agy`, prepending the employee persona
+    /// and appending the chat/code mode directive as plain text. Antigravity won't strip
+    /// Hermes sentinels, so the directive is included verbatim (not sentinel-wrapped).
+    func antigravityPrompt(_ text: String, employee: Employee?, mode: AgentMode) -> String {
+        var prefix = ""
+        if let emp = employee {
+            prefix += "あなたは「\(emp.name)」という名前の\(emp.role.title)です。\(emp.persona)\n\n"
+        }
+        return "\(prefix)\(text)\n\n\(mode.directive)"
+    }
+
+    /// The model to run under the FIXED global provider. The provider is a Settings-only
+    /// value (never auto-switched), so an employee's own model is honored only when it
+    /// belongs to that provider; otherwise we fall back to the global default model.
+    func modelForFixedProvider(_ employee: Employee?) -> String {
+        if let e = employee, e.provider == provider, !e.model.isEmpty { return e.model }
+        if !defaultModel.isEmpty { return defaultModel }
+        return provider == AntigravityCLI.providerId ? AntigravityCLI.defaultModel : defaultModel
     }
 
     /// Generate an AI avatar via Pollinations (free, no key) and cache it to disk.
@@ -1674,6 +3665,42 @@ class AppState: ObservableObject {
         return base.appendingPathComponent("HermesCustom/avatars", isDirectory: true)
     }
 
+    // MARK: - Turn-failure diagnostics (actionable error messages)
+
+    /// True when a raw backend stream/error says the model has no tool-capable provider
+    /// (OpenRouter: "No endpoints found that support tool use"). The app always runs the
+    /// agent WITH tools, so such a model can't work here even though a plain chat would.
+    func rawIndicatesNoToolSupport(_ raw: String) -> Bool {
+        let r = raw.lowercased()
+        return r.contains("support tool use") || r.contains("no endpoints found that support tool")
+    }
+
+    private func shortModel(_ m: String) -> String {
+        m.contains("/") ? String(m.split(separator: "/").last!) : m
+    }
+
+    /// A user-facing, actionable reason for an empty/failed turn. Detects the common causes
+    /// (no tool support / no credits / bad key); otherwise still nudges toward switching
+    /// models, since a tool-incapable model is by far the most common cause of an instant
+    /// empty reply in this agent.
+    func emptyTurnMessage(kind: BackendKind, ok: Bool, raw: String) -> String {
+        let r = raw.lowercased()
+        if rawIndicatesNoToolSupport(raw) {
+            return "このモデル（\(shortModel(defaultModel))）はツール使用（関数呼び出し）に未対応のため、このアプリでは動作しません。下のモデル名から別のモデル（例: Nemotron 120B〔無料〕/ GPT-4o mini）に切り替えてください。"
+        }
+        let pname = AppState.providerDisplayName(provider)
+        if r.contains("402") || r.contains("insufficient") || r.contains("credit") {
+            return "クレジット不足の可能性があります。\(pname)の残高、または無料/安価モデルへの切替をご確認ください。"
+        }
+        if r.contains("401") || r.contains("unauthorized") || r.contains("invalid api key") {
+            return "APIキーが無効/未設定の可能性があります。設定で\(pname)のAPIキーを確認してください。"
+        }
+        if kind == .antigravity {
+            return "応答がありませんでした（Antigravity CLI / `agy` を確認してください）。"
+        }
+        return "応答が得られませんでした。多くの場合、選択中のモデルがツール使用に未対応です。下のモデル名から別のモデル（例: Nemotron 120B〔無料〕/ GPT-4o mini）に切り替えて再試行してください。"
+    }
+
     // MARK: - Model validation (hide non-working models)
 
     /// Test an OpenRouter model with a 1-token request; record + return whether it works.
@@ -1682,9 +3709,11 @@ class AppState: ObservableObject {
     /// Note: this is a real (billable) completion for paid models.
     @discardableResult
     func validateModel(_ id: String) async -> Bool {
-        let key = HermesCLI.shared.getApiKey(provider: "openrouter")
-        guard !key.isEmpty, let url = URL(string: "https://openrouter.ai/api/v1/chat/completions") else {
-            return modelHealth[id] ?? true   // no key → can't test; leave unknown
+        // Validate against the CURRENT provider's OpenAI-compatible endpoint.
+        let base = AppState.providerBaseURL(provider)
+        let key = HermesCLI.shared.getApiKey(provider: provider)
+        guard !key.isEmpty, !base.isEmpty, let url = URL(string: base + "/chat/completions") else {
+            return modelHealth[id] ?? true   // no key / non-HTTP provider → can't test; leave unknown
         }
         validatingModelId = id
         defer { if validatingModelId == id { validatingModelId = nil } }
@@ -1693,22 +3722,48 @@ class AppState: ObservableObject {
         req.timeoutInterval = 12
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = ["model": id, "messages": [["role": "user", "content": "hi"]], "max_tokens": 1]
+        // Validate the way the app actually uses the model: as a tool-using agent. A model
+        // whose OpenRouter providers don't support tool calling returns 404 ("No endpoints
+        // found that support tool use"), which the 4xx branch below correctly marks unusable.
+        // (A plain no-tools ping would pass and wrongly show such a model as working — the
+        // exact gap that let `aion-labs/aion-1.0` be selected.)
+        let body: [String: Any] = [
+            "model": id,
+            "messages": [["role": "user", "content": "hi"]],
+            "max_tokens": 1,
+            "tools": [[
+                "type": "function",
+                "function": ["name": "ping", "description": "noop",
+                             "parameters": ["type": "object", "properties": [String: Any]()]]
+            ]]
+        ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let bodyStr = (String(data: data, encoding: .utf8) ?? "").lowercased()
             if code == 200 {
                 var works = true
                 if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], j["error"] != nil { works = false }
                 modelHealth[id] = works
                 return works
-            } else if [400, 401, 402, 403, 404].contains(code) {
+            }
+            // No tool-capable provider → unusable in this agent (which always uses tools).
+            if bodyStr.contains("support tool use") {
+                modelHealth[id] = false
+                return false
+            }
+            // Hit the tiny max_tokens cap → the model accepted the tools request and started
+            // generating, so it IS reachable & tool-capable (don't mis-flag it as broken).
+            if code == 400, bodyStr.contains("max_tokens") || bodyStr.contains("output limit") || bodyStr.contains("finish") {
+                modelHealth[id] = true
+                return true
+            }
+            if [400, 401, 402, 403, 404].contains(code) {
                 modelHealth[id] = false   // bad model / no access / no credits → unusable
                 return false
-            } else {
-                return modelHealth[id] ?? true   // 429/5xx etc → transient, keep prior/unknown
             }
+            return modelHealth[id] ?? true   // 429/5xx etc → transient, keep prior/unknown
         } catch {
             return modelHealth[id] ?? true   // timeout/network → unknown, don't mark broken
         }
@@ -1719,8 +3774,10 @@ class AppState: ObservableObject {
     func revalidatePresets() async {
         isValidatingModels = true
         defer { isValidatingModels = false }
-        var ids = Set(AppState.modelPresets.map { $0.model })
-        if provider == "openrouter" { ids.insert(defaultModel) }   // don't test a non-OR model against OR
+        var ids = Set(currentModelPresets.map { $0.model })
+        // Include the active model only when it belongs to the current HTTP provider
+        // (don't test a non-matching id against the wrong endpoint).
+        if !AppState.providerBaseURL(provider).isEmpty { ids.insert(defaultModel) }
         await withTaskGroup(of: Void.self) { group in
             for id in ids { group.addTask { [weak self] in _ = await self?.validateModel(id) } }
         }
@@ -1731,21 +3788,23 @@ class AppState: ObservableObject {
     /// selected model is never hidden (so the user can always see their own choice).
     func modelIsHidden(_ id: String) -> Bool { id != defaultModel && hideBrokenModels && modelHealth[id] == false }
 
-    /// Quietly apply a model (no toast) — used on employee switch.
-    func applyModelSilently(provider: String, model: String) async {
-        self.provider = provider
+    /// Quietly apply a model under the FIXED provider (no toast) — used on employee switch.
+    /// The inference provider is a Settings-only value (see `handleProviderChange`) and is
+    /// never changed here, so switching employees can't silently flip the provider.
+    func applyModelSilently(model: String) async {
         self.defaultModel = model
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.provider", provider])
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.default", model])
-        let baseUrl = provider == "openrouter" ? "https://openrouter.ai/api/v1" : ""
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.base_url", baseUrl])
+        // Antigravity runs via `agy`, not Hermes — never write it into the Hermes config
+        // (it's not a Hermes provider, and doing so would break Hermes-backed employees).
+        guard provider != AntigravityCLI.providerId else { return }
+        await writeHermesModelConfig(provider: provider, model: model)
         await loadApiKey()
     }
 
-    /// Switch the active model (and provider) from the composer, persisting to the CLI config.
-    func setModel(provider: String, model: String) async {
-        await applyModelSilently(provider: provider, model: model)
-        // Persist onto the active employee so their default follows them.
+    /// Switch the active MODEL from the composer/picker, persisting to the CLI config.
+    /// The provider stays the fixed global one — only Settings changes the provider.
+    func setModel(_ model: String) async {
+        await applyModelSilently(model: model)
+        // Persist onto the active employee (with the fixed provider) so it follows them.
         if let empId = activeEmployeeId, let idx = employees.firstIndex(where: { $0.id == empId }) {
             employees[idx].provider = provider
             employees[idx].model = model
@@ -1755,11 +3814,11 @@ class AppState: ObservableObject {
         triggerToast(message: "モデルを変更しました: \(model)")
     }
 
-    /// Set just the model id, keeping the current provider (for custom entry).
+    /// Set just the model id (for custom entry). Provider is fixed via Settings.
     func setCustomModel(_ model: String) async {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        await setModel(provider: provider, model: trimmed)
+        await setModel(trimmed)
     }
 
     // Provider selection helper
@@ -1768,6 +3827,8 @@ class AppState: ObservableObject {
         switch newProvider {
         case "openrouter":
             self.defaultModel = "nvidia/nemotron-3-super-120b-a12b:free"
+        case "cerebras":
+            self.defaultModel = "gpt-oss-120b"
         case "openai":
             self.defaultModel = "gpt-4o-mini"
         case "anthropic":
@@ -1780,30 +3841,47 @@ class AppState: ObservableObject {
             self.defaultModel = "grok-beta"
         case "openai-codex":
             self.defaultModel = "code-davinci-002"
+        case AntigravityCLI.providerId:
+            self.defaultModel = AntigravityCLI.defaultModel
         default:
             break
         }
-        
+
+        // The model catalog is per-provider — drop the stale list and refetch for the new one.
+        self.availableModels = []
         Task {
             await loadApiKey()
+            await fetchAvailableModels()
         }
     }
     
     // Save Settings Config
     func handleSaveSettings() async {
         self.isSavingSettings = true
-        
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.provider", provider])
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.default", defaultModel])
-        
-        let baseUrl = provider == "openrouter" ? "https://openrouter.ai/api/v1" : ""
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "model.base_url", baseUrl])
-        _ = await HermesCLI.shared.exec(args: ["config", "set", "display.personality", personality])
-        
-        if !["nous", "xai-oauth", "openai-codex"].contains(provider) {
-            _ = HermesCLI.shared.saveApiKey(provider: provider, key: apiKey)
+
+        // Antigravity runs via `agy`, not Hermes — skip the Hermes model config writes
+        // (keep personality, which is display-only) and the API-key save (agy self-auths).
+        if provider != AntigravityCLI.providerId {
+            // Save the API key BEFORE writing the model config so the env var exists when
+            // Hermes (host-derived key path for cerebras) next resolves the provider.
+            if !["nous", "xai-oauth", "openai-codex"].contains(provider) {
+                _ = HermesCLI.shared.saveApiKey(provider: provider, key: apiKey)
+            }
+            await writeHermesModelConfig(provider: provider, model: defaultModel)
+            // The persistent ACP process(es) captured the OLD environment at spawn — recycle
+            // the idle ones so the next prompt respawns with the freshly-saved key (e.g.
+            // CEREBRAS_API_KEY). resetSession() only drops the session id and REUSES the running
+            // process (stale env), so we must shutdown() to actually respawn. Streaming clients
+            // are left intact. (The per-prompt Hermes CLI path always gets the latest env.)
+            // The shared client is used only for delegation — don't kill it mid-delegation.
+            if busyEmployeeIds.isEmpty { ACPClient.shared.shutdown() }
+            for key in empACPClients.keys where !streamingEmployeeIds.contains(key) {
+                empACPClients[key]?.shutdown()
+                empACPClients.removeValue(forKey: key)
+            }
         }
-        
+        _ = await HermesCLI.shared.exec(args: ["config", "set", "display.personality", personality])
+
         triggerToast(message: "設定を保存しました。")
         await fetchConfig()
         self.isSavingSettings = false
@@ -1859,7 +3937,12 @@ class AppState: ObservableObject {
         let port = AppConfig.mobilePort
         // Prefer the stable MagicDNS hostname over a raw IP, so the QR/URL the user
         // shares keeps working even if the tailnet IP changes.
-        if let host = HermesCLI.shared.getTailscaleHostname() {
+        // Run the (blocking) `tailscale status` subprocess OFF the main actor so a slow
+        // or hung tailnet can never freeze the UI on launch.
+        let host = await Task.detached(priority: .utility) {
+            HermesCLI.shared.getTailscaleHostname()
+        }.value
+        if let host = host {
             self.dashboardURL = "http://\(host):\(port)"
             self.qrCodeImage = QRCodeGenerator.generate(from: self.dashboardURL)
             self.isUsingTailscale = true
@@ -2170,13 +4253,13 @@ class AppState: ObservableObject {
                 var source = ""
                 var version = ""
                 var name = ""
-                
-                if components[0] == "not" && components[1] == "enabled" {
+
+                if components[0] == "not" && components[1] == "enabled" && components.count >= 5 {
                     status = "not enabled"
                     source = components[2]
                     version = components[3]
                     name = components[4]
-                } else {
+                } else if components[0] != "not" {
                     status = components[0]
                     source = components[1]
                     version = components[2]
@@ -2335,6 +4418,94 @@ class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Send to a channel from a chat prompt ("LINEに〜を送って")
+
+    /// Deliver `text` to a registered channel (LINE via the bridge's line-send.sh; others via
+    /// `hermes send`). Returns success + an error detail.
+    func sendToChannel(_ channel: HermesChannel, text: String) async -> (ok: Bool, detail: String) {
+        let res: (success: Bool, stdout: String, stderr: String)
+        if channel.platform.lowercased() == "line" {
+            let script = NSHomeDirectory() + "/.hermes/line-bridge/line-send.sh"
+            res = await HermesCLI.shared.execCommand("/bin/bash", [script, channel.channelId, text])
+        } else {
+            let target = "\(channel.platform):\(channel.channelId)"
+            res = await HermesCLI.shared.exec(args: ["send", "-t", target, text])
+        }
+        let err = (res.stderr.isEmpty ? res.stdout : res.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (res.success, err)
+    }
+
+    /// Detect a "send this to LINE" instruction in a chat prompt and extract the recipient
+    /// channel + the message body. Returns nil when it isn't a clear send command (so the
+    /// prompt falls through to the AI as usual). Conservative: requires BOTH a LINE/ライン
+    /// mention and an explicit send verb.
+    /// True if the prompt reads as a LINE-send instruction (LINE/ライン mention + a send verb,
+    /// and not a how-to question). Channel-agnostic so the caller can surface "no channel".
+    func looksLikeLineSend(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.count >= 4, t.count < 2000, !t.contains("\n\n") else { return false }
+        guard t.lowercased().contains("line") || t.contains("ライン") else { return false }
+        let sendVerbs = ["送って", "送信", "送る", "送っといて", "送っておいて", "プッシュ", "通知して", "通知", "メッセージして", "伝えて", "知らせて"]
+        guard sendVerbs.contains(where: { t.contains($0) }) else { return false }
+        // Reject "how-to" questions that merely mention LINE (unless an explicit quote is present).
+        if !t.contains("「") && !t.contains("『") {
+            for q in ["使い方", "とは", "教えて", "どうやって", "方法", "設定", "繋ぎ方", "つなぎ方", "連携", "とは何"] where t.contains(q) {
+                return false
+            }
+        }
+        return true
+    }
+
+    func parseLineSendCommand(_ text: String) -> (channel: HermesChannel, message: String)? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard looksLikeLineSend(t) else { return nil }
+        let lineChannels = channels.filter { $0.platform.lowercased() == "line" }
+        guard !lineChannels.isEmpty else { return nil }   // caller surfaces "no LINE channel"
+        // Prefer a channel whose name is explicitly mentioned; else the only/first one.
+        let target = lineChannels.first { $0.name.count >= 2 && t.contains($0.name) } ?? lineChannels[0]
+        guard let msg = extractSendMessage(t), !msg.isEmpty else { return nil }
+        return (target, msg)
+    }
+
+    /// Best-effort extraction of the message body from a send command (handles quoted text and
+    /// both "LINEに〜送って" and "〜をLINEに送って" forms).
+    private func extractSendMessage(_ t: String) -> String? {
+        // 1) Quoted content wins.
+        for (open, close) in [("「", "」"), ("『", "』"), ("\u{201C}", "\u{201D}"), ("\"", "\"")] {
+            if let o = t.range(of: open), let c = t.range(of: close, range: o.upperBound..<t.endIndex) {
+                let inner = String(t[o.upperBound..<c.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !inner.isEmpty { return inner }
+            }
+        }
+        // 2) "<message> (を|と|って) LINE(に|へ|で) 送って" — message is BEFORE the LINE framing.
+        let trailing = #"\s*(を|と|って)?\s*(line|ライン)\s*(に|へ|で|宛て?に)\s*(送信|送って|送る|送っ|通知|プッシュ|メッセージ|伝え|知らせ).*$"#
+        if let r = t.range(of: trailing, options: [.regularExpression, .caseInsensitive]) {
+            let before = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if before.count >= 1 { return stripEdgeParticles(before) }
+        }
+        // 3) "LINE(に|へ|で) <message> (を) 送って" — message is AFTER the LINE marker.
+        var s = t
+        for marker in ["LINEに", "LINEへ", "LINEで", "ラインに", "ラインへ", "ラインで", "lineに", "lineで", "lineへ", "LINE", "ライン", "line"] {
+            if let r = s.range(of: marker, options: [.caseInsensitive]) { s = String(s[r.upperBound...]); break }
+        }
+        for tail in ["。", "．", ".", "！", "!", "してください", "して下さい", "してね", "しておいて", "しといて",
+                     "して", "お願いします", "おねがいします", "お願い", "よろしく", "を送信", "を送って",
+                     "を送る", "を通知", "とメッセージ", "と送って", "って送って", "を伝えて", "と伝えて",
+                     "を知らせて", "送信", "送って", "通知", "プッシュ"] {
+            while s.hasSuffix(tail) { s = String(s.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
+        }
+        return stripEdgeParticles(s.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func stripEdgeParticles(_ s: String) -> String? {
+        var r = s
+        for tail in ["を", "と", "、", ",", "って", "は", "に"] {
+            while r.hasSuffix(tail) { r = String(r.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
+        }
+        r = r.trimmingCharacters(in: .whitespacesAndNewlines)
+        return r.isEmpty ? nil : r
+    }
+
     // MARK: - Automations (Cron) Management
     
     // MARK: - Automation suggestions
@@ -2370,6 +4541,99 @@ class AppState: ObservableObject {
     }
 
     /// Ask the agent to propose automations (best-effort; parsed from pipe-delimited lines).
+    // MARK: - Dashboard / daily brief
+
+    /// Today's events (local day), earliest first.
+    var todayEvents: [ScheduleEvent] { events(on: Date()) }
+    /// Employees currently working (own turn or delegated).
+    var busyEmployees: [Employee] { employees.filter { isEmployeeBusy($0.id) } }
+    /// Apps with a live dev-server.
+    var runningApps: [AppProject] { apps.filter { runningAppIds.contains($0.id) } }
+
+    /// Compact factual snapshot of "today" fed to the AI brief writer.
+    private func dailyBriefContext() -> String {
+        let df = DateFormatter(); df.locale = Locale(identifier: "ja_JP"); df.dateFormat = "M月d日(E)"
+        let tf = DateFormatter(); tf.locale = Locale(identifier: "ja_JP"); tf.dateFormat = "HH:mm"
+        var lines: [String] = ["日付: \(df.string(from: Date()))"]
+        let ev = todayEvents
+        lines.append("今日の予定(\(ev.count)件): " + (ev.isEmpty ? "なし" :
+            ev.prefix(8).map { ($0.allDay ? "終日 " : tf.string(from: Date(timeIntervalSince1970: $0.date)) + " ") + $0.title }.joined(separator: " / ")))
+        let todo = tasks(status: .todo), doing = tasks(status: .doing)
+        lines.append("タスク: 未着手\(todo.count) / 対応中\(doing.count) / 完了\(tasks(status: .done).count)")
+        let pending = (doing + todo).prefix(8).map { t -> String in
+            let who = t.assigneeId.flatMap { id in employees.first { $0.id == id }?.name }.map { "（\($0)）" } ?? ""
+            return "\(t.title)\(who)"
+        }
+        if !pending.isEmpty { lines.append("対応中/未着手の主なタスク: " + pending.joined(separator: " / ")) }
+        let building = apps.filter { $0.status == .building }
+        if !building.isEmpty { lines.append("開発中アプリ: " + building.map { $0.name }.joined(separator: " / ")) }
+        if !runningApps.isEmpty { lines.append("起動中アプリ: " + runningApps.map { $0.name }.joined(separator: " / ")) }
+        lines.append("社員数: \(employees.count)人" + (busyEmployees.isEmpty ? "" : "（作業中: \(busyEmployees.map { $0.name }.joined(separator: "、"))）"))
+        if monthlyBudgetUSD > 0 { lines.append(String(format: "今月のコスト: $%.2f / 予算 $%.2f", totalCostUSD, monthlyBudgetUSD)) }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Write today's daily brief with the agent (one-shot), persisting the result + time.
+    /// Races the model against a timeout so a slow/stuck model can't pin the card on "生成中…";
+    /// on timeout/failure it falls back to a deterministic computed brief.
+    func generateDailyBrief() async {
+        guard !isGeneratingBrief else { return }
+        isGeneratingBrief = true
+        defer { isGeneratingBrief = false }
+        let prompt = """
+        あなたは有能な秘書です。以下の社内データをもとに、今日の「デイリーブリーフ」を日本語で簡潔に書いてください。
+        ルール: 挨拶や前置きは書かない。まず2〜3文で今日の概況、続けて「今日の重点」として箇条書きを最大3つ。誇張せず事実ベースで。データが少なければ無理に埋めない。
+
+        【今日のデータ】
+        \(dailyBriefContext())
+        """
+        // Race the AI call vs a 40s timeout (the model may hang).
+        let stdout: String? = await withTaskGroup(of: String?.self) { group in
+            group.addTask { await HermesCLI.shared.exec(args: ["chat", "-q", prompt]).stdout }
+            group.addTask { try? await Task.sleep(nanoseconds: 40_000_000_000); return nil }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        let text = stdout.map { parseResponseText($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        // Treat an error/empty response as failure → deterministic fallback (so the card never
+        // shows a raw "HTTP 429 / API call failed" line as if it were the brief).
+        if text.isEmpty || looksLikeErrorResponse(text) {
+            dailyBrief = computedBrief()
+            dailyBriefAt = Date().timeIntervalSince1970
+            let hint = looksLikeErrorResponse(text) ? "（モデルがエラーを返しました：\(String(text.prefix(80)))）" : "（モデルが応答しませんでした）"
+            triggerToast(message: "簡易ブリーフを表示しました\(hint)")
+        } else {
+            dailyBrief = text
+            dailyBriefAt = Date().timeIntervalSince1970
+        }
+    }
+
+    /// Heuristic: does the model's text look like an error banner rather than a real reply?
+    private func looksLikeErrorResponse(_ text: String) -> Bool {
+        let l = text.lowercased()
+        let markers = ["api call failed", "http 4", "http 5", "429", "rate limit", "limit exceeded",
+                       "too many tokens", "insufficient", "unauthorized", "invalid api key",
+                       "no endpoints", "error:", "エラー:", "failed after"]
+        // Short + contains a marker → very likely an error (real briefs are multi-sentence).
+        return markers.contains { l.contains($0) } && text.count < 400
+    }
+
+    /// Deterministic fallback brief built directly from today's data (no model needed).
+    private func computedBrief() -> String {
+        let ev = todayEvents
+        let todo = tasks(status: .todo), doing = tasks(status: .doing)
+        var parts: [String] = []
+        parts.append(ev.isEmpty ? "本日の登録予定はありません。" : "本日の予定は\(ev.count)件です。")
+        parts.append("未完了タスクは\(todo.count + doing.count)件（対応中\(doing.count)・未着手\(todo.count)）。")
+        if !runningApps.isEmpty { parts.append("起動中アプリ: \(runningApps.map { $0.name }.joined(separator: "、"))。") }
+        if !busyEmployees.isEmpty { parts.append("作業中の社員: \(busyEmployees.map { $0.name }.joined(separator: "、"))。") }
+        var s = parts.joined(separator: " ")
+        let focus = (doing + todo).prefix(3).map { "・\($0.title)" }
+        if !focus.isEmpty { s += "\n\n今日の重点:\n" + focus.joined(separator: "\n") }
+        return s
+    }
+
     func generateAutomationSuggestions() async {
         isGeneratingSuggestions = true
         defer { isGeneratingSuggestions = false }
@@ -2543,6 +4807,21 @@ class AppState: ObservableObject {
         return res.success
     }
 
+    /// テスト実行: ジョブを今すぐ実行キューに入れる(`hermes cron run`)。スケジューラ(Gateway)が
+    /// 稼働していれば次tickで発火し、設定された配信先(LINE等)へ結果が送られる。外部送信を伴うため
+    /// 呼び出し元(UI)で確認ダイアログを挟むこと。
+    func cronRunNow(id: String) async -> Bool {
+        let res = await HermesCLI.shared.exec(args: ["cron", "run", id])
+        if res.success {
+            triggerToast(message: "テスト実行をトリガーしました。まもなく配信先に届きます。")
+            await fetchCronJobs()
+            fetchAutomationResults()
+        } else {
+            triggerToast(message: "テスト実行に失敗: \(res.stderr)")
+        }
+        return res.success
+    }
+
     func handleCreateCronJob() async {
         let name = newCronName.trimmingCharacters(in: .whitespacesAndNewlines)
         let schedule = newCronSchedule.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2594,6 +4873,94 @@ class AppState: ObservableObject {
             triggerToast(message: "作成に失敗しました: \(res.stderr)")
         }
         self.isCreatingCronJob = false
+    }
+
+    // MARK: - 株モニタリング (証券アナリスト × cron × LINE)
+
+    /// cron の --script に渡す名前(~/.hermes/scripts/ 配下で解決される)。
+    static let stockScriptName = "stock-monitor.py"
+    static var stockPortfolioPath: String { NSHomeDirectory() + "/.hermes/scripts/portfolio.txt" }
+    static var stockEnvPath: String { NSHomeDirectory() + "/.hermes/scripts/.env" }
+
+    static func loadPortfolioText() -> String {
+        (try? String(contentsOfFile: stockPortfolioPath, encoding: .utf8)) ?? ""
+    }
+
+    /// ~/.hermes/scripts/.env から TWELVEDATA_API_KEY を読む(無ければ空)。
+    static func loadStockApiKey() -> String {
+        guard let txt = try? String(contentsOfFile: stockEnvPath, encoding: .utf8) else { return "" }
+        for raw in txt.split(separator: "\n") {
+            let l = raw.trimmingCharacters(in: .whitespaces)
+            if l.hasPrefix("TWELVEDATA_API_KEY=") {
+                return String(l.dropFirst("TWELVEDATA_API_KEY=".count))
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+            }
+        }
+        return ""
+    }
+
+    private func ensureStockScriptsDir() {
+        try? FileManager.default.createDirectory(
+            atPath: NSHomeDirectory() + "/.hermes/scripts", withIntermediateDirectories: true)
+    }
+
+    func savePortfolioText() {
+        ensureStockScriptsDir()
+        try? stockPortfolioText.write(toFile: Self.stockPortfolioPath, atomically: true, encoding: .utf8)
+        triggerToast(message: "保有銘柄を保存しました。")
+    }
+
+    /// .env の TWELVEDATA_API_KEY 行だけを差し替え/追記して保存(他の行は保持)。
+    func saveStockApiKey() {
+        ensureStockScriptsDir()
+        let key = stockApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        var lines: [String] = []
+        if let txt = try? String(contentsOfFile: Self.stockEnvPath, encoding: .utf8) {
+            lines = txt.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("TWELVEDATA_API_KEY=") }
+        }
+        if !key.isEmpty { lines.append("TWELVEDATA_API_KEY=\(key)") }
+        let body = lines.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"
+        try? body.write(toFile: Self.stockEnvPath, atomically: true, encoding: .utf8)
+    }
+
+    /// 株モニタリングの担当=証券アナリスト社員を解決(名前に「証券」→ロール analyst →「アナリスト」)。
+    var stockAnalyst: Employee? {
+        employees.first { $0.name.contains("証券") }
+            ?? employees.first { $0.role == .analyst }
+            ?? employees.first { $0.name.contains("アナリスト") }
+    }
+
+    /// 登録済み LINE チャンネルの最初の channelId(無ければ nil)。
+    var firstLineChannelId: String? {
+        channels.first { $0.platform.lowercased() == "line" }?.channelId
+    }
+
+    /// 株モニタリングの cron 作成フォームを一括プリフィル(内容確認後に『タスクを作成』で確定)。
+    /// 注: スケジュールはシステムのローカル時刻(日本なら JST)で解釈される。
+    func prefillStockMonitor() {
+        // 保有銘柄(コメント/空行以外)が1件も無ければ作成させない。
+        let hasHolding = stockPortfolioText
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .contains { !$0.isEmpty && !$0.hasPrefix("#") }
+        guard hasHolding else {
+            triggerToast(message: "保有銘柄を入力してください（コメント行のみです）。")
+            return
+        }
+        newCronName = "株モニタリング"
+        newCronSchedule = "30 8,15 * * 1-5"   // 平日 8:30 / 15:30(ローカル時刻)
+        newCronAssigneeId = stockAnalyst?.id
+        newCronScript = Self.stockScriptName
+        newCronNoAgent = false
+        newCronDeliver = firstLineChannelId.map { "line:\($0)" } ?? "local"
+        newCronPrompt = "次のスクリプト出力は、ユーザーの保有銘柄の最新株価(前日比)と関連ニュース見出しです。これを分析し、保有銘柄に影響しそうな重要な変動・ニュースを中心に、要点を日本語で簡潔にまとめて、LINE通知向けの短いレポートにしてください。各銘柄の前日比と注目すべきニュースの見出しを優先し、全体は読みやすい長さに。最後に「※投資助言ではなく情報整理です」と一言添えてください。"
+        view = "automations"
+        if firstLineChannelId == nil {
+            triggerToast(message: "反映しました。LINE宛先が未登録のため配信先は『local』です（後で変更可）。内容を確認して『タスクを作成』。")
+        } else {
+            triggerToast(message: "株モニタリングをフォームに反映しました。内容を確認して『タスクを作成』。")
+        }
     }
 }
 
