@@ -1262,6 +1262,9 @@ class AppState: ObservableObject {
     // Phase D: the AI employee a scheduled task runs as (persona-wrapped).
     @Published var newCronAssigneeId: String? = nil
 
+    /// 作成フォームをモーダル（シート）で表示するか。「使う」/「このフローを設定」/新規作成で開く。
+    @Published var showCronCreateSheet = false
+
     // 株モニタリング: 保有銘柄リスト & 株価APIキー(Twelve Data)。ディスク(~/.hermes/scripts/)が真実、
     // これらは編集用バッファ。保存で書き出し、スクリプト(stock-monitor.py)が読む。
     @Published var stockPortfolioText: String = AppState.loadPortfolioText()
@@ -4593,7 +4596,7 @@ class AppState: ObservableObject {
         newCronDeliver = s.deliver.isEmpty ? "local" : s.deliver
         newCronScript = ""
         newCronNoAgent = false
-        triggerToast(message: "提案をフォームに反映しました。内容を確認して『タスクを作成』。")
+        showCronCreateSheet = true   // 反映した内容を作成モーダルで開く
     }
 
     /// Ask the agent to propose automations (best-effort; parsed from pipe-delimited lines).
@@ -4906,7 +4909,8 @@ class AppState: ObservableObject {
         return res.success
     }
 
-    func handleCreateCronJob() async {
+    @discardableResult
+    func handleCreateCronJob() async -> Bool {
         let name = newCronName.trimmingCharacters(in: .whitespacesAndNewlines)
         let schedule = newCronSchedule.trimmingCharacters(in: .whitespacesAndNewlines)
         var prompt = newCronPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4916,10 +4920,10 @@ class AppState: ObservableObject {
         }
         let deliver = newCronDeliver.trimmingCharacters(in: .whitespacesAndNewlines)
         let script = newCronScript.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         guard !schedule.isEmpty else {
             triggerToast(message: "スケジュールを入力してください。")
-            return
+            return false
         }
         
         self.isCreatingCronJob = true
@@ -4957,6 +4961,18 @@ class AppState: ObservableObject {
             triggerToast(message: "作成に失敗しました: \(res.stderr)")
         }
         self.isCreatingCronJob = false
+        return res.success
+    }
+
+    /// 作成フォームを初期状態へリセット（モーダルを「新規作成」で開く前に呼ぶ）。
+    func resetNewCronForm() {
+        newCronName = ""
+        newCronSchedule = ""
+        newCronPrompt = ""
+        newCronDeliver = "local"
+        newCronScript = ""
+        newCronAssigneeId = nil
+        newCronNoAgent = false
     }
 
     // MARK: - 株モニタリング (証券アナリスト × cron × LINE)
@@ -5040,10 +5056,9 @@ class AppState: ObservableObject {
         newCronDeliver = firstLineChannelId.map { "line:\($0)" } ?? "local"
         newCronPrompt = "次のスクリプト出力は、ユーザーの保有銘柄の最新株価(前日比)と関連ニュース見出しです。これを分析し、保有銘柄に影響しそうな重要な変動・ニュースを中心に、要点を日本語で簡潔にまとめて、LINE通知向けの短いレポートにしてください。各銘柄の前日比と注目すべきニュースの見出しを優先し、全体は読みやすい長さに。最後に「※投資助言ではなく情報整理です」と一言添えてください。"
         view = "automations"
+        showCronCreateSheet = true   // 反映した内容を作成モーダルで開く
         if firstLineChannelId == nil {
-            triggerToast(message: "反映しました。LINE宛先が未登録のため配信先は『local』です（後で変更可）。内容を確認して『タスクを作成』。")
-        } else {
-            triggerToast(message: "株モニタリングをフォームに反映しました。内容を確認して『タスクを作成』。")
+            triggerToast(message: "LINE宛先が未登録のため配信先は『local』です（後で変更可）。")
         }
     }
 }

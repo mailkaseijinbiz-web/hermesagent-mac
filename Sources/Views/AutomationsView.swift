@@ -118,106 +118,24 @@ struct AutomationsView: View {
                     }
                 }
 
-                // Section 1: Create Cron Job Form
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("新しいスケジュールタスクを作成")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    
-                    VStack(spacing: 12) {
-                        TextField("タスク名 (例: daily_health_check)", text: $appState.newCronName)
-                            .textFieldStyle(.plain)
-                            .padding(8)
-                            .background(Color.primary.opacity(0.05))
-                            .cornerRadius(6)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("スケジュール").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
-                            SchedulePicker(schedule: $appState.newCronSchedule)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        
-                        TextField("エージェントへの指示プロンプト (例: 今日の天気を調べてサマリーを送信して)", text: $appState.newCronPrompt)
-                            .textFieldStyle(.plain)
-                            .padding(8)
-                            .background(Color.primary.opacity(0.05))
-                            .cornerRadius(6)
-                        
-                        HStack(spacing: 12) {
-                            // 配信先（ドロップダウン選択）— 作成/編集フォーム共通
-                            DeliverPicker(deliver: $appState.newCronDeliver)
-                                .frame(maxWidth: .infinity)
-
-                            TextField("スクリプトパス (任意)", text: $appState.newCronScript)
-                                .textFieldStyle(.plain)
-                                .padding(8)
-                                .background(Color.primary.opacity(0.05))
-                                .cornerRadius(6)
-                        }
-                        
-                        HStack {
-                            if !appState.employees.isEmpty {
-                                Menu {
-                                    Button { appState.newCronAssigneeId = nil } label: {
-                                        Label("担当なし", systemImage: appState.newCronAssigneeId == nil ? "checkmark" : "")
-                                    }
-                                    ForEach(appState.sortedEmployees) { e in
-                                        Button { appState.newCronAssigneeId = e.id } label: {
-                                            Label("\(e.role.emoji) \(e.name)", systemImage: appState.newCronAssigneeId == e.id ? "checkmark" : "")
-                                        }
-                                    }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "person.crop.circle").font(.system(size: 11))
-                                        Text(appState.employees.first { $0.id == appState.newCronAssigneeId }?.name ?? "担当社員")
-                                            .font(.system(size: 11))
-                                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
-                                    }.foregroundColor(.secondary)
-                                }.menuStyle(.borderlessButton).fixedSize()
-                            }
-
-                            Toggle("LLMを介さずスクリプトを直接実行 (--no-agent)", isOn: $appState.newCronNoAgent)
-                                .toggleStyle(.checkbox)
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary)
-
-                            Spacer()
-                            
-                            Button(action: {
-                                Task {
-                                    await appState.handleCreateCronJob()
-                                }
-                            }) {
-                                HStack {
-                                    if appState.isCreatingCronJob {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                            .padding(.trailing, 4)
-                                        Text("作成中...")
-                                    } else {
-                                        Text("タスクを作成")
-                                    }
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .background(colorScheme == .dark ? Color.white : Color.black)
-                                .foregroundColor(colorScheme == .dark ? .black : .white)
-                                .font(.system(size: 12, weight: .semibold))
-                                .cornerRadius(6)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(appState.isCreatingCronJob || appState.newCronSchedule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
+                // Section 1: 新しいスケジュールタスクを作成（モーダルで開く）
+                Button {
+                    appState.resetNewCronForm()
+                    appState.showCronCreateSheet = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.circle.fill").font(.system(size: 14))
+                        Text("新しいスケジュールタスクを作成").font(.system(size: 13, weight: .semibold))
+                        Spacer()
                     }
+                    .foregroundColor(.accentColor)
+                    .padding(14)
+                    .background(Color.accentColor.opacity(0.08)).cornerRadius(10)
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor.opacity(0.25), lineWidth: 0.5))
+                    .contentShape(Rectangle())
                 }
-                .padding(16)
-                .background(Color.primary.opacity(0.02))
-                .cornerRadius(10)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.primary.opacity(0.05), lineWidth: 0.5)
-                )
-                
+                .buttonStyle(.plain)
+
                 // Section 2: Cron Jobs List
                 VStack(alignment: .leading, spacing: 16) {
                     Text("スケジュールされているジョブ")
@@ -275,6 +193,9 @@ struct AutomationsView: View {
         .onAppear {
             appState.fetchAutomationResults()
             appState.fetchChannels()
+        }
+        .sheet(isPresented: $appState.showCronCreateSheet) {
+            CronCreateSheet().environmentObject(appState)
         }
     }
 
@@ -770,6 +691,113 @@ struct CronEditView: View {
             }
         }
         .padding(16).frame(width: 340)
+    }
+
+    @ViewBuilder
+    private func labeledField<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+            content()
+                .padding(8)
+                .background(Color.primary.opacity(0.05)).cornerRadius(6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+        }
+    }
+}
+
+/// スケジュールタスク作成モーダル。名前・スケジュール(SchedulePicker)・プロンプト・配信先・
+/// スクリプト・担当社員・--no-agent を入力して作成。成功でシートを閉じる。
+struct CronCreateSheet: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.colorScheme) var colorScheme
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("新しいスケジュールタスク").font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary).frame(width: 26, height: 26)
+                        .background(Color.primary.opacity(0.06)).clipShape(Circle())
+                }.buttonStyle(.plain)
+            }
+            .padding(.bottom, 14)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    labeledField("タスク名") {
+                        TextField("例: daily_health_check", text: $appState.newCronName)
+                            .textFieldStyle(.plain).font(.system(size: 12))
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("スケジュール").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        SchedulePicker(schedule: $appState.newCronSchedule)
+                    }
+                    labeledField("エージェントへの指示プロンプト") {
+                        TextField("例: 今日の天気を調べてサマリーを送信して", text: $appState.newCronPrompt, axis: .vertical)
+                            .textFieldStyle(.plain).font(.system(size: 12)).lineLimit(1...5)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("配信先").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        DeliverPicker(deliver: $appState.newCronDeliver)
+                    }
+                    labeledField("スクリプトパス（任意）") {
+                        TextField("~/.hermes/scripts/ 配下のファイル名", text: $appState.newCronScript)
+                            .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
+                    }
+                    HStack {
+                        if !appState.employees.isEmpty {
+                            Menu {
+                                Button { appState.newCronAssigneeId = nil } label: {
+                                    Label("担当なし", systemImage: appState.newCronAssigneeId == nil ? "checkmark" : "")
+                                }
+                                ForEach(appState.sortedEmployees) { e in
+                                    Button { appState.newCronAssigneeId = e.id } label: {
+                                        Label("\(e.role.emoji) \(e.name)", systemImage: appState.newCronAssigneeId == e.id ? "checkmark" : "")
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "person.crop.circle").font(.system(size: 11))
+                                    Text(appState.employees.first { $0.id == appState.newCronAssigneeId }?.name ?? "担当社員")
+                                        .font(.system(size: 11))
+                                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
+                                }.foregroundColor(.secondary)
+                            }.menuStyle(.borderlessButton).fixedSize()
+                        }
+                        Toggle("LLMを介さずスクリプトを直接実行 (--no-agent)", isOn: $appState.newCronNoAgent)
+                            .toggleStyle(.checkbox).font(.system(size: 12)).foregroundColor(.secondary)
+                        Spacer()
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            Divider().padding(.vertical, 12)
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("キャンセル") { dismiss() }.buttonStyle(.plain).font(.system(size: 13))
+                Button {
+                    Task { if await appState.handleCreateCronJob() { dismiss() } }
+                } label: {
+                    HStack(spacing: 5) {
+                        if appState.isCreatingCronJob { ProgressView().controlSize(.small) }
+                        Text(appState.isCreatingCronJob ? "作成中..." : "作成")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .padding(.horizontal, 18).padding(.vertical, 8)
+                    .background(colorScheme == .dark ? Color.white : Color.black)
+                    .foregroundColor(colorScheme == .dark ? .black : .white).cornerRadius(7)
+                }
+                .buttonStyle(.plain)
+                .disabled(appState.isCreatingCronJob || appState.newCronSchedule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 560, height: 600)
     }
 
     @ViewBuilder
