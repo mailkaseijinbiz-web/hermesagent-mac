@@ -120,6 +120,23 @@ struct SidebarView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 4)
 
+                // 「〇〇のチャット」の下に「新しいチャット」（この社員の新規チャットを開始）
+                Button {
+                    appState.handleNewChat()
+                    appState.view = "chat"
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.and.pencil").font(.system(size: 12))
+                        Text("新しいチャット").font(.system(size: 13, weight: .medium))
+                        Spacer()
+                    }
+                    .foregroundColor(.accentColor)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 2)
+
                 ScrollView {
                     VStack(spacing: 2) {
                         ForEach(appState.visibleSessions) { session in

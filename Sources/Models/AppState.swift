@@ -2721,6 +2721,23 @@ class AppState: ObservableObject {
                      "よろしく", "頼む", "たのむ"] {
             while t.hasSuffix(tail) { t = String(t.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
         }
+
+        // 中央形「（Task|タスク|TODO）に <X>（を）追加/登録/作成」。英語の Task/TODO も許容。
+        // 「タスクについて教えて」等の誤爆を避けるため、末尾が追加系の動詞の時だけ。
+        let lower = t.lowercased()
+        let middleLeads = ["task に", "taskに", "タスクに", "タスク に", "todoに", "todo に", "to do に"]
+        if let lead = middleLeads.first(where: { lower.hasPrefix($0) }),
+           ["追加", "登録", "作成"].contains(where: { t.hasSuffix($0) }) {
+            var mid = String(t.dropFirst(lead.count)).trimmingCharacters(in: .whitespaces)
+            for v in ["を追加", "に追加", "を登録", "を作成", "追加", "登録", "作成"] {
+                if mid.hasSuffix(v) { mid = String(mid.dropLast(v.count)).trimmingCharacters(in: .whitespaces); break }
+            }
+            for tail in ["の", "を", "、", ",", "という", "って", "に"] {
+                if mid.hasSuffix(tail) { mid = String(mid.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
+            }
+            let stop: Set<String> = ["新しい", "この", "その", "あの", "次の", "新規", "それ", "これ", "あれ", "タスク", "task", "todo"]
+            if mid.count >= 2, !stop.contains(mid.lowercased()) { return mid }
+        }
         let verbs = ["タスクとして追加", "タスクを追加", "タスクに追加", "タスクを作成", "タスクを登録",
                      "タスク追加", "タスク作成", "タスク登録", "TODOに追加", "ToDoに追加", "todoに追加"]
         for v in verbs where t.hasSuffix(v) {
