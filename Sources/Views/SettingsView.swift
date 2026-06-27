@@ -13,12 +13,17 @@ struct SettingsModal: View {
     @State private var settingsSearch = ""
     @State private var agyCustomModel = ""
     @State private var agyInstalled: Bool? = nil
+    /// Set when API key / provider changes — triggers auto-apply on close (replaces the
+    /// former 「設定を適用して保存」 button). Model selection already applies immediately.
+    @State private var settingsDirty = false
 
     enum Section: String, CaseIterable, Identifiable {
         case general = "一般"
         case model = "モデル"
+        case apps = "アプリ"
         case google = "Google"
         case github = "GitHub"
+        case mobile = "モバイル"
         case cloud = "クラウド同期"
         case channels = "チャンネル"
         case plugins = "プラグイン"
@@ -29,8 +34,10 @@ struct SettingsModal: View {
             switch self {
             case .general: return "gearshape"
             case .model: return "cpu"
+            case .apps: return "hammer"
             case .google: return "g.circle"
             case .github: return "chevron.left.forwardslash.chevron.right"
+            case .mobile: return "iphone"
             case .cloud: return "cloud"
             case .channels: return "bubble.left.and.bubble.right"
             case .plugins: return "puzzlepiece.extension"
@@ -42,8 +49,10 @@ struct SettingsModal: View {
             switch self {
             case .general: return "一般 general 性格 personality"
             case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter antigravity agy gemini cli"
+            case .apps: return "アプリ apps プロジェクト project 開発 develop 起動 launch 新規アプリ"
             case .google: return "google gmail calendar カレンダー メール oauth 認証 連携"
             case .github: return "github リポジトリ repo ワークスペース clone git 作業フォルダ"
+            case .mobile: return "モバイル mobile スマホ iphone ipad qr ペアリング 連携 同期 sync push 通知 認証"
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
             case .channels: return "チャンネル channel telegram discord slack line whatsapp signal teams メール email"
             case .plugins: return "プラグイン plugin インストール install 拡張"
@@ -161,15 +170,16 @@ struct SettingsModal: View {
                         switch selected {
                         case .general: generalSection
                         case .model: modelSection
+                        case .apps: AppsView(embedded: true)
                         case .google: googleSection
                         case .github: githubSection
+                        case .mobile: mobileSection
                         case .cloud: cloudSection
                         case .channels: channelsSection
                         case .plugins: pluginsSection
                         case .management: managementSection
                         case .experimental: experimentalSection
                         }
-                        if selected == .general || selected == .model || selected == .experimental { saveButton }
                     }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 24)
@@ -183,12 +193,34 @@ struct SettingsModal: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.35), radius: 24, x: 0, y: 12)
         .onAppear { appState.fetchChannels() }
+        .onChange(of: appState.apiKey) { _, _ in settingsDirty = true }
+        // 設定画面を閉じたら、変更（APIキー/プロバイダー）を自動適用して保存。
+        .onDisappear {
+            if settingsDirty {
+                settingsDirty = false
+                Task { await appState.handleSaveSettings() }
+            }
+        }
         .sheet(isPresented: $showModelPicker) {
             ModelPickerView().environmentObject(appState)
         }
     }
 
     // MARK: - Sections
+
+    /// モバイル連携（QRペアリング・Google認証ゲート・Push通知）。以前はヘッダーのアイコンから
+    /// ポップオーバーで開いていたが、設定内に集約した。MobileSyncView を再利用。
+    private var mobileSection: some View {
+        card(title: "モバイルと同期") {
+            HStack {
+                Spacer()
+                MobileSyncView()
+                    .environmentObject(appState)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+            }
+        }
+    }
 
     private var modelSection: some View {
         card(title: "プロバイダーとモデル") {
@@ -197,7 +229,10 @@ struct SettingsModal: View {
                 ForEach(providers, id: \.0) { Text($0.1).tag($0.0) }
             }
             .pickerStyle(.menu)
-            .onChange(of: appState.provider) { _, v in appState.handleProviderChange(v) }
+            .onChange(of: appState.provider) { _, v in
+                appState.handleProviderChange(v)
+                settingsDirty = true
+            }
 
             if appState.provider == AntigravityCLI.providerId {
                 antigravitySection
@@ -831,21 +866,9 @@ struct SettingsModal: View {
         }
     }
 
-    private var saveButton: some View {
-        Button {
-            Task { await appState.handleSaveSettings() }
-        } label: {
-            HStack { Spacer()
-                if appState.isSavingSettings { ProgressView().controlSize(.small).padding(.trailing, 6); Text("保存中...") }
-                else { Text("設定を適用して保存") }
-                Spacer() }
-            .padding(.vertical, 10)
-            .background(appState.isSavingSettings ? Color.primary.opacity(0.3) : (colorScheme == .dark ? Color.white : Color.black))
-            .foregroundColor(colorScheme == .dark ? .black : .white)
-            .font(.system(size: 14, weight: .bold)).cornerRadius(6)
-        }
-        .buttonStyle(.plain).disabled(appState.isSavingSettings).padding(.top, 4)
-    }
+    // 設定は手動保存ボタンを廃止し、設定画面を閉じたときに自動適用する（変更があった場合のみ）。
+    // モデル選択は選んだ時点で即時適用済み。ここで適用が必要なのは API キー入力とプロバイダー変更で、
+    // それらは settingsDirty を立て、.onDisappear で handleSaveSettings() を実行する。
 
     // MARK: - Reusable bits
 

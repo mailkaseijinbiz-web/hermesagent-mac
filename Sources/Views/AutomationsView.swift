@@ -48,9 +48,6 @@ struct AutomationsView: View {
                 }
                 .padding(.bottom, 8)
 
-                // Section: 株モニタリング (quick setup — 保有銘柄 + LINE通知フロー)
-                StockMonitorCard()
-
                 // Section 0.5: Suggested automations (collapsible — 既定で閉じる)
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 6) {
@@ -772,6 +769,9 @@ struct CronCreateSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    // クイック設定: 株モニタリング（展開して「このフローを設定」で下のフォームに反映）
+                    StockMonitorCard()
+
                     labeledField("タスク名") {
                         TextField("例: daily_health_check", text: $appState.newCronName)
                             .textFieldStyle(.plain).font(.system(size: 12))

@@ -391,7 +391,7 @@ class AppState: ObservableObject {
     // New Feature States
     @Published var showRightSidebar: Bool = false
     // Which panel the right sidebar shows.
-    enum RightTab { case terminal, browser, employee }
+    enum RightTab { case terminal, browser, employee, history }
     @Published var rightTab: RightTab = .terminal
     // Side terminal
     @Published var terminalOutput: String = ""
@@ -2860,6 +2860,19 @@ class AppState: ObservableObject {
         showRightSidebar = true
     }
 
+    /// Open this employee's chat history (session list) in the RIGHT side panel — the chat
+    /// stays on the left. Used by the sidebar kebab menu → チャット履歴. nil → 全体（社員なし）.
+    func openChatHistoryPanel(_ employeeId: String?) {
+        if let employeeId {
+            guard employees.contains(where: { $0.id == employeeId }) else { return }
+            if activeEmployeeId != employeeId { switchEmployee(employeeId) }
+        } else if activeEmployeeId != nil {
+            switchEmployee(nil)
+        }
+        rightTab = .history
+        showRightSidebar = true
+    }
+
     /// This employee's tasks (newest first — createTask inserts at index 0).
     func tasks(for employeeId: String) -> [WorkTask] {
         workTasks.filter { $0.assigneeId == employeeId }
@@ -2980,6 +2993,18 @@ class AppState: ObservableObject {
         } else {
             employees.append(moved)
         }
+    }
+
+    /// Sidebar order: pinned employees float to the top, preserving the stored (drag-drop)
+    /// order within each group.
+    var sidebarEmployees: [Employee] {
+        employees.filter { $0.isPinned } + employees.filter { !$0.isPinned }
+    }
+
+    /// Toggle an employee's sidebar pin (kebab menu → ピン留め).
+    func togglePinEmployee(_ id: String) {
+        guard let idx = employees.firstIndex(where: { $0.id == id }) else { return }
+        employees[idx].pinned = !employees[idx].isPinned
     }
 
     // MARK: - Apps (Phase F — AI-developed app projects)

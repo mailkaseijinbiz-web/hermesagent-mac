@@ -2,34 +2,23 @@ import SwiftUI
 
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
-    @State private var hoveredSessionId: String? = nil
-    @State private var editingSessionId: String? = nil
-    @State private var editingSessionText: String = ""
     @State private var isSettingsHovered = false
-    @State private var pendingDeleteSession: Session? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // macOS titlebar traffic lights spacing
             Spacer().frame(height: 52)
-            
+
             // Core Menu Actions
             VStack(spacing: 2) {
                 SidebarMenuButton(icon: "square.grid.2x2", title: "ダッシュボード") {
                     appState.view = "dashboard"
-                }
-                SidebarMenuButton(icon: "doc.text", title: "新しいチャット") {
-                    appState.handleNewChat()
-                    appState.view = "chat"
                 }
                 SidebarMenuButton(icon: "person.3", title: "会社（AI社員）") {
                     appState.view = "company"
                 }
                 SidebarMenuButton(icon: "checklist", title: "タスク") {
                     appState.view = "tasks"
-                }
-                SidebarMenuButton(icon: "hammer", title: "アプリ") {
-                    appState.view = "apps"
                 }
                 SidebarMenuButton(icon: "clock", title: "オートメーション") {
                     appState.view = "automations"
@@ -39,19 +28,24 @@ struct SidebarView: View {
                 }
             }
             .padding(.horizontal, 12)
-            
+
             Divider()
                 .padding(.vertical, 12)
                 .padding(.horizontal, 12)
 
-            // Employee switcher (each employee = isolated context)
+            // Employee switcher (each employee = isolated context). チャット履歴・新しいチャットは
+            // 各行のケバブ（⋮）から右ペインで開く（左ペインのセッション一覧は廃止）。
             if !appState.employees.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
-                    // Stored order (not managers-first) so drag-and-drop reordering sticks.
-                    ForEach(appState.employees) { emp in
+                    // Pinned employees float to the top; stored order (drag-drop) within each group.
+                    ForEach(appState.sidebarEmployees) { emp in
                         let active = appState.activeEmployeeId == emp.id
                         HStack(spacing: 8) {
                             EmployeeAvatar(employee: emp, size: 28)
+                            if emp.isPinned {
+                                Image(systemName: "pin.fill")
+                                    .font(.system(size: 8)).foregroundColor(.orange)
+                            }
                             Text(emp.name)
                                 .font(.system(size: 13, weight: active ? .semibold : .regular))
                                 .foregroundColor(active ? .primary : .secondary)
@@ -60,6 +54,7 @@ struct SidebarView: View {
                             if appState.isEmployeeBusy(emp.id) {
                                 ProgressView().controlSize(.small).scaleEffect(0.6)
                             }
+                            employeeKebab(emp)
                         }
                         .padding(.horizontal, 12).padding(.vertical, 5)
                         .background(active ? Color.primary.opacity(0.08) : Color.clear)
@@ -78,11 +73,7 @@ struct SidebarView: View {
                             appState.moveEmployee(dragged, before: emp.id)
                             return true
                         }
-                        .contextMenu {
-                            Button { appState.switchEmployee(emp.id) } label: { Label("この社員と話す", systemImage: "bubble.left") }
-                            Button { appState.openEmployeePanel(emp.id) } label: { Label("右パネルで管理", systemImage: "sidebar.right") }
-                            Button { appState.openEmployeeDetail(emp.id) } label: { Label("全画面で管理", systemImage: "square.grid.2x2") }
-                        }
+                        .contextMenu { employeeMenuItems(emp) }
                     }
 
                     HStack(spacing: 8) {
@@ -92,6 +83,7 @@ struct SidebarView: View {
                             .font(.system(size: 13))
                             .foregroundColor(appState.activeEmployeeId == nil ? .primary : .secondary)
                         Spacer()
+                        globalKebab
                     }
                     .padding(.horizontal, 12).padding(.vertical, 5)
                     .background(appState.activeEmployeeId == nil ? Color.primary.opacity(0.08) : Color.clear)
@@ -100,129 +92,13 @@ struct SidebarView: View {
                     .onTapGesture { appState.switchEmployee(nil) }
                 }
                 .padding(.horizontal, 12)
-
-                Divider()
-                    .padding(.vertical, 12)
-                    .padding(.horizontal, 12)
-            }
-
-            // Sessions Section
-            VStack(alignment: .leading, spacing: 4) {
-                Text(appState.activeEmployee.map { "\($0.name) のチャット" } ?? "チャット")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 4)
-
-                // 「〇〇のチャット」の下に「新しいチャット」（この社員の新規チャットを開始）
-                Button {
-                    appState.handleNewChat()
-                    appState.view = "chat"
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "square.and.pencil").font(.system(size: 12))
-                        Text("新しいチャット").font(.system(size: 13, weight: .medium))
-                        Spacer()
-                    }
-                    .foregroundColor(.accentColor)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.bottom, 2)
-
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(appState.visibleSessions) { session in
-                            let isActive = appState.currentSessionId == session.id
-                            HStack {
-                                if editingSessionId == session.id {
-                                    TextField("", text: $editingSessionText, onCommit: {
-                                        let newTitle = editingSessionText.trimmingCharacters(in: .whitespacesAndNewlines)
-                                        if !newTitle.isEmpty && newTitle != session.title {
-                                            Task {
-                                                await appState.handleRenameSession(id: session.id, newTitle: newTitle)
-                                            }
-                                        }
-                                        editingSessionId = nil
-                                    })
-                                    .textFieldStyle(.plain)
-                                    .font(.system(size: 13, weight: .light))
-                                    .foregroundColor(.primary)
-                                    .padding(.vertical, 2)
-                                    .background(Color.primary.opacity(0.05))
-                                    .cornerRadius(4)
-                                } else {
-                                    Button(action: {
-                                        appState.handleSelectSession(session)
-                                        appState.view = "chat"
-                                    }) {
-                                        HStack {
-                                            Text(session.title)
-                                                .font(.system(size: 13, weight: isActive ? .medium : .light))
-                                                .foregroundColor(isActive ? .primary : .secondary)
-                                                .lineLimit(1)
-                                            Spacer()
-                                        }
-                                        .contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-
-                                if hoveredSessionId == session.id {
-                                    Button(action: {
-                                        pendingDeleteSession = session
-                                    }) {
-                                        Image(systemName: "trash")
-                                            .font(.system(size: 11))
-                                            .foregroundColor(.red.opacity(0.8))
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(isActive ? Color.primary.opacity(0.08) : Color.clear)
-                            .cornerRadius(6)
-                            .onHover { isHovered in
-                                if isHovered {
-                                    hoveredSessionId = session.id
-                                    NSCursor.pointingHand.push()
-                                } else {
-                                    if hoveredSessionId == session.id {
-                                        hoveredSessionId = nil
-                                    }
-                                    NSCursor.pop()
-                                }
-                            }
-                            .contextMenu {
-                                Button(action: {
-                                    editingSessionId = session.id
-                                    editingSessionText = session.title
-                                }) {
-                                    Label("名前を変更", systemImage: "pencil")
-                                }
-                                
-                                Divider()
-                                
-                                Button(role: .destructive, action: {
-                                    pendingDeleteSession = session
-                                }) {
-                                    Label("削除", systemImage: "trash")
-                                }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                }
-                .scrollIndicators(.visible)   // thin rounded macOS overlay scrollbar
             }
 
             Spacer()
 
             // Footer
             Divider()
-            
+
             HStack(spacing: 8) {
                 Image(systemName: "gearshape")
                     .foregroundColor((appState.showSettings || isSettingsHovered) ? .primary : .secondary)
@@ -248,22 +124,72 @@ struct SidebarView: View {
                 }
             }
         }
-        .confirmationDialog(
-            "「\(pendingDeleteSession?.title ?? "")」を削除しますか？",
-            isPresented: Binding(get: { pendingDeleteSession != nil },
-                                 set: { if !$0 { pendingDeleteSession = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("削除", role: .destructive) {
-                if let s = pendingDeleteSession {
-                    Task { await appState.handleDeleteSession(id: s.id) }
-                }
-                pendingDeleteSession = nil
-            }
-            Button("キャンセル", role: .cancel) { pendingDeleteSession = nil }
-        } message: {
-            Text("この操作は取り消せません。")
+    }
+
+    // 縦三点（⋮）のケバブアイコン。SF Symbols に縦 ellipsis が無いので水平を90°回転。
+    private var kebabLabel: some View {
+        Image(systemName: "ellipsis")
+            .rotationEffect(.degrees(90))
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(.secondary)
+            .frame(width: 22, height: 22)
+            .contentShape(Rectangle())
+    }
+
+    // 社員行のケバブ（⋮）メニュー: ピン留め / 新しいチャット / チャット履歴 / アプリ開発
+    private func employeeKebab(_ emp: Employee) -> some View {
+        Menu {
+            employeeMenuItems(emp)
+        } label: {
+            kebabLabel
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    // 全体（社員なし）行のケバブ: 新しいチャット / チャット履歴
+    private var globalKebab: some View {
+        Menu {
+            Button {
+                appState.switchEmployee(nil)
+                appState.handleNewChat()
+                appState.view = "chat"
+            } label: { Label("新しいチャット", systemImage: "square.and.pencil") }
+            Button {
+                appState.openChatHistoryPanel(nil)
+            } label: { Label("チャット履歴", systemImage: "clock.arrow.circlepath") }
+        } label: {
+            kebabLabel
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private func employeeMenuItems(_ emp: Employee) -> some View {
+        Button {
+            appState.togglePinEmployee(emp.id)
+        } label: {
+            Label(emp.isPinned ? "ピン留めを外す" : "ピン留め",
+                  systemImage: emp.isPinned ? "pin.slash" : "pin")
+        }
+        Button {
+            appState.switchEmployee(emp.id)
+            appState.handleNewChat()
+            appState.view = "chat"
+        } label: { Label("新しいチャット", systemImage: "square.and.pencil") }
+        Button {
+            appState.openChatHistoryPanel(emp.id)
+        } label: { Label("チャット履歴", systemImage: "clock.arrow.circlepath") }
+        Button {
+            appState.switchEmployee(emp.id)
+            appState.view = "apps"
+        } label: { Label("アプリ開発", systemImage: "hammer") }
+        Divider()
+        Button { appState.openEmployeePanel(emp.id) } label: { Label("右パネルで管理", systemImage: "sidebar.right") }
+        Button { appState.openEmployeeDetail(emp.id) } label: { Label("全画面で管理", systemImage: "square.grid.2x2") }
     }
 }
 
@@ -272,7 +198,7 @@ struct SidebarMenuButton: View {
     let title: String
     let action: () -> Void
     @State private var isHovered = false
-    
+
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: icon)

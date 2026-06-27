@@ -313,6 +313,12 @@ struct Employee: Identifiable, Codable, Equatable {
     /// Last edit time of the SHARED profile fields (for cloud last-write-wins).
     /// Optional so existing persisted employees decode without it. nil → use createdAt.
     var updatedAt: Double? = nil
+    /// Pinned to the top of the sidebar (kebab menu → ピン留め). Optional so existing persisted
+    /// employees (no "pinned" key) decode without error — a non-optional Bool would throw
+    /// keyNotFound and wipe the whole roster. Read via `isPinned`.
+    var pinned: Bool? = nil
+    /// Convenience: treat missing/nil as not-pinned.
+    var isPinned: Bool { pinned ?? false }
 
     var persona: String { personaOverride ?? role.persona }
 

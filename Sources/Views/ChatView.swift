@@ -23,10 +23,15 @@ struct ChatView: View {
 
     var body: some View {
         if appState.messages.isEmpty && !appState.isStreaming {
-            // Initial screen: vertically centered
+            // Initial screen: assignee's apps pinned at top, title + composer centered below.
             VStack(spacing: 0) {
+                if !emptyStateApps.isEmpty {
+                    appsStrip
+                        .padding(.top, 44)
+                }
+
                 Spacer()
-                
+
                 Text("何を作りましょうか？")
                     .font(.system(size: 32, weight: .light))
                     .foregroundColor(.primary.opacity(0.9))
@@ -108,6 +113,60 @@ struct ChatView: View {
         }
     }
     
+    /// Apps shown on the empty chat screen: the active employee's apps (newest first),
+    /// or all apps when no employee is active.
+    private var emptyStateApps: [AppProject] {
+        if let id = appState.activeEmployeeId {
+            return appState.apps.filter { $0.assigneeId == id }.sorted { $0.updatedAt > $1.updatedAt }
+        }
+        return appState.sortedApps
+    }
+
+    /// Horizontal strip of app chips at the top of the empty chat screen. Tap to launch,
+    /// right-click for 開発する.
+    private var appsStrip: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "hammer.fill").font(.system(size: 10)).foregroundColor(.secondary)
+                Text(appState.activeEmployee.map { "\($0.name) のアプリ" } ?? "アプリ")
+                    .font(.system(size: 11, weight: .semibold)).foregroundColor(.secondary)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(emptyStateApps) { app in
+                        Button { appState.launchApp(app.id) } label: {
+                            HStack(spacing: 8) {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(app.status.color.opacity(0.16))
+                                    Text(String(app.name.trimmingCharacters(in: .whitespaces).prefix(1)))
+                                        .font(.system(size: 14, weight: .bold)).foregroundColor(app.status.color)
+                                }.frame(width: 30, height: 30)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(app.name).font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(.primary).lineLimit(1)
+                                    Text(appState.isAppRunning(app.id) ? "起動中" : "タップで起動")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(appState.isAppRunning(app.id) ? .green : .secondary)
+                                }
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .background(Color.primary.opacity(0.04)).cornerRadius(10)
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button { appState.launchApp(app.id) } label: { Label("起動", systemImage: "play.fill") }
+                            Button { appState.developApp(app.id) } label: { Label("開発する", systemImage: "hammer.fill") }
+                        }
+                    }
+                }
+                .padding(.horizontal, 2).padding(.bottom, 2)
+            }
+        }
+        .frame(maxWidth: contentMaxWidth)
+    }
+
     private var composerView: some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
