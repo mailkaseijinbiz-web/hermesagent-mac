@@ -196,7 +196,8 @@ struct HermesCronJob: Identifiable, Equatable {
     let script: String?
     let mode: String?
     let lastRun: String?
-    
+    let lastError: String?   // 直近の実行/配信エラー（`⚠ ...` 行）。正常時は nil
+
     var isActive: Bool {
         return status == "active"
     }
@@ -4733,7 +4734,8 @@ class AppState: ObservableObject {
         var currentScript: String? = nil
         var currentMode: String? = nil
         var currentLastRun: String? = nil
-        
+        var currentLastError: String? = nil
+
         func saveCurrentJob() {
             if !currentId.isEmpty {
                 jobs.append(HermesCronJob(
@@ -4746,7 +4748,8 @@ class AppState: ObservableObject {
                     status: currentStatus,
                     script: currentScript,
                     mode: currentMode,
-                    lastRun: currentLastRun
+                    lastRun: currentLastRun,
+                    lastError: currentLastError
                 ))
             }
         }
@@ -4772,6 +4775,7 @@ class AppState: ObservableObject {
                         currentScript = nil
                         currentMode = nil
                         currentLastRun = nil
+                        currentLastError = nil
                     }
                 }
             } else if !currentId.isEmpty && rawLine.hasPrefix("    ") {
@@ -4791,6 +4795,11 @@ class AppState: ObservableObject {
                     currentMode = trimmed.replacingOccurrences(of: "Mode:", with: "").trimmingCharacters(in: .whitespaces)
                 } else if trimmed.hasPrefix("Last run:") {
                     currentLastRun = trimmed.replacingOccurrences(of: "Last run:", with: "").trimmingCharacters(in: .whitespaces)
+                } else if trimmed.hasPrefix("⚠") || trimmed.lowercased().contains("delivery failed") {
+                    // 例: "⚠ Delivery failed: delivery error: LINE push 401: {...}"
+                    currentLastError = trimmed
+                        .replacingOccurrences(of: "⚠", with: "")
+                        .trimmingCharacters(in: .whitespaces)
                 }
             }
         }

@@ -1,12 +1,15 @@
 #!/bin/bash
 # Run the SPM unit tests locally.
 #
-# Why this wrapper: `swift test` fails out of the box on two counts —
+# Why this wrapper: `swift test` fails locally for two repo-specific reasons —
 #   1. The CommandLineTools toolchain has no XCTest module ("no such module 'XCTest'"),
 #      so a FULL Xcode toolchain must be selected via DEVELOPER_DIR.
-#   2. Stray extended attributes on the tree break the test-bundle codesign step.
-# CI (.github/workflows/ci.yml on macos-latest) already handles both; this script makes
-# the same thing work locally. Override the Xcode location with XCODE_APP=/path/to/Xcode.app.
+#   2. This repo lives under an iCloud-synced ~/Documents folder, whose file provider keeps
+#      stamping com.apple.FinderInfo / fileprovider xattrs onto build artifacts. Those break
+#      the ad-hoc codesign of the .xctest bundle ("resource fork ... not allowed"), and they
+#      reappear even after `xattr -cr`. So we build into a scratch dir OUTSIDE iCloud (/tmp).
+# CI (.github/workflows/ci.yml, macos-latest) needs neither — the runner has Xcode and the
+# checkout isn't in iCloud — so it just runs `swift test`. Override Xcode with XCODE_APP=...
 set -e
 cd "$(dirname "$0")"
 
@@ -21,6 +24,7 @@ if [ ! -d "$DEV/Platforms" ]; then
   exit 1
 fi
 
+SCRATCH="${TMPDIR:-/tmp}/hermescustom-spm-build"   # build OUTSIDE the iCloud-synced repo
 echo "Toolchain: $DEV"
-xattr -cr . 2>/dev/null || true   # extended attrs break the .xctest codesign
-DEVELOPER_DIR="$DEV" swift test "$@"
+echo "Scratch:   $SCRATCH"
+DEVELOPER_DIR="$DEV" swift test --scratch-path "$SCRATCH" "$@"

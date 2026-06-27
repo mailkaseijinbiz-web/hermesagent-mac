@@ -607,6 +607,17 @@ struct CronJobRow: View {
                             .font(.system(size: 10))
                             .foregroundColor(.secondary.opacity(0.6))
                     }
+
+                    if let err = job.lastError, !err.isEmpty {
+                        HStack(alignment: .top, spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9))
+                            Text(err)
+                                .font(.system(size: 10)).lineLimit(2)
+                                .textSelection(.enabled)
+                        }
+                        .foregroundColor(.orange)
+                        .help(err)
+                    }
                 }
             }
             
