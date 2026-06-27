@@ -294,30 +294,68 @@ final class GoogleOAuth: ObservableObject {
 
     // MARK: - Keychain
 
+    // データ保護キーチェーンを使う。従来(legacy)キーチェーンはアプリのcdhashにACLを固定するため、
+    // ビルドのたびに「パスワードを入力」プロンプトが出る。データ保護キーチェーンは entitlement
+    // (com.apple.application-identifier = 576D2UUHH5.com.custom.hermesmac) のアクセスグループで
+    // ガードされ、ACLプロンプトが出ない。
     private func keychainRead(_ key: String) -> String? {
-        let q: [CFString: Any] = [
-            kSecClass:            kSecClassGenericPassword,
-            kSecAttrAccount:      key,
-            kSecReturnData:       true,
-            kSecMatchLimit:       kSecMatchLimitOne,
+        var q: [CFString: Any] = [
+            kSecClass:                  kSecClassGenericPassword,
+            kSecAttrAccount:            key,
+            kSecReturnData:             true,
+            kSecMatchLimit:             kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain: true,
         ]
         var out: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
-              let d = out as? Data else { return nil }
-        return String(data: d, encoding: .utf8)
+        if SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+           let d = out as? Data, let s = String(data: d, encoding: .utf8) {
+            return s
+        }
+        // フォールバック: 旧来キーチェーンに残っていれば読み出し、データ保護側へ移行（再ログイン不要）。
+        q[kSecUseDataProtectionKeychain] = false
+        out = nil
+        if SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+           let d = out as? Data, let s = String(data: d, encoding: .utf8) {
+            keychainWrite(key, s)
+            return s
+        }
+        return nil
     }
 
     private func keychainWrite(_ key: String, _ value: String?) {
-        let q: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrAccount: key]
         if let v = value, let d = v.data(using: .utf8) {
-            let attrs: [CFString: Any] = [kSecValueData: d]
-            if SecItemUpdate(q as CFDictionary, attrs as CFDictionary) == errSecItemNotFound {
-                var add = q; add[kSecValueData] = d
-                SecItemAdd(add as CFDictionary, nil)
+            // まずデータ保護キーチェーンへ。entitlement不足等で失敗したら従来方式へフォールバック
+            // （最悪でも保存は成立＝再ログイン不要を担保。その場合だけプロンプトが残る）。
+            if !writeItem(key, d, dataProtection: true) {
+                _ = writeItem(key, d, dataProtection: false)
             }
         } else {
-            SecItemDelete(q as CFDictionary)
+            for dp in [true, false] {
+                let q: [CFString: Any] = [
+                    kSecClass: kSecClassGenericPassword, kSecAttrAccount: key,
+                    kSecUseDataProtectionKeychain: dp,
+                ]
+                SecItemDelete(q as CFDictionary)
+            }
         }
+    }
+
+    @discardableResult
+    private func writeItem(_ key: String, _ d: Data, dataProtection: Bool) -> Bool {
+        let q: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword, kSecAttrAccount: key,
+            kSecUseDataProtectionKeychain: dataProtection,
+        ]
+        let attrs: [CFString: Any] = [kSecValueData: d, kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlock]
+        let upd = SecItemUpdate(q as CFDictionary, attrs as CFDictionary)
+        if upd == errSecSuccess { return true }
+        if upd == errSecItemNotFound {
+            var add = q
+            add[kSecValueData] = d
+            add[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
+            return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+        }
+        return false
     }
 
     // MARK: - Errors
