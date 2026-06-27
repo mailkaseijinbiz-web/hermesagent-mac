@@ -7,6 +7,8 @@ struct TasksView: View {
     @Environment(\.colorScheme) var colorScheme
     @State private var newTitle = ""
     @State private var newAssignee: String? = nil
+    /// Which column is currently under a dragged card — drives the drop highlight.
+    @State private var dropTarget: TaskStatus? = nil
 
     var body: some View {
         ScrollView {
@@ -85,6 +87,7 @@ struct TasksView: View {
 
     private func column(_ status: TaskStatus) -> some View {
         let items = appState.tasks(status: status)
+        let active = dropTarget == status
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: status.icon).font(.system(size: 12)).foregroundColor(.secondary)
@@ -95,16 +98,45 @@ struct TasksView: View {
             .padding(.horizontal, 4)
 
             if items.isEmpty {
-                Text("なし").font(.system(size: 11)).foregroundColor(.secondary.opacity(0.6))
+                Text(active ? "ここにドロップ" : "なし")
+                    .font(.system(size: 11)).foregroundColor(active ? .accentColor : .secondary.opacity(0.6))
                     .frame(maxWidth: .infinity).padding(.vertical, 18)
             } else {
-                ForEach(items) { task in TaskCard(task: task, assignee: employee(task.assigneeId)) }
+                ForEach(items) { task in
+                    TaskCard(task: task, assignee: employee(task.assigneeId))
+                        .draggable(task.id) { dragPreview(task) }
+                        .dropDestination(for: String.self) { ids, _ in
+                            dropTarget = nil
+                            guard let id = ids.first else { return false }
+                            appState.moveTask(id, to: status, before: task.id)
+                            return true
+                        } isTargeted: { over in if over { dropTarget = status } }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
         .padding(10)
-        .background(Color.primary.opacity(0.03)).cornerRadius(12)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.05), lineWidth: 0.5))
+        .background(active ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.03))
+        .cornerRadius(12)
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .stroke(active ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.05),
+                    lineWidth: active ? 1.5 : 0.5))
+        .animation(.easeOut(duration: 0.12), value: active)
+        .dropDestination(for: String.self) { ids, _ in
+            dropTarget = nil
+            guard let id = ids.first else { return false }
+            appState.moveTask(id, to: status, before: nil)
+            return true
+        } isTargeted: { over in if over { dropTarget = status } }
+    }
+
+    /// Lightweight drag preview shown under the cursor while moving a card.
+    @ViewBuilder private func dragPreview(_ task: WorkTask) -> some View {
+        Text(task.title)
+            .font(.system(size: 13, weight: .medium)).lineLimit(2)
+            .padding(10).frame(maxWidth: 240, alignment: .leading)
+            .background(Color(nsColor: .windowBackgroundColor)).cornerRadius(8)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor.opacity(0.5), lineWidth: 1))
     }
 }
 

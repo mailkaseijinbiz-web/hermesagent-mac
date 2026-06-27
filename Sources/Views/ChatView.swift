@@ -21,30 +21,6 @@ struct ChatView: View {
         return model
     }
 
-    // First-run / empty-state quick starts.
-    private var quickStartChips: some View {
-        HStack(spacing: 10) {
-            chip("person.badge.plus", "AI社員を採用") { appState.view = "company" }
-            chip("cpu", "モデルを設定") { appState.showSettings = true }
-            chip("chevron.left.forwardslash.chevron.right", "GitHub") { appState.showSettings = true }
-            chip("command", "クイック移動 ⌘K") { appState.showCommandPalette = true }
-        }
-    }
-
-    private func chip(_ icon: String, _ label: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 12))
-                Text(label).font(.system(size: 12, weight: .medium))
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .foregroundColor(.primary.opacity(0.8))
-            .background(Color.primary.opacity(0.05)).cornerRadius(8)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
-        }
-        .buttonStyle(.plain)
-    }
-
     var body: some View {
         if appState.messages.isEmpty && !appState.isStreaming {
             // Initial screen: vertically centered
@@ -54,9 +30,6 @@ struct ChatView: View {
                 Text("何を作りましょうか？")
                     .font(.system(size: 32, weight: .light))
                     .foregroundColor(.primary.opacity(0.9))
-                    .padding(.bottom, 20)
-
-                quickStartChips
                     .padding(.bottom, 24)
 
                 composerView
