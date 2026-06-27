@@ -222,6 +222,11 @@ struct MainView: View {
                             }
                         }
                     }
+                } else if !appState.backendHealthy {
+                    Circle().fill(Color.orange).frame(width: 6, height: 6)
+                    Text("接続不安定")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.orange)
                 } else {
                     Circle().fill(Color.green).frame(width: 6, height: 6)
                     Text("待機中")
@@ -234,7 +239,9 @@ struct MainView: View {
             .background(Color.primary.opacity(0.05))
             .clipShape(Capsule())
             .animation(.easeInOut(duration: 0.2), value: appState.isStreaming)
-            .help(appState.isStreaming ? "エージェントが稼働中です（経過時間と受信状況を表示）" : "待機中（入力できます）")
+            .help(appState.isStreaming ? "エージェントが稼働中です（経過時間と受信状況を表示）"
+                  : (appState.backendHealthy ? "待機中（入力できます）"
+                     : "バックエンドの応答が不安定です。hermes(ゲートウェイ)を確認してください。"))
 
             Spacer(minLength: 12)
 
