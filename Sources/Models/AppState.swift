@@ -450,6 +450,29 @@ class AppState: ObservableObject {
     @Published var workTasks: [WorkTask] = AppState.loadTasks() {
         didSet { AppState.saveJSON(workTasks, "workTasks"); scheduleICloudPush() }
     }
+
+    // Health data pushed from the iOS app (HealthKit). Device-local (not iCloud-synced).
+    @Published var latestHealth: HealthSnapshot? = AppState.loadJSON("latestHealth") {
+        didSet { AppState.saveJSON(latestHealth, "latestHealth") }
+    }
+    func updateHealth(_ snap: HealthSnapshot) { latestHealth = snap }
+
+    /// 健康データの日本語1行サマリー（健康アドバイザーのチャットへ注入／表示用）。データ無しは nil。
+    var healthSummaryLine: String? {
+        guard let h = latestHealth else { return nil }
+        var parts: [String] = []
+        if let v = h.steps { parts.append("歩数 \(v)歩") }
+        if let v = h.distanceKm { parts.append(String(format: "距離 %.1fkm", v)) }
+        if let v = h.activeEnergyKcal { parts.append("消費エネルギー \(Int(v))kcal") }
+        if let v = h.exerciseMinutes { parts.append("運動 \(v)分") }
+        if let v = h.heartRate { parts.append("心拍 \(v)bpm") }
+        if let v = h.restingHeartRate { parts.append("安静時心拍 \(v)bpm") }
+        if let v = h.sleepHours { parts.append(String(format: "睡眠 %.1f時間", v)) }
+        if let v = h.bodyMassKg { parts.append(String(format: "体重 %.1fkg", v)) }
+        guard !parts.isEmpty else { return nil }
+        let day = (h.date?.isEmpty == false) ? "（\(h.date!)）" : ""
+        return "ユーザーの健康データ\(day): " + parts.joined(separator: " / ")
+    }
     // Per-employee deliverables (Phase E), persisted + synced like tasks.
     @Published var artifacts: [Artifact] = AppState.loadArtifacts() {
         didSet { AppState.saveJSON(artifacts, "artifacts"); scheduleICloudPush() }
@@ -1837,9 +1860,19 @@ class AppState: ObservableObject {
             let list = paths.map { "- \($0)" }.joined(separator: "\n")
             return "\n\n【添付ファイル】以下のローカルファイルを読んで対応してください:\n\(list)"
         }()
+        // 健康アドバイザー社員とのチャットには、最新の健康データ(HealthKit由来)を文脈として
+        // 前置する（表示メッセージには出さない）。「今日の歩数は？」等に答えられるように。
+        let healthContext: String = {
+            guard let emp = activeEmployee,
+                  emp.name.contains("健康") || emp.name.lowercased().contains("health"),
+                  let line = healthSummaryLine else { return "" }
+            return "【参考データ（連携中のHealthKit）】\(line)\n\n"
+        }()
+
         var effectivePrompt = text
         if effectivePrompt.isEmpty { effectivePrompt = imagePath != nil ? "添付した画像について説明してください。" : "添付したファイルを確認してください。" }
         effectivePrompt += fileRefs
+        if !healthContext.isEmpty { effectivePrompt = healthContext + effectivePrompt }
         let sentPrompt = wrapForSend(effectivePrompt)
         let kind = BackendRouter.selectKind(provider: provider, useACP: useACPTransport)
 
@@ -1852,6 +1885,7 @@ class AppState: ObservableObject {
             var userText = text.isEmpty ? "添付したファイルを確認してください。" : text
             userText += fileRefs
             if imagePath != nil { userText += "\n\n（注: 添付画像は Antigravity CLI では無視されます）" }
+            if !healthContext.isEmpty { userText = healthContext + userText }
             agyPrompt = antigravityPrompt(userText, employee: activeEmployee, mode: agentMode)
         }
 

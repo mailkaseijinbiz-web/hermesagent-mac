@@ -263,6 +263,10 @@ class MobileServer {
             handleTaskUpdate(connection: connection, id: String(pathOnly.dropFirst("/api/tasks/".count)), body: body, corsHeaders: corsHeaders)
         case ("DELETE", _) where pathOnly.hasPrefix("/api/tasks/"):
             handleTaskDelete(connection: connection, id: String(pathOnly.dropFirst("/api/tasks/".count)), corsHeaders: corsHeaders)
+        case ("POST", "/api/health"):
+            handleHealthUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/health"):
+            handleHealthGet(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/artifacts"):
             handleArtifactsList(connection: connection, employeeId: query["employeeId"], corsHeaders: corsHeaders)
         case ("POST", "/api/artifacts"):
@@ -1012,6 +1016,48 @@ class MobileServer {
             let t = s.createTask(title: title, assigneeId: assigneeId)
             let empById = Dictionary(s.employees.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             self.sendJSON(connection: connection, ["task": self.taskDict(t, empById)], corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/health — iOS(HealthKit)から健康スナップショットを受け取り保存。
+    private nonisolated func handleHealthUpdate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Bad body\"}", corsHeaders: corsHeaders); return
+        }
+        func i(_ k: String) -> Int? { (json[k] as? Int) ?? (json[k] as? Double).map { Int($0) } }
+        func d(_ k: String) -> Double? { (json[k] as? Double) ?? (json[k] as? Int).map(Double.init) }
+        Task { @MainActor in
+            var snap = HealthSnapshot()
+            snap.steps = i("steps")
+            snap.distanceKm = d("distanceKm")
+            snap.activeEnergyKcal = d("activeEnergyKcal")
+            snap.exerciseMinutes = i("exerciseMinutes")
+            snap.heartRate = i("heartRate")
+            snap.restingHeartRate = i("restingHeartRate")
+            snap.sleepHours = d("sleepHours")
+            snap.bodyMassKg = d("bodyMassKg")
+            snap.date = json["date"] as? String
+            snap.source = json["source"] as? String
+            AppState.shared.updateHealth(snap)
+            self.sendJSON(connection: connection,
+                          ["ok": true, "summary": AppState.shared.healthSummaryLine ?? ""],
+                          corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/health — 保存済みの最新健康スナップショットを返す。
+    private nonisolated func handleHealthGet(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            var dict: [String: Any] = ["summary": AppState.shared.healthSummaryLine ?? ""]
+            if let h = AppState.shared.latestHealth {
+                func put(_ k: String, _ v: Any?) { if let v = v { dict[k] = v } }
+                put("steps", h.steps); put("distanceKm", h.distanceKm); put("activeEnergyKcal", h.activeEnergyKcal)
+                put("exerciseMinutes", h.exerciseMinutes); put("heartRate", h.heartRate)
+                put("restingHeartRate", h.restingHeartRate); put("sleepHours", h.sleepHours)
+                put("bodyMassKg", h.bodyMassKg); put("date", h.date); put("source", h.source)
+                dict["updatedAt"] = h.updatedAt
+            }
+            self.sendJSON(connection: connection, dict, corsHeaders: corsHeaders)
         }
     }
 

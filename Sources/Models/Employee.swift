@@ -162,6 +162,22 @@ struct WorkTask: Identifiable, Codable, Equatable {
     var updatedAt: Double = Date().timeIntervalSince1970
 }
 
+/// A health snapshot pushed from the iOS app (HealthKit). All metrics optional — the device
+/// sends whatever it could read. Surfaced to the 健康アドバイザー employee and the dashboard.
+struct HealthSnapshot: Codable, Equatable {
+    var steps: Int? = nil
+    var distanceKm: Double? = nil
+    var activeEnergyKcal: Double? = nil
+    var exerciseMinutes: Int? = nil
+    var heartRate: Int? = nil           // 直近の心拍
+    var restingHeartRate: Int? = nil
+    var sleepHours: Double? = nil        // 直近の睡眠
+    var bodyMassKg: Double? = nil
+    var date: String? = nil             // データの対象日 "2026-06-28"
+    var source: String? = nil           // 送信元デバイス名
+    var updatedAt: Double = Date().timeIntervalSince1970
+}
+
 // MARK: - Artifacts (Phase E — per-employee deliverables)
 
 /// What an artifact points at. `Artifact.body` is interpreted per kind:
