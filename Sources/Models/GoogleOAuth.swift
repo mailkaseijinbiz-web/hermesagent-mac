@@ -292,52 +292,81 @@ final class GoogleOAuth: ObservableObject {
             .replacingOccurrences(of: "=", with: "")
     }
 
-    // MARK: - Keychain
+    // MARK: - Token storage
+    //
+    // 認証トークンは ~/.hermes/.oauth/<key> (0600) に保存する。従来のキーチェーンはアプリの
+    // cdhash に ACL を固定するため、未署名の開発ビルドのたびに（設定を開いた瞬間など）
+    // 「パスワードを入力」プロンプトが出ていた。データ保護キーチェーンも entitlement 依存で
+    // 未署名ビルドでは効かず、毎回旧キーチェーンへフォールバックしてプロンプトが出ていた。
+    // ファイル保存はコード署名に依存しないのでプロンプトが一切出ない（API キーや LINE トークンと
+    // 同じ ~/.hermes 配下、0600）。既存ログインを失わないよう、初回だけ旧キーチェーンから1回だけ
+    // 読み出して移行する（その1回のみプロンプトの可能性、以後は二度と出ない）。
 
-    // データ保護キーチェーンを使う。従来(legacy)キーチェーンはアプリのcdhashにACLを固定するため、
-    // ビルドのたびに「パスワードを入力」プロンプトが出る。データ保護キーチェーンは entitlement
-    // (com.apple.application-identifier = 576D2UUHH5.com.custom.hermesmac) のアクセスグループで
-    // ガードされ、ACLプロンプトが出ない。
+    private var oauthDir: URL {
+        let dir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".hermes/.oauth")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        return dir
+    }
+    private func tokenFileURL(_ key: String) -> URL { oauthDir.appendingPathComponent(key) }
+
     private func keychainRead(_ key: String) -> String? {
-        var q: [CFString: Any] = [
-            kSecClass:                  kSecClassGenericPassword,
-            kSecAttrAccount:            key,
-            kSecReturnData:             true,
-            kSecMatchLimit:             kSecMatchLimitOne,
-            kSecUseDataProtectionKeychain: true,
-        ]
-        var out: CFTypeRef?
-        if SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
-           let d = out as? Data, let s = String(data: d, encoding: .utf8) {
+        // 1) ファイル（プライマリ・プロンプトなし）。
+        if let s = try? String(contentsOf: tokenFileURL(key), encoding: .utf8) {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { return t }
+        }
+        // 2) データ保護キーチェーン（署名ビルド用。未署名では静かに失敗＝プロンプトなし）。
+        if let s = readKeychainItem(key, dataProtection: true) {
+            writeTokenFile(key, s)
             return s
         }
-        // フォールバック: 旧来キーチェーンに残っていれば読み出し、データ保護側へ移行（再ログイン不要）。
-        q[kSecUseDataProtectionKeychain] = false
-        out = nil
-        if SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
-           let d = out as? Data, let s = String(data: d, encoding: .utf8) {
-            keychainWrite(key, s)
-            return s
+        // 3) 旧キーチェーンからの1回限り移行（この1回だけプロンプトの可能性）。フラグで以後抑止し、
+        //    成功したら旧アイテムを削除してプロンプト源を断つ。
+        let migFlag = "oauthMigrated_\(key)"
+        if !UserDefaults.standard.bool(forKey: migFlag) {
+            UserDefaults.standard.set(true, forKey: migFlag)
+            if let s = readKeychainItem(key, dataProtection: false) {
+                writeTokenFile(key, s)
+                SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrAccount: key,
+                               kSecUseDataProtectionKeychain: false] as CFDictionary)
+                return s
+            }
         }
         return nil
     }
 
     private func keychainWrite(_ key: String, _ value: String?) {
-        if let v = value, let d = v.data(using: .utf8) {
-            // まずデータ保護キーチェーンへ。entitlement不足等で失敗したら従来方式へフォールバック
-            // （最悪でも保存は成立＝再ログイン不要を担保。その場合だけプロンプトが残る）。
-            if !writeItem(key, d, dataProtection: true) {
-                _ = writeItem(key, d, dataProtection: false)
-            }
-        } else {
+        guard let v = value, !v.isEmpty else {
+            try? FileManager.default.removeItem(at: tokenFileURL(key))
             for dp in [true, false] {
-                let q: [CFString: Any] = [
-                    kSecClass: kSecClassGenericPassword, kSecAttrAccount: key,
-                    kSecUseDataProtectionKeychain: dp,
-                ]
-                SecItemDelete(q as CFDictionary)
+                SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrAccount: key,
+                               kSecUseDataProtectionKeychain: dp] as CFDictionary)
             }
+            return
         }
+        writeTokenFile(key, v)                              // プライマリ。
+        _ = writeItem(key, Data(v.utf8), dataProtection: true)   // 署名ビルド用ベストエフォート。
+    }
+
+    private func writeTokenFile(_ key: String, _ value: String) {
+        let url = tokenFileURL(key)
+        do {
+            try value.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch { /* 保存失敗は静かに（次回再試行） */ }
+    }
+
+    private func readKeychainItem(_ key: String, dataProtection: Bool) -> String? {
+        let q: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword, kSecAttrAccount: key,
+            kSecReturnData: true, kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain: dataProtection,
+        ]
+        var out: CFTypeRef?
+        if SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+           let d = out as? Data, let s = String(data: d, encoding: .utf8) { return s }
+        return nil
     }
 
     @discardableResult

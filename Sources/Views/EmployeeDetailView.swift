@@ -15,29 +15,30 @@ private let empDetailDateFmt: DateFormatter = {
 }()
 
 enum EmployeeDetailTab: String, CaseIterable, Identifiable {
-    case overview, tasks, artifacts, files
+    // 概要は「タブ」ではなくパネル上部に常時表示する（下の各ビュー参照）。タブは以下4つ。
+    case tasks, artifacts, files, history
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .overview: return "概要"
         case .tasks: return "タスク"
         case .artifacts: return "アーティファクト"
         case .files: return "ファイル"
+        case .history: return "チャット履歴"
         }
     }
     var icon: String {
         switch self {
-        case .overview: return "person.text.rectangle"
         case .tasks: return "checklist"
         case .artifacts: return "shippingbox"
         case .files: return "folder"
+        case .history: return "clock.arrow.circlepath"
         }
     }
 }
 
 struct EmployeeDetailView: View {
     @EnvironmentObject var appState: AppState
-    @State private var tab: EmployeeDetailTab = .overview
+    @State private var tab: EmployeeDetailTab = .tasks
 
     var body: some View {
         // Read fresh each render so edits (workspace, artifacts, tasks) reflect live.
@@ -49,12 +50,17 @@ struct EmployeeDetailView: View {
                 tabBar
                 Divider().opacity(0.5)
                 ScrollView {
-                    Group {
-                        switch tab {
-                        case .overview:  EmpOverviewTab(employee: emp, tab: $tab)
-                        case .tasks:     EmpTasksTab(employee: emp)
-                        case .artifacts: EmpArtifactsTab(employee: emp)
-                        case .files:     EmpFilesTab(employee: emp)
+                    VStack(alignment: .leading, spacing: 18) {
+                        // 概要（統計・作業フォルダ・クイック操作）は常にトップに表示。
+                        EmpOverviewTab(employee: emp, tab: $tab)
+                        Divider().opacity(0.4)
+                        Group {
+                            switch tab {
+                            case .tasks:     EmpTasksTab(employee: emp)
+                            case .artifacts: EmpArtifactsTab(employee: emp)
+                            case .files:     EmpFilesTab(employee: emp)
+                            case .history:   EmpHistoryTab(employee: emp)
+                            }
                         }
                     }
                     .padding(.horizontal, 32).padding(.vertical, 22)
@@ -202,6 +208,10 @@ private struct EmpOverviewTab: View {
                     action("タスクを見る", "checklist") { tab = .tasks }
                     action("成果物を見る", "shippingbox") { tab = .artifacts }
                     action("ファイルを見る", "folder") { tab = .files }
+                    action("アプリを追加", "hammer") {
+                        appState.switchEmployee(employee.id)
+                        appState.view = "apps"
+                    }
                     action("定期実行に登録", "clock.badge.plus") { appState.registerAutomationForEmployee(employee.id) }
                 }
             }
@@ -773,6 +783,60 @@ private struct EmpFilesTab: View {
 // sidebar and scoped to the ACTIVE employee — so you can keep chatting on the left while
 // checking their work on the right. Reuses the detail tabs above.
 
+// MARK: - Chat history tab
+
+/// この社員のチャット履歴（セッション一覧）。行タップでその社員に切替えてチャットを開く。
+private struct EmpHistoryTab: View {
+    @EnvironmentObject var appState: AppState
+    let employee: Employee
+
+    var body: some View {
+        let sessions = appState.employeeSessions(employee.id)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("チャット履歴").font(.system(size: 12, weight: .semibold)).foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    appState.switchEmployee(employee.id)
+                    appState.handleNewChat()
+                    appState.view = "chat"
+                } label: {
+                    HStack(spacing: 5) { Image(systemName: "square.and.pencil"); Text("新しいチャット") }
+                        .font(.system(size: 11, weight: .medium)).foregroundColor(.accentColor)
+                }.buttonStyle(.plain)
+            }
+            if sessions.isEmpty {
+                Text("チャット履歴はありません。")
+                    .font(.system(size: 12)).foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center).padding(.vertical, 24)
+            } else {
+                VStack(spacing: 4) {
+                    ForEach(sessions) { s in
+                        let isActive = appState.currentSessionId == s.id
+                        Button {
+                            appState.switchEmployee(employee.id)
+                            appState.handleSelectSession(s)
+                            appState.view = "chat"
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "bubble.left").font(.system(size: 11))
+                                    .foregroundColor(isActive ? .accentColor : .secondary)
+                                Text(s.title).font(.system(size: 13, weight: isActive ? .medium : .regular))
+                                    .foregroundColor(.primary).lineLimit(1)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 8)
+                            .background(isActive ? Color.primary.opacity(0.07) : Color.primary.opacity(0.03))
+                            .cornerRadius(8)
+                            .contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct EmployeeSidePanel: View {
     @EnvironmentObject var appState: AppState
     @State private var tab: EmployeeDetailTab = .tasks
@@ -787,12 +851,17 @@ struct EmployeeSidePanel: View {
                 tabBar
                 Divider().opacity(0.4)
                 ScrollView {
-                    Group {
-                        switch tab {
-                        case .overview:  EmpOverviewTab(employee: emp, tab: $tab)
-                        case .tasks:     EmpTasksTab(employee: emp)
-                        case .artifacts: EmpArtifactsTab(employee: emp)
-                        case .files:     EmpFilesTab(employee: emp)
+                    VStack(alignment: .leading, spacing: 14) {
+                        // 概要は常にトップに表示。
+                        EmpOverviewTab(employee: emp, tab: $tab)
+                        Divider().opacity(0.4)
+                        Group {
+                            switch tab {
+                            case .tasks:     EmpTasksTab(employee: emp)
+                            case .artifacts: EmpArtifactsTab(employee: emp)
+                            case .files:     EmpFilesTab(employee: emp)
+                            case .history:   EmpHistoryTab(employee: emp)
+                            }
                         }
                     }
                     .padding(.horizontal, 14).padding(.vertical, 14)
@@ -851,10 +920,10 @@ struct EmployeeSidePanel: View {
 
     private func shortLabel(_ t: EmployeeDetailTab) -> String {
         switch t {
-        case .overview: return "概要"
         case .tasks: return "タスク"
         case .artifacts: return "成果物"
         case .files: return "ファイル"
+        case .history: return "チャット履歴"
         }
     }
 

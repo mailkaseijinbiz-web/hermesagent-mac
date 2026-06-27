@@ -22,11 +22,9 @@ struct SettingsModal: View {
         case model = "モデル"
         case apps = "アプリ"
         case google = "Google"
-        case github = "GitHub"
         case mobile = "モバイル"
         case cloud = "クラウド同期"
         case channels = "チャンネル"
-        case plugins = "プラグイン"
         case management = "管理"
         case experimental = "実験的機能"
         var id: String { rawValue }
@@ -36,11 +34,9 @@ struct SettingsModal: View {
             case .model: return "cpu"
             case .apps: return "hammer"
             case .google: return "g.circle"
-            case .github: return "chevron.left.forwardslash.chevron.right"
             case .mobile: return "iphone"
             case .cloud: return "cloud"
             case .channels: return "bubble.left.and.bubble.right"
-            case .plugins: return "puzzlepiece.extension"
             case .management: return "brain.head.profile"
             case .experimental: return "flask"
             }
@@ -51,11 +47,9 @@ struct SettingsModal: View {
             case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter antigravity agy gemini cli"
             case .apps: return "アプリ apps プロジェクト project 開発 develop 起動 launch 新規アプリ"
             case .google: return "google gmail calendar カレンダー メール oauth 認証 連携"
-            case .github: return "github リポジトリ repo ワークスペース clone git 作業フォルダ"
             case .mobile: return "モバイル mobile スマホ iphone ipad qr ペアリング 連携 同期 sync push 通知 認証"
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
             case .channels: return "チャンネル channel telegram discord slack line whatsapp signal teams メール email"
-            case .plugins: return "プラグイン plugin インストール install 拡張"
             case .management: return "管理 メモリ memory スキル skill mcp soul"
             case .experimental: return "実験 experimental acp 転送 承認 自動許可 ツール"
             }
@@ -172,11 +166,9 @@ struct SettingsModal: View {
                         case .model: modelSection
                         case .apps: AppsView(embedded: true)
                         case .google: googleSection
-                        case .github: githubSection
                         case .mobile: mobileSection
                         case .cloud: cloudSection
                         case .channels: channelsSection
-                        case .plugins: pluginsSection
                         case .management: managementSection
                         case .experimental: experimentalSection
                         }
@@ -410,14 +402,6 @@ struct SettingsModal: View {
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             updateCard
-
-            card(title: "エージェント性格") {
-                fieldLabel("Personality Persona")
-                Picker("", selection: $appState.personality) {
-                    ForEach(personalities, id: \.0) { Text($0.1).tag($0.0) }
-                }
-                .pickerStyle(.menu)
-            }
         }
     }
 

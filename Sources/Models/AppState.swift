@@ -221,6 +221,9 @@ class AppState: ObservableObject {
     @Published var sessions: [Session] = []
     @Published var currentSessionId: String? = nil
     @Published var messages: [Message] = []
+    /// Per-message feedback rating (message id → 1 good / -1 needs-fix). Drives the 👍/👎 UI;
+    /// also appended to ~/.hermes/feedback.jsonl for later review.
+    @Published var messageFeedback: [UUID: Int] = [:]
     @Published var inputValue: String = ""
     // Files attached to the next message (drag-drop / picker / paste). Shown as composer
     // thumbnails the user can remove. Images also feed --image (vision); all files' local
@@ -315,7 +318,12 @@ class AppState: ObservableObject {
         var body = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
         if !body.isEmpty, !body.hasSuffix("\n") { body += "\n" }
         body += "HERMES_LOCAL_API_KEY=\(key)\n"
-        try? body.write(toFile: path, atomically: true, encoding: .utf8)
+        do {
+            try body.write(toFile: path, atomically: true, encoding: .utf8)
+        } catch {
+            // static context → no toast; the file log captures it for later diagnosis.
+            Log.failure("app", "ローカルAPIキーの保存に失敗 (\(path))", error)
+        }
         return key
     }
 
@@ -447,6 +455,20 @@ class AppState: ObservableObject {
     @Published var teams: [Team] = AppState.loadTeams() {
         didSet { AppState.saveJSON(teams, "teams"); scheduleICloudPush() }
     }
+
+    /// User-set company name (会社名). Empty → fall back to the default label via companyDisplayName.
+    @Published var companyName: String = UserDefaults.standard.string(forKey: "companyName") ?? "" {
+        didSet { UserDefaults.standard.set(companyName, forKey: "companyName") }
+    }
+    /// The name to show for the company everywhere (default when unset).
+    var companyDisplayName: String {
+        let n = companyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return n.isEmpty ? "会社（AI社員）" : n
+    }
+    /// Set the company name (空文字 → 既定に戻す)。
+    func setCompanyName(_ name: String) {
+        companyName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     @Published var workTasks: [WorkTask] = AppState.loadTasks() {
         didSet { AppState.saveJSON(workTasks, "workTasks"); scheduleICloudPush() }
     }
@@ -528,6 +550,21 @@ class AppState: ObservableObject {
     private var empProcesses:    [String: Process]  = [:]
     private var empACPClients:   [String: ACPClient] = [:]
     private var empMessages:     [String: [Message]] = [:]
+    /// owningKey → assistantId of the turn currently streaming for that key. Lets a late
+    /// `onEvent` callback — delivered after the turn finalized, or after a NEWER turn started
+    /// for the same employee — no-op instead of overwriting finalized content or re-creating
+    /// `empStreamTexts` (the parallel-streaming race). Bounded: one entry per key.
+    private var streamingAssistantIds: [String: UUID] = [:]
+
+    /// Cap on each employee's shadow message array. Shadows snapshot the FULL `messages` per
+    /// employee you switch away from / who is streaming — with many employees and image messages
+    /// this multiplies memory and, over multi-day runs, can OOM/freeze the app. Keep only the
+    /// most recent N (the streaming bubble is the last element, so it always survives). The full
+    /// history still lives in StateDB and reloads when you reopen that conversation.
+    private let maxShadowMessages = 600
+    private func cappedShadow(_ msgs: [Message]) -> [Message] {
+        msgs.count > maxShadowMessages ? Array(msgs.suffix(maxShadowMessages)) : msgs
+    }
 
     /// Convenience — stable key for an employee id (nil → "全体").
     private func empKey(_ id: String?) -> String { id ?? "" }
@@ -649,6 +686,13 @@ class AppState: ObservableObject {
             return sessions.filter { sessionOwner[$0.id] == empId || $0.id == curSid }
         }
         return sessions.filter { sessionOwner[$0.id] == nil }
+    }
+
+    /// A specific employee's sessions (for the employee panel's チャット履歴 tab — works even
+    /// when that employee isn't the active one, unlike `visibleSessions`).
+    func employeeSessions(_ employeeId: String) -> [Session] {
+        let curSid = employees.first { $0.id == employeeId }?.sessionId
+        return sessions.filter { sessionOwner[$0.id] == employeeId || $0.id == curSid }
     }
 
     // MARK: - Cost / usage (Phase 3)
@@ -1730,6 +1774,50 @@ class AppState: ObservableObject {
         handleSendMessage()
     }
 
+    // MARK: - 回答へのフィードバック（誤対応を指摘しやすく）
+
+    /// 回答に👍/👎を付ける。👎のときは note（何が違ったか）を受け取り、ログに残す。
+    /// 記録は ~/.hermes/feedback.jsonl に追記（後で改善の材料にできる）。
+    func giveMessageFeedback(_ id: UUID, positive: Bool, note: String = "") {
+        messageFeedback[id] = positive ? 1 : -1
+        logFeedback(messageId: id, positive: positive, note: note)
+        if positive { triggerToast(message: "フィードバックを記録しました 👍") }
+    }
+
+    private func logFeedback(messageId: UUID, positive: Bool, note: String) {
+        let entry: [String: Any] = [
+            "ts": Date().timeIntervalSince1970,
+            "employee": activeEmployee?.name ?? "全体",
+            "sessionId": currentSessionId ?? "",
+            "messageId": messageId.uuidString,
+            "rating": positive ? "up" : "down",
+            "note": note,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: entry),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line += "\n"
+        let dir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".hermes")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("feedback.jsonl")
+        if let fh = try? FileHandle(forWritingTo: url) {
+            defer { try? fh.close() }
+            fh.seekToEndOfFile()
+            if let d = line.data(using: .utf8) { fh.write(d) }
+        } else {
+            try? line.data(using: .utf8)?.write(to: url)
+        }
+    }
+
+    /// 👎のあと、直前の回答の訂正をエージェントに依頼する（フィードバックを実際の修正につなげる）。
+    func sendCorrectionForLastReply(note: String) {
+        guard !isStreaming else { triggerToast(message: "応答中です。完了までお待ちください。"); return }
+        let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        inputValue = n.isEmpty
+            ? "先ほどの回答が正しくありませんでした。誤りを見直して、正しく回答し直してください。"
+            : "先ほどの回答について修正をお願いします。誤っていた点: \(n)"
+        handleSendMessage()
+    }
+
     func handleSendMessage() {
         let text = inputValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let files = attachedFiles
@@ -1745,14 +1833,29 @@ class AppState: ObservableObject {
         // WorkTask assigned to the active employee. The chat agent runs in a separate
         // process and can't touch the app's task store, so without this it just hallucinates
         // a "added it" reply (the bug). Handled locally → real task + deterministic confirm.
-        if !bypassCommandIntercept, files.isEmpty, let title = parseTaskAddCommand(text) {
-            let task = createTask(title: title, assigneeId: activeEmployeeId)
+        if !bypassCommandIntercept, files.isEmpty, let cmd = parseTaskAddCommand(text) {
             messages.append(Message(role: .user, content: text))
             let who = activeEmployee.map { "（\($0.name)）" } ?? ""
-            messages.append(Message(role: .system, content: "✅ タスクを追加しました\(who)：「\(task.title)」（未着手）"))
+            switch cmd {
+            case .single(let title):
+                let task = createTask(title: title, assigneeId: activeEmployeeId)
+                messages.append(Message(role: .system, content: "✅ タスクを追加しました\(who)：「\(task.title)」（未着手）"))
+                triggerToast(message: "タスクを追加：\(task.title)")
+            case .fromContext:
+                // 「これら」= 直前メッセージの箇条書きを1項目ずつタスク化。
+                let items = extractContextualTaskItems()
+                if items.isEmpty {
+                    messages.append(Message(role: .system, content: "直前のメッセージから箇条書きの項目を見つけられませんでした。追加したい内容を箇条書きで送ってください。"))
+                } else {
+                    // createTask は先頭に挿入するので、リスト順を保つため逆順で追加。
+                    for it in items.reversed() { _ = createTask(title: it, assigneeId: activeEmployeeId) }
+                    let list = items.map { "・\($0)" }.joined(separator: "\n")
+                    messages.append(Message(role: .system, content: "✅ \(items.count)件のタスクを追加しました\(who)（すべて未着手）：\n\(list)"))
+                    triggerToast(message: "タスクを\(items.count)件追加しました")
+                }
+            }
             inputValue = ""
             attachedFiles = []
-            triggerToast(message: "タスクを追加：\(task.title)")
             return
         }
 
@@ -1849,7 +1952,9 @@ class AppState: ObservableObject {
         let assistantId = UUID()
         self.messages.append(Message(id: assistantId, role: .assistant, content: "", typewriter: true))
         // Snapshot current messages into the shadow (background streaming keeps chunks here).
-        empMessages[curKey] = messages
+        empMessages[curKey] = cappedShadow(messages)
+        // Mark this assistantId as the live turn for curKey (guards against late/superseded events).
+        streamingAssistantIds[curKey] = assistantId
 
         // Reference attached files by their local path so the agent (which has file tools) can
         // open them. Images beyond the first — and all non-image files — go here; the first
@@ -1922,6 +2027,10 @@ class AppState: ObservableObject {
                 onEvent: { [weak self] event in
                     guard let self = self else { return }
                     DispatchQueue.main.async {
+                        // Drop events that arrive after this turn finalized, or after a newer turn
+                        // started for the same employee — otherwise a late chunk overwrites the
+                        // finalized bubble or re-creates a leaked empStreamTexts entry.
+                        guard self.streamingAssistantIds[owningKey] == assistantId else { return }
                         let isActive = (self.activeEmployeeId == owningEmployeeId)
                         // Heartbeat: a real event just arrived → the turn is progressing, not stuck.
                         if isActive {
@@ -2039,8 +2148,13 @@ class AppState: ObservableObject {
                 }
             }
             self.bindSession(turnSession, toEmployee: owningEmployeeId)
-            // Turn complete — the store is authoritative; clear the in-flight shadow.
+            // Turn complete — the store is authoritative; clear the in-flight shadow. Clearing the
+            // live-turn marker makes any still-queued onEvent callbacks no-op. Only clear if it's
+            // still OURS (a newer turn for this key may have already claimed the slot).
             self.empMessages.removeValue(forKey: owningKey)
+            if self.streamingAssistantIds[owningKey] == assistantId {
+                self.streamingAssistantIds.removeValue(forKey: owningKey)
+            }
 
             // If the agent produced a PDF (e.g. an invoice), surface it — open the file so it
             // "comes back" to the user. Only opens a real on-disk .pdf the reply names.
@@ -2072,6 +2186,7 @@ class AppState: ObservableObject {
         streamText = ""
         empStreamTexts.removeValue(forKey: owningKey)
         empMessages.removeValue(forKey: owningKey)
+        streamingAssistantIds.removeValue(forKey: owningKey)
         if owningKey == empKey() { streamStartedAt = nil; lastStreamActivityAt = nil }
         if streamingEmployeeIds.isEmpty { activeStatus = "online" }
         if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
@@ -2088,6 +2203,7 @@ class AppState: ObservableObject {
         streamText = ""
         empStreamTexts.removeValue(forKey: key)
         empMessages.removeValue(forKey: key)
+        streamingAssistantIds.removeValue(forKey: key)   // late onEvent callbacks now no-op
         streamStartedAt = nil; lastStreamActivityAt = nil
         if streamingEmployeeIds.isEmpty { activeStatus = "online" }
     }
@@ -2468,7 +2584,7 @@ class AppState: ObservableObject {
         chatOutputMode = .chat   // 社員切替で構造化モードをリセット
         // Save the outgoing employee's current messages to their shadow (preserves streaming bubble).
         let outKey = empKey(activeEmployeeId)
-        empMessages[outKey] = messages
+        empMessages[outKey] = cappedShadow(messages)
         if let curId = activeEmployeeId, let idx = employees.firstIndex(where: { $0.id == curId }) {
             employees[idx].sessionId = currentSessionId
             recordSessionOwner(currentSessionId, curId)
@@ -2733,11 +2849,19 @@ class AppState: ObservableObject {
         return t
     }
 
-    /// Detect an imperative "register this as a task" chat message → the task title (else nil).
-    /// Deliberately conservative so ordinary chat *about* tasks isn't hijacked: only fires on
-    /// an explicit leading command ("タスク追加: …" / "/task …") or a trailing imperative
-    /// ("…のタスクを追加[して]"). See `handleSendMessage`.
-    func parseTaskAddCommand(_ text: String) -> String? {
+    /// Result of parsing a "register this as a task" chat command.
+    enum TaskAddCommand: Equatable {
+        case single(String)   // explicit title
+        case fromContext      // referential ("これら" / "上記" …) → expand from the preceding list
+    }
+
+    /// Detect an imperative "register this as a task" chat message. Returns `.single(title)` for
+    /// an explicit title, or `.fromContext` when the object is a demonstrative ("これら"/"上記"/
+    /// "これ" …) — the caller then expands the bullet list from the preceding message into one
+    /// task per item. Deliberately conservative so ordinary chat *about* tasks isn't hijacked:
+    /// only fires on an explicit leading command ("タスク追加: …" / "/task …") or a trailing
+    /// imperative ("…のタスクを追加[して]"). See `handleSendMessage`.
+    func parseTaskAddCommand(_ text: String) -> TaskAddCommand? {
         var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, !t.contains("\n") else { return nil }   // single-line commands only
 
@@ -2745,7 +2869,7 @@ class AppState: ObservableObject {
         for p in ["/task ", "タスク追加:", "タスク追加：", "タスク作成:", "タスク作成：", "タスク:", "タスク："] {
             if t.hasPrefix(p) {
                 let title = String(t.dropFirst(p.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                return title.isEmpty ? nil : title
+                return title.isEmpty ? nil : classifyTaskTitle(title)
             }
         }
 
@@ -2769,8 +2893,7 @@ class AppState: ObservableObject {
             for tail in ["の", "を", "、", ",", "という", "って", "に"] {
                 if mid.hasSuffix(tail) { mid = String(mid.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
             }
-            let stop: Set<String> = ["新しい", "この", "その", "あの", "次の", "新規", "それ", "これ", "あれ", "タスク", "task", "todo"]
-            if mid.count >= 2, !stop.contains(mid.lowercased()) { return mid }
+            return classifyTaskTitle(mid)
         }
         let verbs = ["タスクとして追加", "タスクを追加", "タスクに追加", "タスクを作成", "タスクを登録",
                      "タスク追加", "タスク作成", "タスク登録", "TODOに追加", "ToDoに追加", "todoに追加"]
@@ -2779,13 +2902,61 @@ class AppState: ObservableObject {
             for tail in ["の", "を", "、", ",", "という", "って"] {
                 if title.hasSuffix(tail) { title = String(title.dropLast(tail.count)).trimmingCharacters(in: .whitespaces) }
             }
-            // Reject underspecified titles (demonstratives/adjectives) so we don't create junk.
-            let stop: Set<String> = ["新しい", "この", "その", "あの", "次の", "新規", "ここに",
-                                     "それ", "これ", "あれ", "タスク"]
-            if title.count < 2 || stop.contains(title) { return nil }
-            return title
+            return classifyTaskTitle(title)
         }
         return nil
+    }
+
+    /// Classify a parsed task object: a demonstrative ("これら"/"上記"/"これ" …) means "expand the
+    /// bullet list from the preceding message"; a too-vague word is rejected; else it's a real title.
+    private func classifyTaskTitle(_ raw: String) -> TaskAddCommand? {
+        let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let referential: Set<String> = [
+            "これ", "これら", "それ", "それら", "あれ", "あれら",
+            "これら全部", "これらすべて", "これら全て", "それら全部", "それらすべて", "それら全て",
+            "上記", "上記の", "上の", "以上", "全部", "すべて", "全て", "これ全部", "これ全て"
+        ]
+        if referential.contains(title) { return .fromContext }
+        // Reject underspecified non-referential demonstratives/adjectives so we don't create junk.
+        let stop: Set<String> = ["新しい", "この", "その", "あの", "次の", "新規", "ここに", "タスク", "task", "todo"]
+        if title.count < 2 || stop.contains(title.lowercased()) { return nil }
+        return .single(title)
+    }
+
+    /// For "これらをタスクに追加": pull list items from the most recent message that has any
+    /// (assistant preferred — it's newest), so the preceding list becomes one task per item.
+    func extractContextualTaskItems() -> [String] {
+        for msg in messages.reversed().prefix(8) {
+            guard msg.role == .assistant || msg.role == .user else { continue }
+            let items = bulletItems(from: msg.content)
+            if !items.isEmpty { return items }
+        }
+        return []
+    }
+
+    /// Pull list items (・ • - * / 1. 1)) from a markdown string, stripping bullet markers and
+    /// **bold**. Lines without a bullet/number marker are ignored.
+    func bulletItems(from content: String) -> [String] {
+        let bulletChars: Set<Character> = ["・", "•", "‣", "◦", "-", "*", "–", "—", "●", "○", "▪", "▸", "◆", "·"]
+        var out: [String] = []
+        for rawLine in content.components(separatedBy: "\n") {
+            var line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { continue }
+            var isBullet = false
+            if let first = line.first, bulletChars.contains(first) {
+                line.removeFirst(); isBullet = true
+            } else if let m = line.range(of: #"^\d+[.\)、．]\s*"#, options: .regularExpression) {
+                line = String(line[m.upperBound...]); isBullet = true
+            }
+            guard isBullet else { continue }
+            line = line.replacingOccurrences(of: "**", with: "")
+                       .replacingOccurrences(of: "__", with: "")
+            line = line.trimmingCharacters(in: CharacterSet(charactersIn: " *_`~-–—"))
+            // Require at least one letter/number so rules ("---") and bare markers are skipped.
+            guard line.unicodeScalars.contains(where: { CharacterSet.alphanumerics.contains($0) }) else { continue }
+            out.append(line)
+        }
+        return out
     }
     func setTaskStatus(_ taskId: String, _ status: TaskStatus) {
         guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
@@ -4033,6 +4204,14 @@ class AppState: ObservableObject {
         }
     }
     
+    /// Surface a failure that would otherwise be swallowed by `try?`: write a structured entry to
+    /// ~/.hermes/logs/app.log (+ unified log) and, when `toast` is given, notify the user. Use this
+    /// for operations whose silent failure leaves the user confused (key/config writes, etc.).
+    func reportFailure(_ context: String, error: Error? = nil, toast: String? = nil, category: String = "app") {
+        Log.failure(category, context, error)
+        if let toast { triggerToast(message: toast) }
+    }
+
     func triggerToast(message: String, actionLabel: String? = nil, action: (() -> Void)? = nil) {
         toastToken += 1
         let token = toastToken
@@ -4504,14 +4683,16 @@ class AppState: ObservableObject {
         json["platforms"] = platforms
         json["updated_at"] = ISO8601DateFormatter().string(from: Date())
 
-        if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-            try? out.write(to: channelDirectoryURL)
+        do {
+            let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted])
+            try out.write(to: channelDirectoryURL)
             triggerToast(message: "チャンネルを追加しました。")
             newChannelId = ""
             newChannelName = ""
             fetchChannels()
-        } else {
-            triggerToast(message: "保存に失敗しました。")
+        } catch {
+            reportFailure("チャンネル設定の保存に失敗 (\(channelDirectoryURL.path))", error: error,
+                          toast: "チャンネルの保存に失敗しました。")
         }
     }
 
@@ -4524,9 +4705,13 @@ class AppState: ObservableObject {
         platforms[channel.platform] = list
         json["platforms"] = platforms
         json["updated_at"] = ISO8601DateFormatter().string(from: Date())
-        if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-            try? out.write(to: channelDirectoryURL)
+        do {
+            let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted])
+            try out.write(to: channelDirectoryURL)
             fetchChannels()
+        } catch {
+            reportFailure("チャンネル設定の保存に失敗 (\(channelDirectoryURL.path))", error: error,
+                          toast: "チャンネルの削除を保存できませんでした。")
         }
     }
 

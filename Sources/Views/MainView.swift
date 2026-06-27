@@ -175,7 +175,7 @@ struct MainView: View {
     private var headerTitle: String {
         switch appState.view {
         case "dashboard": return "ダッシュボード"
-        case "company": return "会社（AI社員）"
+        case "company": return appState.companyDisplayName
         case "employee": return appState.detailEmployee.map { "\($0.name)（\($0.role.title)）" } ?? "社員"
         case "schedule": return "スケジュール"
         case "tasks": return "タスク"
