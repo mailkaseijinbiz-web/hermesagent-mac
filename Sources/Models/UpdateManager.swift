@@ -66,8 +66,24 @@ final class UpdateManager: ObservableObject {
         p.standardOutput = pipe
         p.standardError = pipe
         do { try p.run() } catch { return (-1, error.localizedDescription) }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        // パイプバッファ(64KB)超えで waitUntilExit がデッドロックするため、
+        // readabilityHandler で並行読み出しし、終了後に結合する。
+        var chunks: [Data] = []
+        let lock = NSLock()
+        pipe.fileHandleForReading.readabilityHandler = { fh in
+            let d = fh.availableData
+            if d.isEmpty {
+                fh.readabilityHandler = nil
+            } else {
+                lock.lock(); chunks.append(d); lock.unlock()
+            }
+        }
         p.waitUntilExit()
+        pipe.fileHandleForReading.readabilityHandler = nil
+        // 残りのバッファを回収
+        let tail = pipe.fileHandleForReading.readDataToEndOfFile()
+        if !tail.isEmpty { chunks.append(tail) }
+        let data = chunks.reduce(Data(), +)
         return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 
@@ -98,31 +114,37 @@ final class UpdateManager: ObservableObject {
         let fileBranch = readRepoFile("release/.build-branch")
         let builtFromFile = builtCommit
 
-        let result = await Task.detached { () -> (ok: Bool, available: Bool, log: String, behind: Int, branch: String) in
+        let result = await Task.detached { () -> (ok: Bool, available: Bool, log: String, behind: Int, branch: String, dirty: Bool) in
             var branch = fileBranch ?? Self.sh("git rev-parse --abbrev-ref HEAD", cwd: repo).out
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if branch.isEmpty || branch == "HEAD" { branch = "main" }
 
             guard Self.sh("git fetch origin \(branch) --quiet", cwd: repo).code == 0 else {
-                return (false, false, "", 0, branch)
+                return (false, false, "", 0, branch, false)
             }
             let remote = Self.sh("git rev-parse origin/\(branch)", cwd: repo).out
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !remote.isEmpty else { return (false, false, "", 0, branch) }
+            guard !remote.isEmpty else { return (false, false, "", 0, branch, false) }
 
             var built = (builtFromFile ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if built.isEmpty {
                 built = Self.sh("git rev-parse HEAD", cwd: repo).out.trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            let available = !built.isEmpty && remote != built
-            var log = "", behind = 0
+            // `behind` = commits on the remote the built binary lacks. Gate on this, NOT on
+            // `remote != built`: when the local build is AHEAD of (or diverged from) the
+            // remote, `remote != built` stays true forever, so auto-update rebuilds the same
+            // source and relaunches in an infinite loop. A real update means behind > 0.
+            let behind = Int(Self.sh("git rev-list --count \(built)..\(remote)", cwd: repo).out
+                .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            let dirty = !Self.sh("git status --porcelain", cwd: repo).out
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let available = behind > 0
+            var log = ""
             if available {
                 log = Self.sh("git log --oneline --no-decorate \(built)..\(remote)", cwd: repo).out
                     .split(separator: "\n").prefix(15).joined(separator: "\n")
-                behind = Int(Self.sh("git rev-list --count \(built)..\(remote)", cwd: repo).out
-                    .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
             }
-            return (true, available, log, behind, branch)
+            return (true, available, log, behind, branch, dirty)
         }.value
 
         isChecking = false
@@ -132,9 +154,13 @@ final class UpdateManager: ObservableObject {
         updateAvailable = result.available
         behindCount = result.behind
         latestLog = result.log
-        status = result.available ? "新しいバージョンがあります（\(result.behind)件）" : "最新です"
+        status = result.available
+            ? "新しいバージョンがあります（\(result.behind)件）"
+            : (result.dirty ? "ローカルに未コミットの変更があります（自動更新は保留中）" : "最新です")
 
-        if result.available && autoUpdate && auto { await performUpdate() }
+        // Never auto-apply with a dirty working tree: `git pull --ff-only` would fail/clobber
+        // and we'd rebuild the same source repeatedly (the relaunch loop).
+        if result.available && !result.dirty && autoUpdate && auto { await performUpdate() }
     }
 
     // MARK: - Apply (git pull → rebuild → relaunch)
@@ -142,6 +168,18 @@ final class UpdateManager: ObservableObject {
     func performUpdate() async {
         guard let repo = repoPath, !isUpdating else { return }
         isUpdating = true
+
+        // Refuse to update over uncommitted local work — `git pull` would fail/clobber and,
+        // rebuilding the same source, relaunch in a loop. The developer commits/stashes first.
+        let dirty = await Task.detached {
+            !Self.sh("git status --porcelain", cwd: repo).out
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }.value
+        if dirty {
+            isUpdating = false
+            status = "未コミットの変更があるため更新を中止しました（先にコミット/退避してください）"
+            return
+        }
 
         status = "更新を取得中…（git pull）"
         let pull = await Task.detached { Self.sh("git pull --ff-only", cwd: repo) }.value

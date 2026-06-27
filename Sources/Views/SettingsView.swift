@@ -18,6 +18,8 @@ struct SettingsModal: View {
     enum Section: String, CaseIterable, Identifiable {
         case general = "一般"
         case model = "モデル"
+        case voice = "音声"
+        case google = "Google"
         case github = "GitHub"
         case cloud = "クラウド同期"
         case channels = "チャンネル"
@@ -29,6 +31,8 @@ struct SettingsModal: View {
             switch self {
             case .general: return "gearshape"
             case .model: return "cpu"
+            case .voice: return "speaker.wave.2"
+            case .google: return "g.circle"
             case .github: return "chevron.left.forwardslash.chevron.right"
             case .cloud: return "cloud"
             case .channels: return "bubble.left.and.bubble.right"
@@ -37,11 +41,12 @@ struct SettingsModal: View {
             case .experimental: return "flask"
             }
         }
-        /// Extra search terms so a query like "supabase" or "モデル" finds the right section.
         var keywords: String {
             switch self {
-            case .general: return "一般 general 性格 personality 音声 読み上げ tts elevenlabs voice"
+            case .general: return "一般 general 性格 personality"
             case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter antigravity agy gemini cli"
+            case .voice: return "音声 読み上げ tts elevenlabs voice ボイス スピーチ speech"
+            case .google: return "google gmail calendar カレンダー メール oauth 認証 連携"
             case .github: return "github リポジトリ repo ワークスペース clone git 作業フォルダ"
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
             case .channels: return "チャンネル channel telegram discord slack line whatsapp signal teams メール email"
@@ -58,6 +63,7 @@ struct SettingsModal: View {
 
     let providers = [
         ("openrouter", "OpenRouter"),
+        ("cerebras", "Cerebras"),
         ("openai", "OpenAI"),
         ("anthropic", "Anthropic"),
         ("gemini", "Google Gemini"),
@@ -159,6 +165,8 @@ struct SettingsModal: View {
                         switch selected {
                         case .general: generalSection
                         case .model: modelSection
+                        case .voice: voiceSection
+                        case .google: googleSection
                         case .github: githubSection
                         case .cloud: cloudSection
                         case .channels: channelsSection
@@ -380,7 +388,11 @@ struct SettingsModal: View {
                 }
                 .pickerStyle(.menu)
             }
+        }
+    }
 
+    private var voiceSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
             card(title: "音声読み上げ (TTS)") {
                 Toggle(isOn: $voice.useElevenLabs) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -732,6 +744,129 @@ struct SettingsModal: View {
             }
             Text("※ Supabaseでプロジェクト作成 → テーブル作成SQLを実行 → URL と anon キーをここに入力 → 接続テスト。")
                 .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+        }
+    }
+
+    // MARK: - Google section
+
+    @ObservedObject private var gauth = GoogleOAuth.shared
+    @ObservedObject private var gcal  = GoogleCalendarSync.shared
+
+    private var googleSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            // Account status
+            card(title: "Google アカウント") {
+                if gauth.isConnected, let email = gauth.email {
+                    HStack(spacing: 12) {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("接続済み").font(.system(size: 12, weight: .semibold))
+                            Text(email).font(.system(size: 12)).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("切断") {
+                            gauth.disconnect()
+                            GoogleCalendarSync.shared.stopPeriodicSync()
+                            GmailSync.shared.stopPeriodicSync()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundColor(.red)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Google Cloud Console で「デスクトップ アプリ」タイプの OAuth 2.0 クライアント ID を作成し、クライアント ID とクライアント シークレットを入力してください。")
+                            .font(.system(size: 12)).foregroundColor(.secondary)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            fieldLabel("クライアント ID")
+                            styledField(TextField("123456789-xxx.apps.googleusercontent.com", text: $gauth.clientId))
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            fieldLabel("クライアント シークレット")
+                            styledField(SecureField("GOCSPX-...", text: $gauth.clientSecret))
+                        }
+
+                        if let err = gauth.errorMessage {
+                            Text(err).font(.system(size: 12)).foregroundColor(.red)
+                        }
+
+                        Button {
+                            Task { await gauth.connect() }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if gauth.isConnecting {
+                                    ProgressView().controlSize(.small)
+                                }
+                                Text(gauth.isConnecting ? "認証中…（ブラウザが開きます）" : "Google アカウントと接続")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            .padding(.horizontal, 16).padding(.vertical, 9)
+                            .background(gauth.isConnecting ? Color.secondary.opacity(0.2) : Color.accentColor)
+                            .foregroundColor(gauth.isConnecting ? .secondary : .white)
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(gauth.isConnecting || gauth.clientId.isEmpty || gauth.clientSecret.isEmpty)
+                    }
+                }
+            }
+
+            // Calendar sync
+            if gauth.isConnected {
+                card(title: "Google カレンダー") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("スケジュールと同期")
+                                .font(.system(size: 13, weight: .medium))
+                            Text(gcal.lastSyncStatus.isEmpty ? "未同期" : gcal.lastSyncStatus)
+                                .font(.system(size: 11)).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if gcal.isSyncing {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("今すぐ同期") {
+                                Task { await GoogleCalendarSync.shared.sync() }
+                            }
+                            .buttonStyle(.plain).font(.system(size: 12)).foregroundColor(.accentColor)
+                        }
+                    }
+                }
+
+                // Gmail
+                card(title: "Gmail") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("受信トレイ")
+                                .font(.system(size: 13, weight: .medium))
+                            Text(GmailSync.shared.lastSyncStatus.isEmpty ? "未同期" : GmailSync.shared.lastSyncStatus)
+                                .font(.system(size: 11)).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Gmail を開く") {
+                            appState.view = "gmail"
+                            appState.showSettings = false
+                        }
+                        .buttonStyle(.plain).font(.system(size: 12)).foregroundColor(.accentColor)
+                    }
+                }
+            }
+
+            // Setup guide link
+            card(title: "設定方法") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("1. Google Cloud Console → 「API とサービス」→「認証情報」")
+                        .font(.system(size: 12))
+                    Text("2. 「認証情報を作成」→「OAuth クライアント ID」→「デスクトップ アプリ」")
+                        .font(.system(size: 12))
+                    Text("3. Google Calendar API と Gmail API を有効化")
+                        .font(.system(size: 12))
+                    Text("4. 上記のクライアント ID / シークレットを貼り付けて「接続」")
+                        .font(.system(size: 12))
+                }
+                .foregroundColor(.secondary)
+            }
         }
     }
 

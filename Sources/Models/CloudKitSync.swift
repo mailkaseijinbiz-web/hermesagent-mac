@@ -1,5 +1,6 @@
 import Foundation
 import CloudKit
+import Security
 
 /// Minimal CloudKit access. Stage 0 only proves the signing/entitlement chain works
 /// (write one record, read it back, delete it). Later stages back the real cross-device
@@ -16,8 +17,35 @@ import CloudKit
 enum CloudKitSync {
     static let containerID = "iCloud.com.custom.hermes"
 
-    static var container: CKContainer { CKContainer(identifier: containerID) }
-    static var publicDB: CKDatabase { container.publicCloudDatabase }
+    /// iCloud entitlement が利用できるか（未署名ビルドや entitlement 未設定環境で CKContainer が
+    /// トラップするのを防ぐ）。環境変数 HERMES_DISABLE_ICLOUD でも強制無効化できる。
+    /// `ubiquityIdentityToken` は「ユーザーが iCloud にサインイン済みか」であり、
+    /// アプリのエンタイトルメント有無とは別。コード署名情報を直接検査して判定する。
+    static let isAvailable: Bool = {
+        if ProcessInfo.processInfo.environment["HERMES_DISABLE_ICLOUD"] != nil { return false }
+        guard FileManager.default.ubiquityIdentityToken != nil else { return false }
+        // アプリのコード署名エンタイトルメントに iCloud コンテナが含まれるかを確認。
+        // SecCode → SecStaticCode への変換には SecCodeCopyStaticCode を使う（force cast 不可）。
+        var selfCode: SecCode?
+        guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let dynCode = selfCode else { return false }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(dynCode, [], &staticCode) == errSecSuccess,
+              let code = staticCode else { return false }
+        var info: CFDictionary?
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+        guard SecCodeCopySigningInformation(code, flags, &info) == errSecSuccess,
+              let dict = info as? [String: Any],
+              let ents = dict[kSecCodeInfoEntitlementsDict as String] as? [String: Any],
+              let containers = ents["com.apple.developer.icloud-container-identifiers"] as? [String],
+              containers.contains(containerID) else { return false }
+        return true
+    }()
+
+    static var container: CKContainer? {
+        guard isAvailable else { return nil }
+        return CKContainer(identifier: containerID)
+    }
+    static var publicDB: CKDatabase? { container?.publicCloudDatabase }
 
     enum SyncError: LocalizedError {
         case accountUnavailable(CKAccountStatus)
@@ -66,6 +94,12 @@ enum CloudKitSync {
         var employees: [EmployeeShared] = []
         var teams: [Team] = []
         var tasks: [WorkTask] = []
+        // Phase E per-employee deliverables. Defaulted so older roster records decode.
+        var artifacts: [Artifact] = []
+        // Phase F AI-developed app projects. Defaulted for backward-compatible decode.
+        var apps: [AppProject] = []
+        // Phase G calendar events. Defaulted for backward-compatible decode.
+        var events: [ScheduleEvent] = []
         var tombstones: [String: Double] = [:]
     }
 
@@ -76,10 +110,11 @@ enum CloudKitSync {
     /// Fetch the workspace roster by known recordID (no CKQuery → no schema index needed).
     /// Returns nil when no record exists yet.
     static func fetchRoster(workspace: String) async throws -> RosterPayload? {
-        let status = try await container.accountStatus()
+        guard let c = container, let db = publicDB else { return nil }
+        let status = try await c.accountStatus()
         guard status == .available else { throw SyncError.accountUnavailable(status) }
         do {
-            let rec = try await publicDB.record(for: rosterRecordID(workspace))
+            let rec = try await db.record(for: rosterRecordID(workspace))
             guard let data = rec["payload"] as? Data else { return RosterPayload() }
             return try JSONDecoder().decode(RosterPayload.self, from: data)
         } catch let e as CKError where e.code == .unknownItem {
@@ -90,13 +125,14 @@ enum CloudKitSync {
     /// Overwrite the workspace roster record (last-write-wins at the record level;
     /// item-level LWW is resolved by the caller before pushing).
     static func pushRoster(_ payload: RosterPayload, workspace: String) async throws {
-        let status = try await container.accountStatus()
+        guard let c = container, let db = publicDB else { return }
+        let status = try await c.accountStatus()
         guard status == .available else { throw SyncError.accountUnavailable(status) }
         let rec = CKRecord(recordType: "Roster", recordID: rosterRecordID(workspace))
         rec["payload"] = (try JSONEncoder().encode(payload)) as NSData
         rec["updatedAt"] = Date() as CKRecordValue
-        _ = try await publicDB.modifyRecords(saving: [rec], deleting: [],
-                                             savePolicy: .allKeys, atomically: true)
+        _ = try await db.modifyRecords(saving: [rec], deleting: [],
+                                       savePolicy: .allKeys, atomically: true)
     }
 
     // MARK: - Stage 2: one-way message mirror (state.db is CLI-owned / read-only)
@@ -124,18 +160,20 @@ enum CloudKitSync {
 
     /// Overwrite the per-workspace session index (metadata for every mirrored session).
     static func pushSessionIndex(ws: String, sessions: [SessionMeta]) async throws {
+        guard let db = publicDB else { return }
         let rec = CKRecord(recordType: "SessionIndex",
                            recordID: CKRecord.ID(recordName: "sessions::\(ws)"))
         rec["payload"] = (try JSONEncoder().encode(sessions)) as NSData
         rec["updatedAt"] = Date() as CKRecordValue
-        _ = try await publicDB.modifyRecords(saving: [rec], deleting: [],
-                                             savePolicy: .allKeys, atomically: true)
+        _ = try await db.modifyRecords(saving: [rec], deleting: [],
+                                       savePolicy: .allKeys, atomically: true)
     }
 
     /// Read back the session index (for verification / a future cloud-history viewer).
     static func fetchSessionIndex(ws: String) async throws -> [SessionMeta] {
+        guard let db = publicDB else { return [] }
         do {
-            let rec = try await publicDB.record(for: CKRecord.ID(recordName: "sessions::\(ws)"))
+            let rec = try await db.record(for: CKRecord.ID(recordName: "sessions::\(ws)"))
             guard let d = rec["payload"] as? Data else { return [] }
             return try JSONDecoder().decode([SessionMeta].self, from: d)
         } catch let e as CKError where e.code == .unknownItem {
@@ -145,18 +183,20 @@ enum CloudKitSync {
 
     /// Overwrite one session's mirrored messages.
     static func pushSessionLog(ws: String, sessionId: String, messages: [MessageDTO]) async throws {
+        guard let db = publicDB else { return }
         let rec = CKRecord(recordType: "SessionLog",
                            recordID: CKRecord.ID(recordName: "session::\(ws)::\(sessionId)"))
         rec["messages"] = (try JSONEncoder().encode(messages)) as NSData
         rec["updatedAt"] = Date() as CKRecordValue
-        _ = try await publicDB.modifyRecords(saving: [rec], deleting: [],
-                                             savePolicy: .allKeys, atomically: true)
+        _ = try await db.modifyRecords(saving: [rec], deleting: [],
+                                       savePolicy: .allKeys, atomically: true)
     }
 
     /// Read back one session's mirrored messages (for a future cloud-history viewer).
     static func fetchSessionLog(ws: String, sessionId: String) async throws -> [MessageDTO] {
+        guard let db = publicDB else { return [] }
         do {
-            let rec = try await publicDB.record(for: CKRecord.ID(recordName: "session::\(ws)::\(sessionId)"))
+            let rec = try await db.record(for: CKRecord.ID(recordName: "session::\(ws)::\(sessionId)"))
             guard let d = rec["messages"] as? Data else { return [] }
             return try JSONDecoder().decode([MessageDTO].self, from: d)
         } catch let e as CKError where e.code == .unknownItem {
@@ -167,7 +207,10 @@ enum CloudKitSync {
     /// Write one probe record to the private DB, read it back, then delete it.
     /// Returns a human-readable status string; throws on any failure.
     static func smokeTest() async throws -> String {
-        let status = try await container.accountStatus()
+        guard let c = container, let db = publicDB else {
+            return "スキップ（iCloud entitlement なし / 未署名ビルド）"
+        }
+        let status = try await c.accountStatus()
         guard status == .available else { throw SyncError.accountUnavailable(status) }
 
         let id = CKRecord.ID(recordName: "probe-\(UUID().uuidString)")
@@ -175,12 +218,12 @@ enum CloudKitSync {
         record["note"] = "stage0 smoke test" as CKRecordValue
         record["createdAt"] = Date() as CKRecordValue
 
-        let saved = try await publicDB.save(record)
-        let fetched = try await publicDB.record(for: saved.recordID)
-        _ = try? await publicDB.deleteRecord(withID: saved.recordID)   // keep the DB clean
+        let saved = try await db.save(record)
+        let fetched = try await db.record(for: saved.recordID)
+        _ = try? await db.deleteRecord(withID: saved.recordID)
 
         let note = (fetched["note"] as? String) ?? "?"
-        let user = try? await container.userRecordID()
+        let user = try? await c.userRecordID()
         let who = user.map { " / user \($0.recordName.prefix(8))…" } ?? ""
         return "OK ✓ 書込→読戻し成功（public DB / note=\"\(note)\"\(who)）"
     }

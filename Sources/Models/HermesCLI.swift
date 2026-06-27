@@ -185,7 +185,11 @@ class HermesCLI {
 
     // Tailscale MagicDNS hostname (e.g. keitamac-mini.tailfc8906.ts.net). Stable across
     // IP changes, so clients/QR can use it instead of a raw IP the user must manage.
-    func getTailscaleHostname() -> String? {
+    /// `nonisolated` so callers run it OFF the main actor — `tailscale status --json`
+    /// is a blocking subprocess and must never run on the main thread (it would freeze
+    /// the UI). Drains the pipe BEFORE waitUntilExit to avoid the 64KB-buffer deadlock
+    /// on large tailnets, and a 5s watchdog kills a hung `tailscale`.
+    nonisolated func getTailscaleHostname() -> String? {
         let candidates = [
             "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
             "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale"
@@ -197,8 +201,16 @@ class HermesCLI {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        do { try p.run(); p.waitUntilExit() } catch { return nil }
+        do { try p.run() } catch { return nil }
+        // Watchdog: terminate a hung `tailscale` after 5s so EOF arrives and we never block forever.
+        let timer = DispatchSource.makeTimerSource(queue: .global())
+        timer.schedule(deadline: .now() + 5)
+        timer.setEventHandler { if p.isRunning { p.terminate() } }
+        timer.resume()
+        // Read to EOF first (continuously draining → no buffer deadlock); then reap.
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        timer.cancel()
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let selfNode = json["Self"] as? [String: Any],
               let dns = (selfNode["DNSName"] as? String), !dns.isEmpty else { return nil }
@@ -241,12 +253,13 @@ class HermesCLI {
         let envVarName: String
         switch provider.lowercased() {
         case "openrouter": envVarName = "OPENROUTER_API_KEY"
+        case "cerebras": envVarName = "CEREBRAS_API_KEY"
         case "gemini": envVarName = "GEMINI_API_KEY"
         case "openai": envVarName = "OPENAI_API_KEY"
         case "anthropic": envVarName = "ANTHROPIC_API_KEY"
         default: return false
         }
-        
+
         mergedEnvironment[envVarName] = key
         
         var contentLines: [String] = []
@@ -288,6 +301,7 @@ class HermesCLI {
         let envVarName: String
         switch provider.lowercased() {
         case "openrouter": envVarName = "OPENROUTER_API_KEY"
+        case "cerebras": envVarName = "CEREBRAS_API_KEY"
         case "gemini": envVarName = "GEMINI_API_KEY"
         case "openai": envVarName = "OPENAI_API_KEY"
         case "anthropic": envVarName = "ANTHROPIC_API_KEY"

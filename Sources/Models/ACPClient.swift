@@ -112,7 +112,7 @@ final class ACPClient {
         else { promptQueue.removeFirst().resume() }
     }
 
-    private init() {}
+    init() {}
 
     // MARK: - Process lifecycle
 

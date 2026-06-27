@@ -161,6 +161,117 @@ struct WorkTask: Identifiable, Codable, Equatable {
     var updatedAt: Double = Date().timeIntervalSince1970
 }
 
+// MARK: - Artifacts (Phase E — per-employee deliverables)
+
+/// What an artifact points at. `Artifact.body` is interpreted per kind:
+/// note → Markdown text, file → absolute path, link → URL string.
+enum ArtifactKind: String, Codable, CaseIterable, Identifiable {
+    case note, file, link
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .note: return "メモ"
+        case .file: return "ファイル"
+        case .link: return "リンク"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .note: return "note.text"
+        case .file: return "doc"
+        case .link: return "link"
+        }
+    }
+    var color: Color {
+        switch self {
+        case .note: return Color(hex: "BA7517")
+        case .file: return Color(hex: "378ADD")
+        case .link: return Color(hex: "1D9E75")
+        }
+    }
+}
+
+/// A deliverable produced by / attached to an employee (Phase E). Persisted like tasks;
+/// note/link artifacts sync (last-write-wins) so they follow the employee across devices.
+/// File artifacts store a device-local absolute path, so they are NOT synced (they'd be
+/// broken on another machine) — see `localRosterPayload`.
+struct Artifact: Identifiable, Codable, Equatable {
+    var id: String = UUID().uuidString
+    var employeeId: String
+    var title: String
+    var kind: ArtifactKind
+    /// note → Markdown body; file → absolute path; link → URL string.
+    var body: String = ""
+    /// Optional provenance (where this artifact came from).
+    var taskId: String? = nil
+    var sessionId: String? = nil
+    var createdAt: Double = Date().timeIntervalSince1970
+    var updatedAt: Double = Date().timeIntervalSince1970
+}
+
+// MARK: - Schedule (Phase G — calendar events)
+
+/// A calendar event. `date` is epoch seconds; `allDay` events ignore the time component.
+/// Optionally assigned to an employee (shown in their accent color on the calendar).
+struct ScheduleEvent: Identifiable, Codable, Equatable {
+    var id: String = UUID().uuidString
+    var title: String
+    var detail: String = ""
+    var date: Double                 // epoch seconds (day, and time when !allDay)
+    var allDay: Bool = true
+    var assigneeId: String? = nil
+    var createdAt: Double = Date().timeIntervalSince1970
+    var updatedAt: Double = Date().timeIntervalSince1970
+}
+
+// MARK: - Apps (Phase F — AI-developed app projects)
+
+/// Lifecycle of an app project.
+enum AppStatus: String, Codable, CaseIterable, Identifiable {
+    case idea, building, done
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .idea: return "構想"
+        case .building: return "開発中"
+        case .done: return "完成"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .idea: return "lightbulb"
+        case .building: return "hammer"
+        case .done: return "checkmark.seal"
+        }
+    }
+    var colorHex: String {
+        switch self {
+        case .idea: return "888780"
+        case .building: return "378ADD"
+        case .done: return "1D9E75"
+        }
+    }
+    var color: Color { Color(hex: colorHex) }
+}
+
+/// An app the AI develops: a project FOLDER (the developer's cwd) plus metadata. Develop
+/// it by chatting with the assigned employee whose cwd is set to `folderPath` (see
+/// `AppState.developApp`). Persisted + synced like tasks. The folder lives under the
+/// shared dev base (`githubCloneBase`, default ~/Documents/development).
+struct AppProject: Identifiable, Codable, Equatable {
+    var id: String = UUID().uuidString
+    var name: String
+    var detail: String = ""         // spec / description (seeded into README.md)
+    var folderPath: String          // the project folder = developer cwd
+    var assigneeId: String? = nil   // the developer employee
+    var runCommand: String = ""     // e.g. "npm run dev"
+    var previewURL: String = ""     // e.g. "http://localhost:3000" (internal-browser preview)
+    var status: AppStatus = .idea
+    var createdAt: Double = Date().timeIntervalSince1970
+    var updatedAt: Double = Date().timeIntervalSince1970
+}
+
 // MARK: - Employee
 
 /// A hired AI employee. Holds its own model/persona/mode/workspace and — critically —
