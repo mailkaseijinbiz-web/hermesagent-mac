@@ -144,6 +144,7 @@ struct TaskCard: View {
     @EnvironmentObject var appState: AppState
     let task: WorkTask
     let assignee: Employee?
+    @State private var showEdit = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -165,8 +166,11 @@ struct TaskCard: View {
                         Text("＋ 担当者").font(.system(size: 10)).foregroundColor(.blue)
                     }.menuStyle(.borderlessButton).fixedSize()
                 }
+                if let due = task.dueDate { dueChip(due) }
                 Spacer()
                 Menu {
+                    Button { showEdit = true } label: { Label("編集", systemImage: "pencil") }
+                    Divider()
                     ForEach(TaskStatus.allCases) { s in
                         Button(s.title) { appState.setTaskStatus(task.id, s) }
                     }
@@ -188,5 +192,75 @@ struct TaskCard: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .cornerRadius(8)
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.07), lineWidth: 0.5))
+        .popover(isPresented: $showEdit, arrowEdge: .bottom) {
+            TaskEditView(task: task) { showEdit = false }
+        }
+    }
+
+    /// 締め切り期限チップ（期限切れ・未完了なら赤）。
+    @ViewBuilder private func dueChip(_ due: Double) -> some View {
+        let d = Date(timeIntervalSince1970: due)
+        let overdue = d < Calendar.current.startOfDay(for: Date()) && task.status != .done
+        HStack(spacing: 2) {
+            Image(systemName: "calendar").font(.system(size: 8))
+            Text(d.formatted(.dateTime.month(.defaultDigits).day()))
+        }
+        .font(.system(size: 9, weight: .medium))
+        .foregroundColor(overdue ? .red : .secondary)
+        .padding(.horizontal, 5).padding(.vertical, 2)
+        .background((overdue ? Color.red : Color.secondary).opacity(0.12)).cornerRadius(4)
+    }
+}
+
+/// タスク編集ポップオーバー：タイトル編集＋締め切り期限の設定/解除。
+struct TaskEditView: View {
+    @EnvironmentObject var appState: AppState
+    let task: WorkTask
+    let onClose: () -> Void
+    @State private var title: String
+    @State private var hasDue: Bool
+    @State private var due: Date
+
+    init(task: WorkTask, onClose: @escaping () -> Void) {
+        self.task = task
+        self.onClose = onClose
+        _title = State(initialValue: task.title)
+        _hasDue = State(initialValue: task.dueDate != nil)
+        _due = State(initialValue: task.dueDate.map { Date(timeIntervalSince1970: $0) } ?? Date())
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("タスクを編集").font(.system(size: 13, weight: .semibold))
+
+            TextField("タイトル", text: $title, axis: .vertical)
+                .textFieldStyle(.plain).lineLimit(1...4)
+                .padding(8).background(Color.primary.opacity(0.05)).cornerRadius(6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+
+            Toggle(isOn: $hasDue) { Text("締め切り期限").font(.system(size: 12)) }
+                .toggleStyle(.switch)
+            if hasDue {
+                DatePicker("期限", selection: $due, displayedComponents: .date)
+                    .datePickerStyle(.field).labelsHidden()
+            }
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("キャンセル") { onClose() }.buttonStyle(.plain).font(.system(size: 12))
+                Button {
+                    appState.updateTaskTitle(task.id, title)
+                    appState.setTaskDue(task.id, hasDue ? due.timeIntervalSince1970 : nil)
+                    onClose()
+                } label: {
+                    Text("保存").font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .background(Color.accentColor).foregroundColor(.white).cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(16).frame(width: 300)
     }
 }

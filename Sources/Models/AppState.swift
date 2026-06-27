@@ -291,6 +291,33 @@ class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(mobileAllowedClientID, forKey: "mobileAllowedClientID") }
     }
 
+    /// ローカル自動化キー。同一マシンの cron ジョブが `Authorization: Bearer <key>` で送ると
+    /// MobileServer に Google ID トークンなしで到達できる（Tailscale 越しは従来通り Google 認証）。
+    /// `~/.hermes/.env` の `HERMES_LOCAL_API_KEY` に保存。初回は自動生成。
+    /// 注: `~/.hermes/.env` を読めるローカルプロセスはこのキーを利用可能（同一マシン信頼前提）。
+    @Published var localAutomationKey: String = AppState.loadOrCreateLocalKey()
+
+    static var hermesEnvPath: String { NSHomeDirectory() + "/.hermes/.env" }
+    static func loadOrCreateLocalKey() -> String {
+        let path = hermesEnvPath
+        if let txt = try? String(contentsOfFile: path, encoding: .utf8) {
+            for raw in txt.split(separator: "\n") {
+                let l = raw.trimmingCharacters(in: .whitespaces)
+                if l.hasPrefix("HERMES_LOCAL_API_KEY=") {
+                    let v = String(l.dropFirst("HERMES_LOCAL_API_KEY=".count))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                    if !v.isEmpty { return v }
+                }
+            }
+        }
+        let key = "loc_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        var body = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        if !body.isEmpty, !body.hasSuffix("\n") { body += "\n" }
+        body += "HERMES_LOCAL_API_KEY=\(key)\n"
+        try? body.write(toFile: path, atomically: true, encoding: .utf8)
+        return key
+    }
+
     // APNs push notifications (Mac acts as the push provider)
     @Published var apnsEnabled: Bool = UserDefaults.standard.bool(forKey: "apnsEnabled") {
         didSet { UserDefaults.standard.set(apnsEnabled, forKey: "apnsEnabled") }
@@ -1183,6 +1210,19 @@ class AppState: ObservableObject {
     /// The working directory the agent runs in: develop-app override, else the active
     /// employee's workspace, else the selected GitHub repo, else home.
     var effectiveCwd: String { cwdOverride ?? activeEmployee?.workspacePath ?? selectedRepoPath ?? NSHomeDirectory() }
+
+    /// Tilde-abbreviated working-folder path for the composer badge (full path via `.help`).
+    var effectiveCwdDisplay: String { (effectiveCwd as NSString).abbreviatingWithTildeInPath }
+
+    /// Current git branch of the working folder, read straight from `.git/HEAD` (no subprocess).
+    /// Returns nil when the folder isn't a git repo — the branch badge is hidden in that case.
+    var effectiveCwdBranch: String? {
+        let head = (effectiveCwd as NSString).appendingPathComponent(".git/HEAD")
+        guard let s = try? String(contentsOfFile: head, encoding: .utf8) else { return nil }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = t.range(of: "ref: refs/heads/") { return String(t[r.upperBound...]) }
+        return t.isEmpty ? nil : String(t.prefix(7))   // detached HEAD → short sha
+    }
 
     // MARK: Employee persistence
     static func loadEmployees() -> [Employee] {
@@ -2695,6 +2735,21 @@ class AppState: ObservableObject {
     func setTaskStatus(_ taskId: String, _ status: TaskStatus) {
         guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
         workTasks[idx].status = status
+        workTasks[idx].updatedAt = Date().timeIntervalSince1970
+    }
+
+    /// タスクのタイトルを編集（空は無視）。
+    func updateTaskTitle(_ taskId: String, _ title: String) {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
+        workTasks[idx].title = t
+        workTasks[idx].updatedAt = Date().timeIntervalSince1970
+    }
+
+    /// 締め切り期限を設定/解除（nil で解除）。
+    func setTaskDue(_ taskId: String, _ due: Double?) {
+        guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
+        workTasks[idx].dueDate = due
         workTasks[idx].updatedAt = Date().timeIntervalSince1970
     }
 

@@ -157,6 +157,7 @@ struct WorkTask: Identifiable, Codable, Equatable {
     var detail: String = ""
     var assigneeId: String? = nil
     var status: TaskStatus = .todo
+    var dueDate: Double? = nil          // 締め切り期限 (timeIntervalSince1970, 任意)
     var createdAt: Double = Date().timeIntervalSince1970
     var updatedAt: Double = Date().timeIntervalSince1970
 }

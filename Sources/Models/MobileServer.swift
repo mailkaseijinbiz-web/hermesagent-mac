@@ -301,13 +301,16 @@ class MobileServer {
     /// Returns true when the request is allowed: either auth is disabled, or the
     /// request carries a valid Google ID token for the allowed account.
     private nonisolated func authorize(raw: String) async -> Bool {
-        let (require, email, clientID) = await MainActor.run {
+        let (require, email, clientID, localKey) = await MainActor.run {
             (AppState.shared.requireMobileAuth,
              AppState.shared.mobileAllowedEmail,
-             AppState.shared.mobileAllowedClientID)
+             AppState.shared.mobileAllowedClientID,
+             AppState.shared.localAutomationKey)
         }
         guard require else { return true }
         guard let token = extractBearerToken(raw) else { return false }
+        // ローカル自動化キー（同一マシンの cron）— 完全一致なら Google 検証をスキップ。
+        if !localKey.isEmpty, token == localKey { return true }
         return await GoogleTokenVerifier.shared.verify(
             idToken: token,
             allowedEmail: email,
@@ -327,7 +330,7 @@ class MobileServer {
         }
         return nil
     }
-    
+
     // MARK: - API Handlers
     
     private nonisolated func handleStatus(connection: NWConnection, corsHeaders: String) {

@@ -25,15 +25,6 @@ struct SidebarView: View {
                 SidebarMenuButton(icon: "person.3", title: "会社（AI社員）") {
                     appState.view = "company"
                 }
-                SidebarMenuButton(icon: "newspaper", title: "ニュース") {
-                    appState.view = "news"
-                }
-                SidebarMenuButton(icon: "envelope", title: "Gmail") {
-                    appState.view = "gmail"
-                }
-                SidebarMenuButton(icon: "calendar", title: "スケジュール") {
-                    appState.view = "schedule"
-                }
                 SidebarMenuButton(icon: "checklist", title: "タスク") {
                     appState.view = "tasks"
                 }
