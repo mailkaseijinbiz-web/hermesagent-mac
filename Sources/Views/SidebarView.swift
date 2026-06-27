@@ -51,7 +51,7 @@ struct SidebarView: View {
                     ForEach(appState.employees) { emp in
                         let active = appState.activeEmployeeId == emp.id
                         HStack(spacing: 8) {
-                            EmployeeAvatar(employee: emp, size: 22)
+                            EmployeeAvatar(employee: emp, size: 28)
                             Text(emp.name)
                                 .font(.system(size: 13, weight: active ? .semibold : .regular))
                                 .foregroundColor(active ? .primary : .secondary)
@@ -87,7 +87,7 @@ struct SidebarView: View {
 
                     HStack(spacing: 8) {
                         Image(systemName: "person.crop.circle.dashed")
-                            .font(.system(size: 13)).frame(width: 22, height: 22).foregroundColor(.secondary)
+                            .font(.system(size: 16)).frame(width: 28, height: 28).foregroundColor(.secondary)
                         Text("全体（社員なし）")
                             .font(.system(size: 13))
                             .foregroundColor(appState.activeEmployeeId == nil ? .primary : .secondary)
