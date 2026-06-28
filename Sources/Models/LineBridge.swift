@@ -42,12 +42,23 @@ final class LineBridge: @unchecked Sendable {
         guard isInstalled else { return "未インストール（~/.hermes/line-bridge が見つかりません）" }
         if isPortUp() { return "稼働中（:\(port)）" }
         let p = Process()
+        // Invoke `bash <script>` directly (script path as a real argv element, NOT spliced into a
+        // `bash -c "…"` string) so a home/.hermes path containing quotes/spaces/metacharacters can't
+        // inject. Using `bash <script>` (not exec'ing it) runs it even without the +x bit; run_bridge.sh
+        // execs `python bridge.py` with a relative path → cwd must be the bridge dir.
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        // Invoke via `bash <script>` (not exec'ing the script directly) so it runs even
-        // though run_bridge.sh lacks the +x bit. run_bridge.sh execs `python bridge.py`
-        // with a relative path → cwd must be the bridge dir. Output → bridge.log.
-        p.arguments = ["-c", "exec /bin/bash '\(runScript)' >> '\(logPath)' 2>&1"]
+        p.arguments = [runScript]
         p.currentDirectoryURL = URL(fileURLWithPath: dir)
+        // Append output to bridge.log via a FileHandle (replaces the shell `>> '…'` redirect, which
+        // was the other injection vector). The fd is inherited across run_bridge.sh's exec of python.
+        if !FileManager.default.fileExists(atPath: logPath) {
+            FileManager.default.createFile(atPath: logPath, contents: nil)
+        }
+        if let logFH = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
+            logFH.seekToEndOfFile()
+            p.standardOutput = logFH
+            p.standardError = logFH
+        }
         do {
             try p.run()
             process = p
