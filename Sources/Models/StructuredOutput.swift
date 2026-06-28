@@ -1,40 +1,5 @@
 import Foundation
 
-/// 出力ビューのモード。`.chat` は従来の会話表示、それ以外は同じアシスタント出力を
-/// 構造化レイアウトで描画する。`AgentMode`（AppState.swift）の label/icon パターンに倣う。
-enum OutputViewMode: String, CaseIterable, Identifiable {
-    case chat
-    case news
-    case summary
-    case timeline
-    case table
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .chat:     return "チャット"
-        case .news:     return "ニュース"
-        case .summary:  return "要約"
-        case .timeline: return "タイムライン"
-        case .table:    return "テーブル"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .chat:     return "bubble.left.and.bubble.right"
-        case .news:     return "newspaper"
-        case .summary:  return "list.bullet.rectangle"
-        case .timeline: return "clock"
-        case .table:    return "tablecells"
-        }
-    }
-
-    /// チャット以外の構造化モード（チャット内ピッカーの非チャット選択肢）。
-    static var structuredCases: [OutputViewMode] { allCases.filter { $0 != .chat } }
-}
-
 /// 出典リンク（生 URL を「出典」ボタンに畳むための表示用）。
 struct SourceLink: Identifiable, Equatable {
     let id = UUID()
