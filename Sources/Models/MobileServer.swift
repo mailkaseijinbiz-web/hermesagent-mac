@@ -106,12 +106,12 @@ class MobileServer {
 
     private nonisolated func isPublicPeer(_ connection: NWConnection) -> Bool {
         guard let ip = peerIP(connection) else { return false }   // unknown → allow (auth still gates)
-        return isRoutablePublicIPv4(ip)
+        return Self.isRoutablePublicIPv4(ip)
     }
 
     /// True only for a routable public IPv4 address. Private/CGNAT/loopback/link-local IPv4 and
-    /// any IPv6 (Tailscale uses IPv6 ULA) return false → treated as trusted.
-    nonisolated func isRoutablePublicIPv4(_ raw: String) -> Bool {
+    /// any IPv6 (Tailscale uses IPv6 ULA) return false → treated as trusted. (static → unit-testable)
+    nonisolated static func isRoutablePublicIPv4(_ raw: String) -> Bool {
         var ip = raw
         if let z = ip.firstIndex(of: "%") { ip = String(ip[..<z]) }      // strip %en0 zone id
         if ip.hasPrefix("::ffff:") { ip = String(ip.dropFirst("::ffff:".count)) }  // IPv4-mapped IPv6

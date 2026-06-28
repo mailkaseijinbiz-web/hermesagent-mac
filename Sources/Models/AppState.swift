@@ -2520,6 +2520,10 @@ class AppState: ObservableObject {
         activeEmployeeId = id
         let newKey = empKey(id)
 
+        // If the full-screen employee detail is open, follow the sidebar selection so picking a
+        // different employee on the left shows that employee's management on the right.
+        if view == "employee", let id { detailEmployeeId = id }
+
         if let emp = activeEmployee {
             agentMode = emp.mode
             currentSessionId = emp.sessionId
