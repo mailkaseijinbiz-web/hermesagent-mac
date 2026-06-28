@@ -3772,7 +3772,20 @@ class AppState: ObservableObject {
     /// for operations whose silent failure leaves the user confused (key/config writes, etc.).
     func reportFailure(_ context: String, error: Error? = nil, toast: String? = nil, category: String = "app") {
         Log.failure(category, context, error)
-        if let toast { triggerToast(message: toast) }
+        if let toast {
+            // Give the user a way to see what actually went wrong (#2 logging UX): a tap opens app.log.
+            triggerToast(message: toast, actionLabel: "ログ", action: { [weak self] in self?.openAppLog() })
+        }
+    }
+
+    /// Open ~/.hermes/logs/app.log in the default app (or reveal the logs folder if not created yet).
+    func openAppLog() {
+        let url = Log.fileURL
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+        }
     }
 
     /// Record a chat turn's outcome for the backend circuit breaker. A run of empty/failed turns
