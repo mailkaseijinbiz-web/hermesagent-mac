@@ -460,6 +460,61 @@ struct CronJobRow: View {
     @State private var showEdit = false
     @State private var showResults = false
 
+    // cron 式を読みやすい日本語に（例: "30 8,15 * * 1-5" → "平日 8:30・15:30"、"0 9 * * *" → "毎日 9:00"）。
+    static func humanSchedule(_ cron: String) -> String {
+        let f = cron.split(separator: " ").map(String.init)
+        guard f.count == 5 else { return cron }   // 非標準 → そのまま
+        let (minute, hour, dom, mon, dow) = (f[0], f[1], f[2], f[3], f[4])
+
+        if hour == "*", dom == "*", mon == "*", dow == "*",
+           minute.hasPrefix("*/"), let n = Int(minute.dropFirst(2)) { return "\(n)分ごと" }
+        if hour == "*", dom == "*", mon == "*", dow == "*", let m = Int(minute) {
+            return m == 0 ? "毎時0分" : "毎時\(m)分"
+        }
+        if dom == "*", mon == "*", dow == "*",
+           hour.hasPrefix("*/"), let n = Int(hour.dropFirst(2)) { return "\(n)時間ごと" }
+
+        let mins = minute.split(separator: ",").compactMap { Int($0) }
+        let hours = hour.split(separator: ",").compactMap { Int($0) }
+        guard let mm = mins.first, !hours.isEmpty else { return cron }
+        let times = hours.sorted().map { String(format: "%d:%02d", $0, mm) }.joined(separator: "・")
+
+        let names = ["日", "月", "火", "水", "木", "金", "土"]
+        let freq: String
+        if dow == "1-5" { freq = "平日" }
+        else if Set(dow.split(separator: ",").map(String.init)) == ["0", "6"] { freq = "週末" }
+        else if dow != "*" {
+            let days = dow.split(separator: ",").compactMap { Int($0) }
+                .map { $0 == 7 ? 0 : $0 }.filter { (0...6).contains($0) }.map { names[$0] }
+            freq = days.isEmpty ? "毎週" : "毎週" + days.joined(separator: "・") + "曜"
+        } else if dom != "*" { freq = "毎月\(dom)日" }
+        else { freq = "毎日" }
+        return "\(freq) \(times)"
+    }
+
+    // 配信先を UID を出さずに表示（例: "line:U752…" → "LINE（登録名）"、"local" → "このMac"）。
+    static func humanDeliver(_ deliver: String, channels: [HermesChannel]) -> String {
+        let d = deliver.trimmingCharacters(in: .whitespaces)
+        if d.isEmpty || d.lowercased() == "local" { return "このMac（ローカル）" }
+        let parts = d.split(separator: ":", maxSplits: 1).map(String.init)
+        let platform = parts.first ?? d
+        let id = parts.count > 1 ? parts[1] : ""
+        let label: String
+        switch platform.lowercased() {
+        case "line":     label = "LINE"
+        case "telegram": label = "Telegram"
+        case "discord":  label = "Discord"
+        case "slack":    label = "Slack"
+        case "whatsapp": label = "WhatsApp"
+        default:         label = platform
+        }
+        if !id.isEmpty,
+           let ch = channels.first(where: { $0.channelId == id && $0.platform.lowercased() == platform.lowercased() }) {
+            return "\(label)（\(ch.name)）"
+        }
+        return label   // UID は出さない
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
         HStack(spacing: 16) {
@@ -484,7 +539,7 @@ struct CronJobRow: View {
                 }
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("スケジュール: \(job.schedule)  |  配信: \(job.deliver)")
+                    Text("スケジュール: \(Self.humanSchedule(job.schedule))  |  配信: \(Self.humanDeliver(job.deliver, channels: appState.channels))")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                     
@@ -553,7 +608,7 @@ struct CronJobRow: View {
                 .buttonStyle(.plain)
                 .help("今すぐ実行して配信先（LINE等）に送信します")
                 .confirmationDialog(
-                    "「\(job.name)」を今すぐ実行しますか？\n配信先（\(job.deliver)）に結果が送信されます。",
+                    "「\(job.name)」を今すぐ実行しますか？\n配信先（\(Self.humanDeliver(job.deliver, channels: appState.channels))）に結果が送信されます。",
                     isPresented: $showRunConfirm, titleVisibility: .visible
                 ) {
                     Button("実行して送信") {

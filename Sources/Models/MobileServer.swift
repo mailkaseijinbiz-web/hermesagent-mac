@@ -395,13 +395,27 @@ class MobileServer {
         }
         guard require else { return true }
         guard let token = extractBearerToken(raw) else { return false }
-        // ローカル自動化キー（同一マシンの cron）— 完全一致なら Google 検証をスキップ。
-        if !localKey.isEmpty, token == localKey { return true }
+        // ローカル自動化キー（同一マシンの cron）— 一致なら Google 検証をスキップ。
+        // 比較は定数時間で（== の早期 return による文字単位のタイミング側チャネルを防ぐ）。
+        if !localKey.isEmpty, Self.constantTimeEquals(token, localKey) { return true }
         return await GoogleTokenVerifier.shared.verify(
             idToken: token,
             allowedEmail: email,
             allowedClientID: clientID
         )
+    }
+
+    /// Length-independent, early-exit-free byte comparison for secret tokens.
+    nonisolated static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+        let ab = Array(a.utf8), bb = Array(b.utf8)
+        var diff = UInt8(ab.count == bb.count ? 0 : 1)
+        let n = Swift.max(ab.count, bb.count, 1)
+        for i in 0..<n {
+            let x = i < ab.count ? ab[i] : 0
+            let y = i < bb.count ? bb[i] : 0
+            diff |= (x ^ y)
+        }
+        return diff == 0
     }
 
     private nonisolated func extractBearerToken(_ raw: String) -> String? {
