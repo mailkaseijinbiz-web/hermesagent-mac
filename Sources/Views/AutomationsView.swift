@@ -509,10 +509,38 @@ struct CronJobRow: View {
         default:         label = platform
         }
         if !id.isEmpty,
-           let ch = channels.first(where: { $0.channelId == id && $0.platform.lowercased() == platform.lowercased() }) {
+           let ch = channels.first(where: { $0.channelId == id && $0.platform.lowercased() == platform.lowercased() }),
+           !ch.name.isEmpty, ch.name != id {   // 登録名が UID そのものなら付けない
             return "\(label)（\(ch.name)）"
         }
         return label   // UID は出さない
+    }
+
+    // ISO タイムスタンプ（末尾に "ok" 等の状態が付くことがある）を OS のタイムゾーンで読みやすく整形。
+    static func friendlyTime(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return raw }
+        let parts = trimmed.split(separator: " ", maxSplits: 1).map(String.init)
+        let ts = parts.first ?? trimmed
+        let rest = parts.count > 1 ? " " + parts[1] : ""
+        guard let d = parseISO(ts) else { return raw }
+        let out = DateFormatter()
+        out.locale = Locale(identifier: "ja_JP")
+        out.dateFormat = "M/d(E) HH:mm"   // TimeZone.current（＝OS指定のタイムゾーン）で表示
+        return out.string(from: d) + rest
+    }
+
+    private static func parseISO(_ s: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: s) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        if let d = f.date(from: s) { return d }
+        for fmt in ["yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXXXX", "yyyy-MM-dd'T'HH:mm:ssXXXXX"] {
+            let df = DateFormatter(); df.locale = Locale(identifier: "en_US_POSIX"); df.dateFormat = fmt
+            if let d = df.date(from: s) { return d }
+        }
+        return nil
     }
 
     var body: some View {
@@ -550,13 +578,13 @@ struct CronJobRow: View {
                     }
                     
                     if !job.nextRun.isEmpty {
-                        Text("次回実行: \(job.nextRun)")
+                        Text("次回実行: \(Self.friendlyTime(job.nextRun))")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary.opacity(0.8))
                     }
-                    
+
                     if let lastRun = job.lastRun {
-                        Text("前回実行: \(lastRun)")
+                        Text("前回実行: \(Self.friendlyTime(lastRun))")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary.opacity(0.6))
                     }
