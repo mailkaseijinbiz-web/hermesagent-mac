@@ -1379,27 +1379,33 @@ class AppState: ObservableObject {
         // Auto-assign a working folder to every employee that doesn't have one (migration).
         ensureAllEmployeeWorkspaces()
         Task {
-            await fetchSessions()
+            // Independent reads run concurrently so a slow one (the Tailscale-status subprocess in
+            // updateDashboardURL, especially) doesn't serialize behind the others. All are @MainActor
+            // so only their I/O waits overlap — no state race. The provider→key→models chain stays
+            // sequential because each step depends on the previous.
+            async let sessionsDone: Void = fetchSessions()
+            async let dashDone: Void = updateDashboardURL()
+            async let pluginsDone: Void = fetchPlugins()
             await fetchConfig()
             await loadApiKey()
-            await updateDashboardURL()
-            await fetchPlugins()
             await fetchAvailableModels()
+            _ = await sessionsDone; _ = await dashDone; _ = await pluginsDone
+
             fetchChannels()   // load registered channels (LINE etc.) so "LINEに〜送って" works
             setupACPPermissions()
+
+            // Start the mobile server / LINE bridge / store sync WITHOUT waiting on the (multi-second)
+            // cloud sync — none of them depend on it, and blocking here was the main launch stall.
+            MobileServer.shared.start()
+            self.isMobileServerRunning = true
+            startStoreSync()                              // reflect iPhone/iPad/cron changes
+            let bridge = Task { await self.startLineBridge() }   // bridge.py on :8650 (keep LINE working)
+
+            // Cloud sync (can take seconds) now overlaps the above instead of gating it.
             if cloudSyncEnabled { await syncEmployeesNow() }
             if icloudUsable { await syncRosterNow() }
             startICloudLiveSync()
-
-            // Auto-start mobile server for iOS connectivity
-            MobileServer.shared.start()
-            self.isMobileServerRunning = true
-
-            // Keep the LINE bridge (bridge.py on :8650) running so LINE always works.
-            await startLineBridge()
-
-            // Reflect changes made from other devices (iPhone/iPad) or sources (cron).
-            startStoreSync()
+            _ = await bridge.value
         }
     }
 
