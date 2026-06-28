@@ -27,10 +27,20 @@ final class UpdateManager: ObservableObject {
 
     // MARK: - Repo discovery (derive from the running bundle's location)
 
-    /// `<repo>/release/HermesCustom.app` → `<repo>`, validated as the git source tree.
+    /// Resolve the git source tree. Prefer the absolute repo path recorded into the bundle at
+    /// build time (Resources/repo-root.txt) — this lets the app be installed OUTSIDE the repo
+    /// (e.g. ~/Applications, to avoid iCloud re-stamping the bundle) and still self-update.
+    /// Fallback: derive from the bundle's location (`<repo>/release/HermesCustom.app` → `<repo>`).
     var repoPath: String? {
-        let repo = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
         let fm = FileManager.default
+        if let recorded = Bundle.main.url(forResource: "repo-root", withExtension: "txt"),
+           let p = (try? String(contentsOf: recorded, encoding: .utf8))?
+                       .trimmingCharacters(in: .whitespacesAndNewlines),
+           !p.isEmpty,
+           fm.fileExists(atPath: "\(p)/.git") {
+            return p
+        }
+        let repo = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
         if fm.fileExists(atPath: repo.appendingPathComponent(".git").path),
            fm.fileExists(atPath: repo.appendingPathComponent("build_signed.sh").path) {
             return repo.path

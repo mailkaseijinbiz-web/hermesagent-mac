@@ -71,22 +71,39 @@ fi
 git rev-parse HEAD > release/.build-commit 2>/dev/null || true
 git rev-parse --abbrev-ref HEAD > release/.build-branch 2>/dev/null || true
 
-# Stable code signature → macOS remembers granted permissions (TCC: folder access, mic, etc.)
-# across rebuilds. An ad-hoc signature changes the app's identity every build, so macOS treats
-# each build as a new app and re-prompts on launch. Signing with the Apple Development cert gives
-# a fixed Team-ID identity that TCC keys on, so a permission granted once persists.
-#  ⚠️ Strip iCloud file-provider xattrs first — release/ lives under ~/Documents (iCloud-synced)
-#     and those xattrs make codesign fail with "resource fork ... not allowed".
+# Record the repo root inside the bundle so the in-app updater can find the source tree even
+# when the app runs from outside the repo (see below / UpdateManager.repoPath).
+echo "$(pwd)" > "${RESOURCES_DIR}/repo-root.txt"
+
+# Stable signature + install OUTSIDE iCloud so macOS remembers granted permissions (TCC:
+# folder access, mic, etc.) across rebuilds.
+#  - Ad-hoc signatures change identity every build → re-prompt. Signing with the Apple Development
+#    cert gives a fixed Team-ID identity TCC keys on.
+#  - BUT release/ lives under ~/Documents (iCloud-synced): the iCloud file provider keeps stamping
+#    com.apple.fileprovider / FinderInfo xattrs onto the bundle, which intermittently invalidate
+#    the signature, so macOS sees a "changed" app and re-prompts every launch. Fix: install a
+#    clean, signed copy to ~/Applications (NOT iCloud-synced) and launch THAT.
+LAUNCH_APP="${APP_DIR}"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Apple Development: KEITA YASUI"; then
     SIGN_ID=$(security find-identity -v -p codesigning | grep "Apple Development: KEITA YASUI" | head -1 | sed -E 's/.*"(.*)"/\1/')
+    # Sign the build output too (used by the updater via release/.build-commit).
     xattr -cr "${APP_DIR}" 2>/dev/null || true
-    if codesign --force --sign "$SIGN_ID" --identifier com.custom.hermesmac --timestamp=none "${APP_DIR}" 2>/dev/null; then
-        echo "Signed with stable identity → permissions persist across rebuilds."
+    codesign --force --sign "$SIGN_ID" --identifier com.custom.hermesmac --timestamp=none "${APP_DIR}" 2>/dev/null || true
+    # Clean install to ~/Applications (non-iCloud) and sign there → stable identity, no xattr churn.
+    INSTALL_APP="${HOME}/Applications/HermesCustom.app"
+    mkdir -p "${HOME}/Applications"
+    rm -rf "${INSTALL_APP}"
+    ditto "${APP_DIR}" "${INSTALL_APP}"
+    xattr -cr "${INSTALL_APP}" 2>/dev/null || true
+    if codesign --force --sign "$SIGN_ID" --identifier com.custom.hermesmac --timestamp=none "${INSTALL_APP}" 2>/dev/null; then
+        LAUNCH_APP="${INSTALL_APP}"
+        echo "Installed signed app to ${INSTALL_APP} (non-iCloud) → folder/TCC permissions persist."
     else
-        echo "⚠️  codesign failed — ad-hoc build; macOS may re-prompt for permissions each launch."
+        echo "⚠️  codesign of ~/Applications copy failed — launching the release/ copy."
     fi
 else
     echo "⚠️  Apple Development identity not found — ad-hoc build; macOS may re-prompt for permissions."
 fi
 
-echo "Done! App packaged successfully at: ${APP_DIR}"
+echo "LAUNCH_APP=${LAUNCH_APP}"
+echo "Done! Built at ${APP_DIR}; launch:  open \"${LAUNCH_APP}\""
