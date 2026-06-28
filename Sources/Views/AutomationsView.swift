@@ -456,7 +456,6 @@ struct CronJobRow: View {
     let job: HermesCronJob
     @State private var isPendingAction = false
     @State private var isHovered = false
-    @State private var showRunConfirm = false
     @State private var showEdit = false
     @State private var showResults = false
 
@@ -623,32 +622,7 @@ struct CronJobRow: View {
                     CronEditView(job: job) { showEdit = false }
                 }
 
-                // テスト実行（今すぐ実行 → 配信先へ送信）
-                Button(action: { showRunConfirm = true }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "paperplane.fill").font(.system(size: 10))
-                        Text("テスト送信").font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundColor(.accentColor)
-                    .padding(.horizontal, 9).padding(.vertical, 5)
-                    .background(Color.accentColor.opacity(0.10)).cornerRadius(6)
-                }
-                .buttonStyle(.plain)
-                .help("今すぐ実行して配信先（LINE等）に送信します")
-                .confirmationDialog(
-                    "「\(job.name)」を今すぐ実行しますか？\n配信先（\(Self.humanDeliver(job.deliver, channels: appState.channels))）に結果が送信されます。",
-                    isPresented: $showRunConfirm, titleVisibility: .visible
-                ) {
-                    Button("実行して送信") {
-                        Task {
-                            isPendingAction = true
-                            _ = await appState.cronRunNow(id: job.id)
-                            isPendingAction = false
-                        }
-                    }
-                    Button("キャンセル", role: .cancel) {}
-                }
-
+                // テスト送信・削除は編集（ペンシル）の中に集約。行にはトグルのみ残す。
                 Toggle("", isOn: Binding(
                     get: { job.isActive },
                     set: { _ in
@@ -661,29 +635,7 @@ struct CronJobRow: View {
                 ))
                 .toggleStyle(.switch)
                 .labelsHidden()
-                
-                Button(action: {
-                    Task {
-                        isPendingAction = true
-                        await appState.handleDeleteCronJob(job)
-                        isPendingAction = false
-                    }
-                }) {
-                    Image(systemName: "trash")
-                        .font(.system(size: 13))
-                        .foregroundColor(.red.opacity(0.8))
-                        .frame(width: 28, height: 28)
-                        .background(Color.red.opacity(0.05))
-                        .cornerRadius(6)
-                }
-                .buttonStyle(.plain)
-                .onHover { hovering in
-                    if hovering {
-                        NSCursor.pointingHand.push()
-                    } else {
-                        NSCursor.pop()
-                    }
-                }
+                .help(job.isActive ? "有効（クリックで一時停止）" : "一時停止中（クリックで有効化）")
             }
         }
             // このジョブに紐づく実行結果（タイトルがジョブ名で始まるもの）を展開表示
@@ -762,6 +714,9 @@ struct CronEditView: View {
     @State private var schedule: String
     @State private var deliver: String
     @State private var saving = false
+    @State private var busy = false
+    @State private var runConfirm = false
+    @State private var deleteConfirm = false
 
     init(job: HermesCronJob, onClose: @escaping () -> Void) {
         self.job = job
@@ -791,6 +746,53 @@ struct CronEditView: View {
             if let sc = job.script, !sc.isEmpty {
                 Text("スクリプト: \(sc)（編集不可）")
                     .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.7))
+            }
+
+            Divider().padding(.vertical, 2)
+
+            // テスト送信・削除（行から集約）。
+            HStack(spacing: 8) {
+                Button { runConfirm = true } label: {
+                    HStack(spacing: 4) {
+                        if busy { ProgressView().controlSize(.small).scaleEffect(0.7) }
+                        else { Image(systemName: "paperplane.fill").font(.system(size: 10)) }
+                        Text("テスト送信").font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(.accentColor)
+                    .padding(.horizontal, 9).padding(.vertical, 5)
+                    .background(Color.accentColor.opacity(0.10)).cornerRadius(6)
+                }
+                .buttonStyle(.plain).disabled(busy)
+                .help("今すぐ実行して配信先に送信します")
+                .confirmationDialog(
+                    "「\(name)」を今すぐ実行しますか？\n配信先（\(CronJobRow.humanDeliver(deliver, channels: appState.channels))）に結果が送信されます。",
+                    isPresented: $runConfirm, titleVisibility: .visible
+                ) {
+                    Button("実行して送信") {
+                        Task { busy = true; _ = await appState.cronRunNow(id: job.id); busy = false }
+                    }
+                    Button("キャンセル", role: .cancel) {}
+                }
+
+                Button(role: .destructive) { deleteConfirm = true } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "trash").font(.system(size: 10))
+                        Text("削除").font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(.red)
+                    .padding(.horizontal, 9).padding(.vertical, 5)
+                    .background(Color.red.opacity(0.10)).cornerRadius(6)
+                }
+                .buttonStyle(.plain).disabled(busy)
+                .confirmationDialog("「\(name)」を削除しますか？", isPresented: $deleteConfirm,
+                                    titleVisibility: .visible) {
+                    Button("削除", role: .destructive) {
+                        Task { busy = true; await appState.handleDeleteCronJob(job); busy = false; onClose() }
+                    }
+                    Button("キャンセル", role: .cancel) {}
+                } message: { Text("このスケジュールタスクを削除します。取り消せません。") }
+
+                Spacer()
             }
 
             HStack(spacing: 10) {
