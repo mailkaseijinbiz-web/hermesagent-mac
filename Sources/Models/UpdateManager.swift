@@ -67,10 +67,14 @@ final class UpdateManager: ObservableObject {
 
     // MARK: - Subprocess (login shell for Terminal-parity env: PATH, SSH, signing)
 
-    nonisolated private static func sh(_ command: String, cwd: String) -> (code: Int32, out: String) {
+    /// Run `command` in a login zsh (for Terminal-parity env). Interpolated values —
+    /// branch names, commit SHAs, repo/app paths — must be passed via `args`, NOT spliced
+    /// into `command`: they arrive as positional params ($1, $2, …) so a hostile branch
+    /// name or a path with shell metacharacters can't break out and inject commands.
+    nonisolated private static func sh(_ command: String, _ args: [String] = [], cwd: String) -> (code: Int32, out: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-lc", command]
+        p.arguments = ["-lc", command, "zsh"] + args   // "zsh" becomes $0; args become $1, $2, …
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
         let pipe = Pipe()
         p.standardOutput = pipe
@@ -129,10 +133,10 @@ final class UpdateManager: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if branch.isEmpty || branch == "HEAD" { branch = "main" }
 
-            guard Self.sh("git fetch origin \(branch) --quiet", cwd: repo).code == 0 else {
+            guard Self.sh("git fetch origin \"$1\" --quiet", [branch], cwd: repo).code == 0 else {
                 return (false, false, "", 0, branch, false)
             }
-            let remote = Self.sh("git rev-parse origin/\(branch)", cwd: repo).out
+            let remote = Self.sh("git rev-parse \"origin/$1\"", [branch], cwd: repo).out
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !remote.isEmpty else { return (false, false, "", 0, branch, false) }
 
@@ -144,14 +148,14 @@ final class UpdateManager: ObservableObject {
             // `remote != built`: when the local build is AHEAD of (or diverged from) the
             // remote, `remote != built` stays true forever, so auto-update rebuilds the same
             // source and relaunches in an infinite loop. A real update means behind > 0.
-            let behind = Int(Self.sh("git rev-list --count \(built)..\(remote)", cwd: repo).out
+            let behind = Int(Self.sh("git rev-list --count \"$1\"..\"$2\"", [built, remote], cwd: repo).out
                 .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
             let dirty = !Self.sh("git status --porcelain", cwd: repo).out
                 .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let available = behind > 0
             var log = ""
             if available {
-                log = Self.sh("git log --oneline --no-decorate \(built)..\(remote)", cwd: repo).out
+                log = Self.sh("git log --oneline --no-decorate \"$1\"..\"$2\"", [built, remote], cwd: repo).out
                     .split(separator: "\n").prefix(15).joined(separator: "\n")
             }
             return (true, available, log, behind, branch, dirty)
@@ -212,7 +216,7 @@ final class UpdateManager: ObservableObject {
         status = "再起動中…"
         // Background a detached relauncher (reparented to launchd) that reopens the new
         // bundle once this instance has quit, then terminate.
-        _ = Self.sh("(sleep 1; open '\(builtApp)') >/dev/null 2>&1 &", cwd: repo)
+        _ = Self.sh("(sleep 1; open \"$1\") >/dev/null 2>&1 &", [builtApp], cwd: repo)
         try? await Task.sleep(nanoseconds: 300_000_000)
         NSApplication.shared.terminate(nil)
     }

@@ -101,6 +101,9 @@ final class ACPClient {
     // clobber each other's callbacks/session. Queue them so each runs to completion.
     private var promptBusy = false
     private var promptQueue: [CheckedContinuation<Void, Never>] = []
+    /// Last time ANY message arrived from the agent (response/chunk/thought/tool). Drives the
+    /// request idle-watchdog so a hung/dead ACP subprocess can't hold the prompt lock forever.
+    private var lastAcpActivity = Date()
 
     private func lockPrompt() async {
         if !promptBusy { promptBusy = true; return }
@@ -177,6 +180,7 @@ final class ACPClient {
     }
 
     private func route(_ obj: [String: Any]) {
+        lastAcpActivity = Date()   // any inbound message = the subprocess is alive (idle-watchdog)
         // Agent → client request (has both method and id): respond.
         if let method = obj["method"] as? String, let id = obj["id"] {
             if method == "session/request_permission" {
@@ -335,11 +339,30 @@ final class ACPClient {
         inPipe.fileHandleForWriting.write(data)
     }
 
-    private func request(_ method: String, _ params: [String: Any]) async -> [String: Any]? {
+    private func request(_ method: String, _ params: [String: Any], idleTimeout: TimeInterval = 60) async -> [String: Any]? {
         let id = nextId; nextId += 1
-        let response: ACPResponse = await withCheckedContinuation { cont in
+        lastAcpActivity = Date()
+        let response: ACPResponse = await withCheckedContinuation { (cont: CheckedContinuation<ACPResponse, Never>) in
             resultHandlers[id] = { cont.resume(returning: $0) }
             sendRaw(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
+            // Idle watchdog: if NO message of any kind arrives for `idleTimeout` seconds, fail this
+            // request so `send`'s `defer { unlockPrompt() }` runs instead of the prompt lock being
+            // held forever on a hung/dead subprocess. removeValue-then-call (same as route's response
+            // path) guarantees a single resume even if a real response races in.
+            Task { @MainActor [weak self] in
+                while true {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    guard let self else { return }
+                    if self.resultHandlers[id] == nil { return }   // already answered
+                    if Date().timeIntervalSince(self.lastAcpActivity) > idleTimeout {
+                        if let h = self.resultHandlers.removeValue(forKey: id) {
+                            Log.acp.error("ACP request idle-timeout '\(method, privacy: .public)' after \(Int(idleTimeout))s")
+                            h(ACPResponse(result: nil))
+                        }
+                        return
+                    }
+                }
+            }
         }
         return response.result
     }
@@ -424,7 +447,9 @@ final class ACPClient {
                 "mimeType": imagePath.hasSuffix("png") ? "image/png" : "image/jpeg"
             ])
         }
-        let result = await request("session/prompt", ["sessionId": sid, "prompt": blocks])
+        // 180s of total silence (no chunk/thought/tool/response) = stuck. Healthy long turns keep
+        // streaming, so this only trips on a real hang — releasing the lock instead of deadlocking.
+        let result = await request("session/prompt", ["sessionId": sid, "prompt": blocks], idleTimeout: 180)
         let tokens = (result?["usage"] as? [String: Any])?["totalTokens"] as? Int
         return (tokens, result != nil)
     }

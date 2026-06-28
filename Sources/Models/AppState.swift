@@ -342,7 +342,8 @@ class AppState: ObservableObject {
     @Published var apnsKeyId: String = UserDefaults.standard.string(forKey: "apnsKeyId") ?? "" {
         didSet { UserDefaults.standard.set(apnsKeyId, forKey: "apnsKeyId") }
     }
-    @Published var apnsTeamId: String = UserDefaults.standard.string(forKey: "apnsTeamId") ?? "576D2UUHH5" {
+    // 既定は空：開発者個人の Apple Team ID をバイナリへ焼き込まない。利用者が設定画面で自分の Team ID を入力する。
+    @Published var apnsTeamId: String = UserDefaults.standard.string(forKey: "apnsTeamId") ?? "" {
         didSet { UserDefaults.standard.set(apnsTeamId, forKey: "apnsTeamId") }
     }
     @Published var apnsBundleId: String = UserDefaults.standard.string(forKey: "apnsBundleId") ?? "com.custom.hermesagent" {
@@ -374,10 +375,6 @@ class AppState: ObservableObject {
     // current full-agent behavior; chat steers toward conversation (no auto edits).
     @Published var agentMode: AgentMode = AgentMode(rawValue: UserDefaults.standard.string(forKey: "agentMode") ?? "") ?? .code {
         didSet { UserDefaults.standard.set(agentMode.rawValue, forKey: "agentMode") }
-    }
-    // 出力ビューのモード（チャット内のその場切替）。`.chat` は従来の会話表示。
-    @Published var chatOutputMode: OutputViewMode = OutputViewMode(rawValue: UserDefaults.standard.string(forKey: "chatOutputMode") ?? "") ?? .chat {
-        didSet { UserDefaults.standard.set(chatOutputMode.rawValue, forKey: "chatOutputMode") }
     }
     // The tool-permission request currently awaiting the user's decision (drives the dialog).
     @Published var pendingPermission: ACPPermission? = nil
@@ -1517,7 +1514,7 @@ class AppState: ObservableObject {
     }
 
     func sendPushIfEnabled(title: String, body: String, sessionId: String?) {
-        guard apnsEnabled, !apnsKeyId.isEmpty, !apnsKeyPath.isEmpty, !pushDeviceTokens.isEmpty else { return }
+        guard apnsEnabled, !apnsKeyId.isEmpty, !apnsKeyPath.isEmpty, !apnsTeamId.isEmpty, !pushDeviceTokens.isEmpty else { return }
         let cfg = APNsSender.Config(
             keyPath: apnsKeyPath, keyId: apnsKeyId, teamId: apnsTeamId,
             bundleId: apnsBundleId, useSandbox: apnsUseSandbox
@@ -1707,7 +1704,6 @@ class AppState: ObservableObject {
         self.currentSessionId = nil
         self.messages = []
         self.inputValue = ""
-        self.chatOutputMode = .chat   // 新しい会話は従来のチャット表示から
         self.cwdOverride = nil   // a fresh chat is not an app-develop thread
         // A new chat for the active employee starts a fresh isolated thread.
         if let empId = activeEmployeeId, let idx = employees.firstIndex(where: { $0.id == empId }) {
@@ -2515,7 +2511,6 @@ class AppState: ObservableObject {
     /// isolated session. nil → back to the default single-agent (no employee).
     func switchEmployee(_ id: String?) {
         cwdOverride = nil
-        chatOutputMode = .chat   // 社員切替で構造化モードをリセット
         // Save the outgoing employee's current messages to their shadow (preserves streaming bubble).
         let outKey = empKey(activeEmployeeId)
         empMessages[outKey] = cappedShadow(messages)
