@@ -78,8 +78,53 @@ class MobileServer {
     // MARK: - Connection Handling
     
     private nonisolated func handleConnection(_ connection: NWConnection) {
+        // Defense-in-depth: the listener binds all interfaces (0.0.0.0), so on a public/guest
+        // network the API could be probed from the internet. Drop connections from clearly-public
+        // IPv4 peers before doing any work — legitimate clients reach the hub over loopback,
+        // Tailscale (100.64/10 or IPv6 ULA), or the private LAN. The Google/local-key auth gate
+        // still applies to everything that passes. Conservative on purpose: anything we can't
+        // classify as routable-public IPv4 (incl. all IPv6) is allowed so we never break a real client.
+        if isPublicPeer(connection) {
+            Log.server.notice("rejected connection from public peer: \(self.peerIP(connection) ?? "?", privacy: .public)")
+            connection.cancel()
+            return
+        }
         connection.start(queue: .global(qos: .userInitiated))
         receiveRequest(connection: connection, accumulated: Data())
+    }
+
+    /// The remote peer's IP (the client), or nil if it can't be read.
+    private nonisolated func peerIP(_ connection: NWConnection) -> String? {
+        guard case let .hostPort(host, _) = connection.endpoint else { return nil }
+        switch host {
+        case let .ipv4(a): return "\(a)"
+        case let .ipv6(a): return "\(a)"
+        case let .name(n, _): return n
+        @unknown default: return nil
+        }
+    }
+
+    private nonisolated func isPublicPeer(_ connection: NWConnection) -> Bool {
+        guard let ip = peerIP(connection) else { return false }   // unknown → allow (auth still gates)
+        return isRoutablePublicIPv4(ip)
+    }
+
+    /// True only for a routable public IPv4 address. Private/CGNAT/loopback/link-local IPv4 and
+    /// any IPv6 (Tailscale uses IPv6 ULA) return false → treated as trusted.
+    nonisolated func isRoutablePublicIPv4(_ raw: String) -> Bool {
+        var ip = raw
+        if let z = ip.firstIndex(of: "%") { ip = String(ip[..<z]) }      // strip %en0 zone id
+        if ip.hasPrefix("::ffff:") { ip = String(ip.dropFirst("::ffff:".count)) }  // IPv4-mapped IPv6
+        let parts = ip.split(separator: ".")
+        guard parts.count == 4 else { return false }                    // not IPv4 (e.g. IPv6) → trusted
+        let o = parts.map { Int($0) ?? -1 }
+        guard !o.contains(-1), o.allSatisfy({ (0...255).contains($0) }) else { return false }
+        let a = o[0], b = o[1]
+        if a == 0 || a == 127 || a == 10 || a == 169 { return false }   // unspecified/loopback/private/link-local
+        if a == 192 && b == 168 { return false }                        // private
+        if a == 172 && (16...31).contains(b) { return false }           // private
+        if a == 100 && (64...127).contains(b) { return false }          // Tailscale CGNAT 100.64/10
+        return true                                                     // routable public IPv4 → reject
     }
 
     /// Accumulate data across reads until the full HTTP request (headers + body
