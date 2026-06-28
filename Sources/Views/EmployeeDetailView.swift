@@ -176,14 +176,6 @@ private struct EmpOverviewTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            // Stat row
-            HStack(spacing: 12) {
-                stat("未着手", "\(appState.tasks(for: employee.id, status: .todo).count)", "tray", .secondary)
-                stat("対応中", "\(appState.tasks(for: employee.id, status: .doing).count)", "bolt", .orange)
-                stat("完了", "\(appState.tasks(for: employee.id, status: .done).count)", "checkmark.circle", .green)
-                stat("成果物", "\(appState.artifactsFor(employee.id).count)", "shippingbox", .blue)
-            }
-
             // Workspace
             VStack(alignment: .leading, spacing: 8) {
                 sectionLabel("作業フォルダ")
@@ -199,21 +191,6 @@ private struct EmpOverviewTab: View {
                 }
                 .padding(12).background(Color.primary.opacity(0.03)).cornerRadius(10)
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
-            }
-
-            // Quick actions
-            VStack(alignment: .leading, spacing: 8) {
-                sectionLabel("クイック操作")
-                HStack(spacing: 10) {
-                    action("タスクを見る", "checklist") { tab = .tasks }
-                    action("成果物を見る", "shippingbox") { tab = .artifacts }
-                    action("ファイルを見る", "folder") { tab = .files }
-                    action("アプリを追加", "hammer") {
-                        appState.switchEmployee(employee.id)
-                        appState.view = "apps"
-                    }
-                    action("定期実行に登録", "clock.badge.plus") { appState.registerAutomationForEmployee(employee.id) }
-                }
             }
         }
     }
