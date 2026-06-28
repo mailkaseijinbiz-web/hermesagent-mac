@@ -1360,6 +1360,9 @@ class AppState: ObservableObject {
     // Store-sync: detect state.db changes (from iPhone/cron/etc.) and refresh the UI.
     private var storeSyncTimer: Task<Void, Never>? = nil
     private var lastStoreToken: String = ""
+    /// Throttle the sidebar refresh during our own streaming (see startStoreSync) — the heavy
+    /// sessions() query + @Published reassign every 1.2s is the main streaming-time UI jank.
+    private var lastStreamingSessionRefresh: Date = .distantPast
 
     private init() {
         // Clean up child processes / timers when the app quits.
@@ -1459,10 +1462,15 @@ class AppState: ObservableObject {
                 let d = StateDB.shared.digest()
                 if d.token != self.lastStoreToken {
                     if self.isStreaming {
-                        // Don't consume the token while streaming our own reply — only
-                        // refresh the sidebar; reconcile the open conversation once the
-                        // stream finishes (otherwise the view can stay stale).
-                        await self.fetchSessions()
+                        // Don't consume the token while streaming our own reply — only refresh the
+                        // sidebar; reconcile the open conversation once the stream finishes. Throttle
+                        // to ~5s: the open chat already shows the live reply, so the sidebar list
+                        // doesn't need a heavy sessions() re-query every 1.2s (that was the jank).
+                        let now = Date()
+                        if now.timeIntervalSince(self.lastStreamingSessionRefresh) > 5 {
+                            self.lastStreamingSessionRefresh = now
+                            await self.fetchSessions()
+                        }
                     } else {
                         self.lastStoreToken = d.token
                         await self.refreshFromStore()
