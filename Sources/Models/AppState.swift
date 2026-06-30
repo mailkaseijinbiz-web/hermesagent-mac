@@ -215,8 +215,44 @@ struct HermesChannel: Identifiable, Equatable {
 class AppState: ObservableObject {
     static let shared = AppState()
     
-    @Published var view: String = "chat" // "chat" | "company" | "automations"
+    @Published var view: String = "dashboard" // landing on the bento dashboard; "chat" | "company" | …
     @Published var showCommandPalette = false   // ⌘K quick-jump overlay
+
+    // Dashboard bento layout: each widget's position (col,row) + size (w,h) in square grid
+    // cells. Drag/resizable + persisted. 4-column grid.
+    struct WidgetTile: Codable, Equatable, Identifiable {
+        var id: String      // widget key: health/self/schedule/tasks/location/photos/apps/employees/brief/review/lifelog
+        var col: Int; var row: Int; var w: Int; var h: Int
+    }
+    static let dashboardCols = 4
+    static func defaultDashboardLayout() -> [WidgetTile] {
+        [
+            .init(id: "health",    col: 0, row: 0, w: 2, h: 2),
+            .init(id: "self",      col: 2, row: 0, w: 2, h: 2),
+            .init(id: "schedule",  col: 0, row: 2, w: 2, h: 2),
+            .init(id: "tasks",     col: 2, row: 2, w: 2, h: 2),
+            .init(id: "location",  col: 0, row: 4, w: 1, h: 1),
+            .init(id: "photos",    col: 1, row: 4, w: 1, h: 1),
+            .init(id: "apps",      col: 2, row: 4, w: 1, h: 1),
+            .init(id: "employees", col: 3, row: 4, w: 1, h: 1),
+            .init(id: "brief",     col: 0, row: 5, w: 4, h: 2),
+            .init(id: "review",    col: 0, row: 7, w: 4, h: 2),
+            .init(id: "lifelog",   col: 0, row: 9, w: 4, h: 3),
+        ]
+    }
+    @Published var dashboardLayout: [WidgetTile] = AppState.loadJSON("dashboardLayout") ?? AppState.defaultDashboardLayout() {
+        didSet { AppState.saveJSON(dashboardLayout, "dashboardLayout") }
+    }
+    func resetDashboardLayout() { dashboardLayout = AppState.defaultDashboardLayout() }
+    /// Add any known widgets missing from a persisted layout (e.g. after an app update adds one).
+    func ensureDashboardLayoutComplete() {
+        let known = AppState.defaultDashboardLayout()
+        var nextRow = (dashboardLayout.map { $0.row + $0.h }.max() ?? 0)
+        for d in known where !dashboardLayout.contains(where: { $0.id == d.id }) {
+            dashboardLayout.append(.init(id: d.id, col: 0, row: nextRow, w: d.w, h: d.h))
+            nextRow += d.h
+        }
+    }
     @Published var showSettings: Bool = false   // settings shown as a modal dialog
     @Published var sessions: [Session] = []
     @Published var currentSessionId: String? = nil
@@ -480,7 +516,138 @@ class AppState: ObservableObject {
     @Published var latestHealth: HealthSnapshot? = AppState.loadJSON("latestHealth") {
         didSet { AppState.saveJSON(latestHealth, "latestHealth") }
     }
-    func updateHealth(_ snap: HealthSnapshot) { latestHealth = snap }
+    func updateHealth(_ snap: HealthSnapshot) {
+        latestHealth = snap
+        upsertToday {
+            if let v = snap.steps { $0.steps = v }
+            if let v = snap.activeEnergyKcal { $0.activeEnergyKcal = Int(v) }
+            if let v = snap.restingHeartRate { $0.restingHeartRate = v }
+            if let v = snap.sleepHours { $0.sleepHours = v }
+        }
+    }
+
+    // Rolling daily history (last ~60 days) so the AI can do WEEKLY metacognitive reviews
+    // (pattern detection). Upserted as health/location/photo data arrives. Device-local.
+    struct DayRecord: Codable, Equatable {
+        var date: String                  // yyyy-MM-dd
+        var steps: Int? = nil
+        var activeEnergyKcal: Int? = nil
+        var restingHeartRate: Int? = nil
+        var sleepHours: Double? = nil
+        var locations: String = ""
+        var photos: String = ""
+    }
+    @Published var dailyHistory: [DayRecord] = AppState.loadJSON("dailyHistory") ?? [] {
+        didSet { AppState.saveJSON(dailyHistory, "dailyHistory") }
+    }
+    private func dayKey(_ d: Date = Date()) -> String {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: d)
+    }
+    private func upsertToday(_ mutate: (inout DayRecord) -> Void) {
+        let key = dayKey()
+        if let i = dailyHistory.firstIndex(where: { $0.date == key }) {
+            mutate(&dailyHistory[i])
+        } else {
+            var r = DayRecord(date: key); mutate(&r); dailyHistory.append(r)
+        }
+        if dailyHistory.count > 60 { dailyHistory.removeFirst(dailyHistory.count - 60) }
+    }
+
+    // Weekly metacognitive review (pattern detection over dailyHistory). Persisted.
+    @Published var weeklyReview: String = UserDefaults.standard.string(forKey: "weeklyReview") ?? "" {
+        didSet { UserDefaults.standard.set(weeklyReview, forKey: "weeklyReview") }
+    }
+    @Published var weeklyReviewAt: Double = UserDefaults.standard.double(forKey: "weeklyReviewAt") {
+        didSet { UserDefaults.standard.set(weeklyReviewAt, forKey: "weeklyReviewAt") }
+    }
+    @Published var isGeneratingReview = false
+
+    // Lifelog daily summary (AI-generated snapshot of today's Mac + iOS activity).
+    @Published var lifelogSummary: String = UserDefaults.standard.string(forKey: "lifelogSummary") ?? "" {
+        didSet { UserDefaults.standard.set(lifelogSummary, forKey: "lifelogSummary") }
+    }
+    @Published var lifelogSummaryAt: Double = UserDefaults.standard.double(forKey: "lifelogSummaryAt") {
+        didSet { UserDefaults.standard.set(lifelogSummaryAt, forKey: "lifelogSummaryAt") }
+    }
+    @Published var isGeneratingLifelogSummary = false
+    /// 直近 `days` 日の日次データを1行/日のテキストに整形（履歴が無ければ空）。
+    func weeklyReviewContext(days: Int = 14) -> String {
+        let recent = dailyHistory.suffix(days)
+        guard !recent.isEmpty else { return "" }
+        return recent.map { r in
+            var p: [String] = [r.date]
+            if let v = r.steps { p.append("歩\(v)") }
+            if let v = r.activeEnergyKcal { p.append("\(v)kcal") }
+            if let v = r.restingHeartRate { p.append("安静\(v)") }
+            if let v = r.sleepHours { p.append(String(format: "睡眠%.1fh", v)) }
+            if !r.locations.isEmpty { p.append("場所[\(r.locations)]") }
+            if !r.photos.isEmpty { p.append("写真[\(r.photos)]") }
+            return p.joined(separator: " / ")
+        }.joined(separator: "\n")
+    }
+
+    // Location: a privacy-light daily "足あと" summary pushed from iOS (place names + times,
+    // NOT raw coordinates). Injected into the brief/coaching context. Device-local.
+    @Published var locationSummary: String = UserDefaults.standard.string(forKey: "locationSummary") ?? "" {
+        didSet { UserDefaults.standard.set(locationSummary, forKey: "locationSummary") }
+    }
+    @Published var locationSummaryAt: Double = UserDefaults.standard.double(forKey: "locationSummaryAt") {
+        didSet { UserDefaults.standard.set(locationSummaryAt, forKey: "locationSummaryAt") }
+    }
+    /// 自宅キーワード（空文字 = 未登録）。locationSummary 内の一致部分を「自宅」に置換して表示。
+    @Published var homeLocationKeyword: String = UserDefaults.standard.string(forKey: "homeLocationKeyword") ?? "" {
+        didSet { UserDefaults.standard.set(homeLocationKeyword, forKey: "homeLocationKeyword") }
+    }
+    /// 自宅キーワードを反映した表示用サマリ。
+    func resolvedLocationSummary(_ raw: String) -> String {
+        let kw = homeLocationKeyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !kw.isEmpty else { return raw }
+        return raw.replacingOccurrences(of: kw, with: "自宅", options: .caseInsensitive)
+    }
+    func updateLocationSummary(_ s: String) {
+        locationSummary = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        locationSummaryAt = Date().timeIntervalSince1970
+        upsertToday { $0.locations = self.locationSummary }
+    }
+
+    // Per-place coordinates for today's footprint map (sent from iOS, to this private hub).
+    struct LocationPoint: Codable, Equatable, Identifiable {
+        var name: String; var lat: Double; var lon: Double
+        var id: String { "\(lat)|\(lon)|\(name)" }
+    }
+    @Published var locationPoints: [LocationPoint] = AppState.loadJSON("locationPoints") ?? [] {
+        didSet { AppState.saveJSON(locationPoints, "locationPoints") }
+    }
+    func updateLocation(summary: String, points: [LocationPoint]) {
+        updateLocationSummary(summary)
+        locationPoints = points.filter { $0.lat != 0 || $0.lon != 0 }
+    }
+    /// 今日の足あとを文脈に。古い（前日以前）サマリは使わない。自宅キーワードは「自宅」に置換。
+    var locationContext: String? {
+        guard !locationSummary.isEmpty, locationSummaryAt > 0 else { return nil }
+        guard Calendar.current.isDateInToday(Date(timeIntervalSince1970: locationSummaryAt)) else { return nil }
+        return "今日の行動(訪れた場所): \(resolvedLocationSummary(locationSummary))"
+    }
+
+    // Photos: a privacy-light daily summary pushed from iOS (counts/places only — never the
+    // photos themselves). Injected into the brief/coaching context. Device-local.
+    @Published var photoSummary: String = UserDefaults.standard.string(forKey: "photoSummary") ?? "" {
+        didSet { UserDefaults.standard.set(photoSummary, forKey: "photoSummary") }
+    }
+    @Published var photoSummaryAt: Double = UserDefaults.standard.double(forKey: "photoSummaryAt") {
+        didSet { UserDefaults.standard.set(photoSummaryAt, forKey: "photoSummaryAt") }
+    }
+    func updatePhotoSummary(_ s: String) {
+        photoSummary = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        photoSummaryAt = Date().timeIntervalSince1970
+        upsertToday { $0.photos = self.photoSummary }
+    }
+    var photoContext: String? {
+        guard !photoSummary.isEmpty, photoSummaryAt > 0 else { return nil }
+        guard Calendar.current.isDateInToday(Date(timeIntervalSince1970: photoSummaryAt)) else { return nil }
+        return "今日の写真: \(photoSummary)"
+    }
 
     /// 健康データの日本語1行サマリー（健康アドバイザーのチャットへ注入／表示用）。データ無しは nil。
     var healthSummaryLine: String? {
@@ -514,6 +681,78 @@ class AppState: ObservableObject {
     }
     static func loadEvents() -> [ScheduleEvent] { loadJSON("events") ?? [] }
 
+    // Personal profile (北極星): 好きなもの・目標・価値観など。AIの助言の「基準」として
+    // デイリーブリーフ生成や会話コンテキストに注入する。Device-local (not iCloud-synced).
+    struct PersonalProfile: Codable, Equatable {
+        var likes = ""    // 好きなもの（例: サウナ）
+        var goals = ""    // めざしたいこと・目標（例: 健康）
+        var values = ""   // 大事にしている価値観
+        var notes = ""    // その他メモ（AIに知っておいてほしいこと）
+    }
+    @Published var personalProfile: PersonalProfile = AppState.loadJSON("personalProfile") ?? PersonalProfile() {
+        didSet { AppState.saveJSON(personalProfile, "personalProfile") }
+    }
+    func setProfileFields(likes: String?, goals: String?, values: String?, notes: String?) {
+        var p = personalProfile
+        if let likes = likes { p.likes = likes }
+        if let goals = goals { p.goals = goals }
+        if let values = values { p.values = values }
+        if let notes = notes { p.notes = notes }
+        personalProfile = p
+    }
+    var profileJSON: [String: Any] {
+        ["likes": personalProfile.likes, "goals": personalProfile.goals,
+         "values": personalProfile.values, "notes": personalProfile.notes]
+    }
+    /// プロファイルを文脈用の日本語ブロックに整形（空フィールドは省く）。
+    var personalProfileContext: String {
+        var lines: [String] = []
+        let p = personalProfile
+        if !p.goals.isEmpty  { lines.append("めざしたいこと(目標): \(p.goals)") }
+        if !p.likes.isEmpty  { lines.append("好きなもの: \(p.likes)") }
+        if !p.values.isEmpty { lines.append("大事にしている価値観: \(p.values)") }
+        if !p.notes.isEmpty  { lines.append("メモ: \(p.notes)") }
+        return lines.joined(separator: "\n")
+    }
+
+    // Self-model ("自分をPCのように"): 頭のメモリ割り当て（関心領域ごとの%）と稼働時間。
+    // メタ認知の基盤として、ブリーフ生成や会話の文脈に注入する。Device-local.
+    struct ResourceAllocation: Codable, Identifiable, Equatable {
+        var id: String = UUID().uuidString
+        var name: String      // 領域（例: 仕事 / 健康 / 家族 / 学習）
+        var percent: Int      // 頭のメモリ割り当て（0-100）
+    }
+    struct SelfModel: Codable, Equatable {
+        var allocations: [ResourceAllocation] = []
+        var workStartHour: Int = 9      // 稼働開始（時）
+        var workEndHour: Int = 18       // 稼働終了（時）
+        var targetFocusHours: Double = 0 // 1日の目標集中時間（0=未設定）
+    }
+    @Published var selfModel: SelfModel = AppState.loadJSON("selfModel") ?? SelfModel() {
+        didSet { AppState.saveJSON(selfModel, "selfModel") }
+    }
+    var selfModelJSONString: String {
+        guard let d = try? JSONEncoder().encode(selfModel), let s = String(data: d, encoding: .utf8) else { return "{}" }
+        return s
+    }
+    @discardableResult
+    func updateSelfModel(jsonData: Data) -> Bool {
+        guard let m = try? JSONDecoder().decode(SelfModel.self, from: jsonData) else { return false }
+        selfModel = m
+        return true
+    }
+    /// セルフモデルを文脈用の日本語ブロックに整形。
+    var selfModelContext: String {
+        var lines: [String] = []
+        let allocs = selfModel.allocations.filter { !$0.name.isEmpty && $0.percent > 0 }
+        if !allocs.isEmpty {
+            lines.append("頭のメモリ割り当て: " + allocs.map { "\($0.name) \($0.percent)%" }.joined(separator: " / "))
+        }
+        lines.append("稼働時間: \(selfModel.workStartHour)時〜\(selfModel.workEndHour)時"
+                     + (selfModel.targetFocusHours > 0 ? String(format: "（目標集中%.1fh/日）", selfModel.targetFocusHours) : ""))
+        return lines.joined(separator: "\n")
+    }
+
     // Dashboard daily brief: an AI-written narrative summary of today, persisted with its
     // timestamp so the dashboard can show "as of HH:mm" and auto-refresh when stale.
     @Published var dailyBrief: String = UserDefaults.standard.string(forKey: "dailyBrief") ?? "" {
@@ -535,7 +774,8 @@ class AppState: ObservableObject {
         return try? JSONDecoder().decode(T.self, from: data)
     }
     static func saveJSON<T: Encodable>(_ value: T, _ key: String) {
-        if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) }
+        do { UserDefaults.standard.set(try JSONEncoder().encode(value), forKey: key) }
+        catch { Log.failure("app", "状態の保存に失敗 (\(key))", error) }
     }
 
     // Employees currently handling a delegated task (so they show a spinner too).
@@ -543,6 +783,10 @@ class AppState: ObservableObject {
     /// All employee keys (id, or "" for 全体) that have an in-flight streaming turn.
     /// Multiple employees can stream simultaneously — true parallel sends.
     @Published var streamingEmployeeIds: Set<String> = []
+
+    /// Employee IDs (not keys) with an unread AI response — set when streaming finishes for an
+    /// employee the user isn't currently viewing; cleared when the user switches to that employee.
+    @Published var employeeUnreadIds: Set<String> = []
 
     // Per-employee backing stores for parallel streaming:
     //   empStreamTexts  — raw accumulated chunk text per turn
@@ -579,74 +823,6 @@ class AppState: ObservableObject {
     /// Convenience — key for the currently active employee.
     func empKey() -> String { empKey(activeEmployeeId) }
 
-    // MARK: - 構造化出力（ニュース等）
-
-    /// メモ化キー：最新アシスタントメッセージの id + content 長。変化したときだけ再パース。
-    private var _entriesKey: String = ""
-    private var _entriesCache: [NewsEntry] = []
-
-    /// 現在の会話の「最新アシスタント出力（非エラー）」を解析した構造化エントリ。
-    /// メモ化済み：ストリーミング中の毎フレーム呼び出しでも再パースしない。
-    var latestAssistantEntries: [NewsEntry] {
-        guard let last = messages.last(where: { $0.role == .assistant && !$0.isError && !$0.content.isEmpty })
-        else { _entriesKey = ""; _entriesCache = []; return [] }
-        let key = last.id.uuidString + ":\(last.content.count)"
-        if key == _entriesKey { return _entriesCache }
-        _entriesKey = key
-        _entriesCache = NewsParser.parse(last.content)
-        return _entriesCache
-    }
-
-    /// チャット内ピッカーで実際に構造化できる出力があるか（あるときだけピッカーを出す）。
-    var hasStructurableOutput: Bool { !latestAssistantEntries.isEmpty }
-
-    /// メモ化キー：各キーの最新アシスタントメッセージ数を連結した文字列。
-    private var _newsKey: String = ""
-    private var _newsCache: [NewsFeedItem] = []
-
-    /// 読み込み済みの各会話（empMessages ＋現在の messages）から、解析で2件以上得られた
-    /// アシスタント出力を社員名タグ付きで集約。トップレベル Newsページの入力。
-    /// 現在会話を優先し、社員名でソートして決定的な順序を保証する。
-    var allNewsEntries: [NewsFeedItem] {
-        // 内容が変わったときだけ再パース（Newsページ毎描画での O(N) 回避）
-        var sources: [(key: String, msgs: [Message])] = empMessages
-            .sorted { $0.key < $1.key }
-            .map { ($0.key, $0.value) }
-        let curKey = empKey()
-        // 現在会話を後に追加（seenKeys により優先されて上書き）
-        sources.append((curKey, messages))
-
-        let newKey = sources.map { "\($0.key):\($0.msgs.count)" }.joined(separator: "|")
-        if newKey == _newsKey { return _newsCache }
-        _newsKey = newKey
-
-        var feed: [NewsFeedItem] = []
-        var seenKeys = Set<String>()
-
-        func nameForKey(_ key: String) -> String {
-            if key.isEmpty { return "全体チャット" }
-            return employees.first(where: { $0.id == key })?.name ?? "チャット"
-        }
-
-        // 現在会話を最後に追加するため reversed() で走査すると current が先勝ち
-        for src in sources.reversed() {
-            guard !seenKeys.contains(src.key) else { continue }
-            for msg in src.msgs.reversed() where msg.role == .assistant && !msg.isError && !msg.content.isEmpty {
-                let entries = NewsParser.parse(msg.content)
-                if entries.count >= 2 {
-                    feed.append(NewsFeedItem(employeeName: nameForKey(src.key),
-                                             employeeId: src.key.isEmpty ? nil : src.key,
-                                             entries: entries))
-                    seenKeys.insert(src.key)
-                    break
-                }
-            }
-        }
-        // 社員名で昇順ソートして表示順を安定させる
-        _newsCache = feed.sorted { $0.employeeName < $1.employeeName }
-        return _newsCache
-    }
-
     /// True if this employee is actively working now (streaming or delegated task).
     func isEmployeeBusy(_ id: String) -> Bool {
         busyEmployeeIds.contains(id) || streamingEmployeeIds.contains(id)
@@ -679,7 +855,8 @@ class AppState: ObservableObject {
         return m
     }
     static func saveSessionOwner(_ m: [String: String]) {
-        if let data = try? JSONEncoder().encode(m) { UserDefaults.standard.set(data, forKey: "sessionOwner") }
+        do { UserDefaults.standard.set(try JSONEncoder().encode(m), forKey: "sessionOwner") }
+        catch { Log.failure("app", "セッション所有者マップの保存に失敗", error) }
     }
     func recordSessionOwner(_ sid: String?, _ empId: String?) {
         guard let sid = sid, let empId = empId else { return }
@@ -1258,13 +1435,21 @@ class AppState: ObservableObject {
 
     // MARK: Employee persistence
     static func loadEmployees() -> [Employee] {
-        guard let data = UserDefaults.standard.data(forKey: "employees"),
-              let arr = try? JSONDecoder().decode([Employee].self, from: data) else { return [] }
-        return arr
+        guard let data = UserDefaults.standard.data(forKey: "employees") else { return [] }
+        do {
+            return try JSONDecoder().decode([Employee].self, from: data)
+        } catch {
+            // データは在るのにデコード失敗＝「社員が全員消えた」の典型症状（非Optionalな新フィールド追加の
+            // keyNotFound 等）。空配列で握り潰すと次の保存で名簿を上書き消去するので、必ず記録して原因を残す。
+            Log.failure("app", "社員名簿の読み込みに失敗（保存データをデコードできず）", error)
+            return []
+        }
     }
     static func saveEmployees(_ list: [Employee]) {
-        if let data = try? JSONEncoder().encode(list) {
-            UserDefaults.standard.set(data, forKey: "employees")
+        do {
+            UserDefaults.standard.set(try JSONEncoder().encode(list), forKey: "employees")
+        } catch {
+            Log.failure("app", "社員名簿の保存に失敗", error)
         }
     }
     static func loadModelHealth() -> [String: Bool] {
@@ -1273,8 +1458,10 @@ class AppState: ObservableObject {
         return m
     }
     static func saveModelHealth(_ m: [String: Bool]) {
-        if let data = try? JSONEncoder().encode(m) {
-            UserDefaults.standard.set(data, forKey: "modelHealth")
+        do {
+            UserDefaults.standard.set(try JSONEncoder().encode(m), forKey: "modelHealth")
+        } catch {
+            Log.failure("app", "モデルヘルスの保存に失敗", error)
         }
     }
     
@@ -1361,6 +1548,10 @@ class AppState: ObservableObject {
             self.isMobileServerRunning = true
             startStoreSync()                              // reflect iPhone/iPad/cron changes
             let bridge = Task { await self.startLineBridge() }   // bridge.py on :8650 (keep LINE working)
+
+            // 自動振り返り: 起動時に今日のブリーフがなければ生成 & 毎夜21:00に再生成
+            await self.autoBriefIfStale()
+            self.startAutoBriefTimer()
 
             // Cloud sync (can take seconds) now overlaps the above instead of gating it.
             if cloudSyncEnabled { await syncEmployeesNow() }
@@ -1465,6 +1656,18 @@ class AppState: ObservableObject {
     // Used to suppress a push to a device that's already looking at that session.
     private var devicePresence: [String: (sessionId: String, ts: Date)] = [:]
 
+    // Per-device app-icon badge counter: +1 for every push actually sent to a token,
+    // reset to 0 when that device foregrounds (POST /api/badge/clear). Sent as aps.badge
+    // so the phone shows an unread count even while the app is closed.
+    private var deviceBadge: [String: Int] = [:]
+
+    /// A device foregrounded and consumed its updates — reset its badge counter.
+    func clearBadge(token: String) {
+        let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        deviceBadge[t] = 0
+    }
+
     /// A device reported its foreground state (via POST /api/presence).
     func updatePresence(token: String, sessionId: String?, active: Bool) {
         let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1495,10 +1698,17 @@ class AppState: ObservableObject {
             tokens = tokens.filter { !isForegroundedOn(token: $0, sessionId: sid) }
         }
         guard !tokens.isEmpty else { return }
+        // Bump each receiving device's badge, and send its current count as aps.badge.
+        for t in tokens { deviceBadge[t, default: 0] += 1 }
+        let badges = deviceBadge.filter { tokens.contains($0.key) }
         Task { [weak self] in
-            let invalid = await APNsSender.shared.send(to: tokens, title: title, body: body, sessionId: sessionId, config: cfg)
+            let invalid = await APNsSender.shared.send(to: tokens, title: title, body: body,
+                                                       sessionId: sessionId, badges: badges, config: cfg)
             if !invalid.isEmpty {
-                await MainActor.run { self?.pushDeviceTokens.removeAll { invalid.contains($0) } }
+                await MainActor.run {
+                    self?.pushDeviceTokens.removeAll { invalid.contains($0) }
+                    invalid.forEach { self?.deviceBadge[$0] = nil }   // prune stale badge entries too
+                }
             }
         }
     }
@@ -1781,7 +1991,8 @@ class AppState: ObservableObject {
             fh.seekToEndOfFile()
             if let d = line.data(using: .utf8) { fh.write(d) }
         } else {
-            try? line.data(using: .utf8)?.write(to: url)
+            do { try line.data(using: .utf8)?.write(to: url) }
+            catch { Log.failure("app", "フィードバックログの書き込みに失敗 (\(url.path))", error) }
         }
     }
 
@@ -2072,6 +2283,11 @@ class AppState: ObservableObject {
             // Backend health: a real reply = healthy; an empty turn = a failure signal.
             self.recordBackendOutcome(ok: !final.isEmpty)
 
+            // Mark this employee as having an unread response if the user switched away.
+            if !isActive, !final.isEmpty, let empId = owningEmployeeId {
+                self.employeeUnreadIds.insert(empId)
+            }
+
             // Finalize the bubble in the shadow array (always — needed if user switches back).
             if let idx = self.empMessages[owningKey]?.firstIndex(where: { $0.id == assistantId }) {
                 self.empMessages[owningKey]![idx].elapsed = Date().timeIntervalSince(started)
@@ -2127,6 +2343,19 @@ class AppState: ObservableObject {
                 }
             }
             self.bindSession(turnSession, toEmployee: owningEmployeeId)
+
+            // ライフログ: Hermes チャットセッションを Mac アクティビティとして記録
+            if !final.isEmpty {
+                let empName = self.employees.first { $0.id == owningEmployeeId }?.name ?? "Hermes"
+                let sessionTitle = self.sessions.first { $0.id == turnSession }?.title ?? ""
+                MacActivityLogger.shared.recordHermesSession(
+                    employeeName: empName,
+                    sessionTitle: sessionTitle,
+                    start: started,
+                    end: Date()
+                )
+            }
+
             // Turn complete — the store is authoritative; clear the in-flight shadow. Clearing the
             // live-turn marker makes any still-queued onEvent callbacks no-op. Only clear if it's
             // still OURS (a newer turn for this key may have already claimed the slot).
@@ -2731,90 +2960,6 @@ class AppState: ObservableObject {
     var busyEmployees: [Employee] { employees.filter { isEmployeeBusy($0.id) } }
     /// Apps with a live dev-server.
     var runningApps: [AppProject] { apps.filter { runningAppIds.contains($0.id) } }
-
-    /// Compact factual snapshot of "today" fed to the AI brief writer.
-    private func dailyBriefContext() -> String {
-        let df = DateFormatter(); df.locale = Locale(identifier: "ja_JP"); df.dateFormat = "M月d日(E)"
-        let tf = DateFormatter(); tf.locale = Locale(identifier: "ja_JP"); tf.dateFormat = "HH:mm"
-        var lines: [String] = ["日付: \(df.string(from: Date()))"]
-        let ev = todayEvents
-        lines.append("今日の予定(\(ev.count)件): " + (ev.isEmpty ? "なし" :
-            ev.prefix(8).map { ($0.allDay ? "終日 " : tf.string(from: Date(timeIntervalSince1970: $0.date)) + " ") + $0.title }.joined(separator: " / ")))
-        let todo = tasks(status: .todo), doing = tasks(status: .doing)
-        lines.append("タスク: 未着手\(todo.count) / 対応中\(doing.count) / 完了\(tasks(status: .done).count)")
-        let pending = (doing + todo).prefix(8).map { t -> String in
-            let who = t.assigneeId.flatMap { id in employees.first { $0.id == id }?.name }.map { "（\($0)）" } ?? ""
-            return "\(t.title)\(who)"
-        }
-        if !pending.isEmpty { lines.append("対応中/未着手の主なタスク: " + pending.joined(separator: " / ")) }
-        let building = apps.filter { $0.status == .building }
-        if !building.isEmpty { lines.append("開発中アプリ: " + building.map { $0.name }.joined(separator: " / ")) }
-        if !runningApps.isEmpty { lines.append("起動中アプリ: " + runningApps.map { $0.name }.joined(separator: " / ")) }
-        lines.append("社員数: \(employees.count)人" + (busyEmployees.isEmpty ? "" : "（作業中: \(busyEmployees.map { $0.name }.joined(separator: "、"))）"))
-        if monthlyBudgetUSD > 0 { lines.append(String(format: "今月のコスト: $%.2f / 予算 $%.2f", totalCostUSD, monthlyBudgetUSD)) }
-        return lines.joined(separator: "\n")
-    }
-
-    /// Write today's daily brief with the agent (one-shot), persisting the result + time.
-    /// Races the model against a timeout so a slow/stuck model can't pin the card on "生成中…";
-    /// on timeout/failure it falls back to a deterministic computed brief.
-    func generateDailyBrief() async {
-        guard !isGeneratingBrief else { return }
-        isGeneratingBrief = true
-        defer { isGeneratingBrief = false }
-        let prompt = """
-        あなたは有能な秘書です。以下の社内データをもとに、今日の「デイリーブリーフ」を日本語で簡潔に書いてください。
-        ルール: 挨拶や前置きは書かない。まず2〜3文で今日の概況、続けて「今日の重点」として箇条書きを最大3つ。誇張せず事実ベースで。データが少なければ無理に埋めない。
-
-        【今日のデータ】
-        \(dailyBriefContext())
-        """
-        // Race the AI call vs a 40s timeout (the model may hang).
-        let stdout: String? = await withTaskGroup(of: String?.self) { group in
-            group.addTask { await HermesCLI.shared.exec(args: ["chat", "-q", prompt]).stdout }
-            group.addTask { try? await Task.sleep(nanoseconds: 40_000_000_000); return nil }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
-        }
-        let text = stdout.map { parseResponseText($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-        // Treat an error/empty response as failure → deterministic fallback (so the card never
-        // shows a raw "HTTP 429 / API call failed" line as if it were the brief).
-        if text.isEmpty || looksLikeErrorResponse(text) {
-            dailyBrief = computedBrief()
-            dailyBriefAt = Date().timeIntervalSince1970
-            let hint = looksLikeErrorResponse(text) ? "（モデルがエラーを返しました：\(String(text.prefix(80)))）" : "（モデルが応答しませんでした）"
-            triggerToast(message: "簡易ブリーフを表示しました\(hint)")
-        } else {
-            dailyBrief = text
-            dailyBriefAt = Date().timeIntervalSince1970
-        }
-    }
-
-    /// Heuristic: does the model's text look like an error banner rather than a real reply?
-    private func looksLikeErrorResponse(_ text: String) -> Bool {
-        let l = text.lowercased()
-        let markers = ["api call failed", "http 4", "http 5", "429", "rate limit", "limit exceeded",
-                       "too many tokens", "insufficient", "unauthorized", "invalid api key",
-                       "no endpoints", "error:", "エラー:", "failed after"]
-        // Short + contains a marker → very likely an error (real briefs are multi-sentence).
-        return markers.contains { l.contains($0) } && text.count < 400
-    }
-
-    /// Deterministic fallback brief built directly from today's data (no model needed).
-    private func computedBrief() -> String {
-        let ev = todayEvents
-        let todo = tasks(status: .todo), doing = tasks(status: .doing)
-        var parts: [String] = []
-        parts.append(ev.isEmpty ? "本日の登録予定はありません。" : "本日の予定は\(ev.count)件です。")
-        parts.append("未完了タスクは\(todo.count + doing.count)件（対応中\(doing.count)・未着手\(todo.count)）。")
-        if !runningApps.isEmpty { parts.append("起動中アプリ: \(runningApps.map { $0.name }.joined(separator: "、"))。") }
-        if !busyEmployees.isEmpty { parts.append("作業中の社員: \(busyEmployees.map { $0.name }.joined(separator: "、"))。") }
-        var s = parts.joined(separator: " ")
-        let focus = (doing + todo).prefix(3).map { "・\($0.title)" }
-        if !focus.isEmpty { s += "\n\n今日の重点:\n" + focus.joined(separator: "\n") }
-        return s
-    }
 
     func generateAutomationSuggestions() async {
         isGeneratingSuggestions = true

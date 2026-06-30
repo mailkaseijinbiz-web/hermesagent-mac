@@ -163,10 +163,11 @@ struct AutomationsView: View {
                 }
             }
             .padding(.horizontal, 32)
-            .padding(.vertical, 24)
+            .padding(.top, 52).padding(.bottom, 24)
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)   // 広い窓では中央寄せ（左に寄って間延びしないように）
         }
+        .ignoresSafeArea(edges: .top)
         .onAppear {
             appState.fetchAutomationResults()
             appState.fetchChannels()
@@ -569,24 +570,6 @@ struct CronJobRow: View {
                     Text("スケジュール: \(Self.humanSchedule(job.schedule))  |  配信: \(Self.humanDeliver(job.deliver, channels: appState.channels))")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                    
-                    if let script = job.script {
-                        Text("スクリプト: \(script)")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    if !job.nextRun.isEmpty {
-                        Text("次回実行: \(Self.friendlyTime(job.nextRun))")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary.opacity(0.8))
-                    }
-
-                    if let lastRun = job.lastRun {
-                        Text("前回実行: \(Self.friendlyTime(lastRun))")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary.opacity(0.6))
-                    }
 
                     if let err = job.lastError, !err.isEmpty {
                         HStack(alignment: .top, spacing: 4) {

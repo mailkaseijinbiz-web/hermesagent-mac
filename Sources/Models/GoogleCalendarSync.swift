@@ -40,6 +40,8 @@ final class GoogleCalendarSync: ObservableObject {
             lastSyncStatus = "同期完了（\(fetched.count) 件）"
         } catch {
             lastSyncStatus = "同期失敗: \(error.localizedDescription)"
+            // UI を開いていなくても診断できるよう、失敗は app.log にも残す。
+            Log.failure("sync", "Google カレンダー同期に失敗", error)
         }
     }
 

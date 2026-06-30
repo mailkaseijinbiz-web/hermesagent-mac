@@ -97,6 +97,7 @@ extension AppState {
             recordSessionOwner(currentSessionId, curId)
         }
         activeEmployeeId = id
+        if let id { employeeUnreadIds.remove(id) }
         let newKey = empKey(id)
 
         // If the full-screen employee detail is open, follow the sidebar selection so picking a

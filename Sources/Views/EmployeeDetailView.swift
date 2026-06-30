@@ -575,12 +575,20 @@ private struct EmpFilesTab: View {
     let employee: Employee
     @State private var current: String? = nil   // current directory within the workspace
     @State private var entries: [DirEntry] = []
+    @State private var previewEntry: DirEntry? = nil  // non-nil → show inline file preview
 
     private var root: String? { employee.workspacePath }
 
+    private static let previewExtensions: Set<String> = [
+        "md", "markdown", "txt",
+        "png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "bmp", "tiff", "tif"
+    ]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if root == nil {
+            if let entry = previewEntry {
+                FilePreviewPanel(entry: entry) { previewEntry = nil }
+            } else if root == nil {
                 noWorkspaceState
             } else {
                 toolbar
@@ -599,6 +607,7 @@ private struct EmpFilesTab: View {
         // Re-root if the workspace folder changed while the tab is open.
         .onChange(of: employee.workspacePath) { _, newRoot in
             current = newRoot
+            previewEntry = nil
             reload()
         }
     }
@@ -673,8 +682,16 @@ private struct EmpFilesTab: View {
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.05), lineWidth: 0.5))
         .contentShape(Rectangle())
         .onTapGesture {
-            if entry.isDir { current = entry.id; reload() }
-            else { NSWorkspace.shared.open(entry.url) }
+            if entry.isDir {
+                current = entry.id; reload()
+            } else {
+                let ext = (entry.name as NSString).pathExtension.lowercased()
+                if Self.previewExtensions.contains(ext) {
+                    previewEntry = entry
+                } else {
+                    NSWorkspace.shared.open(entry.url)
+                }
+            }
         }
     }
 
@@ -750,6 +767,124 @@ private struct EmpFilesTab: View {
         case "mp4", "mov", "m4v": return "film"
         case "mp3", "wav", "m4a": return "music.note"
         default: return "doc"
+        }
+    }
+}
+
+// MARK: - File preview panel (MD / image inline viewer)
+
+private struct FilePreviewPanel: View {
+    let entry: DirEntry
+    let onDismiss: () -> Void
+
+    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "bmp", "tiff", "tif"]
+    private static let textExtensions: Set<String> = ["md", "markdown", "txt"]
+
+    private var ext: String { (entry.name as NSString).pathExtension.lowercased() }
+    private var isImage: Bool { Self.imageExtensions.contains(ext) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header bar with back button
+            HStack(spacing: 8) {
+                Button(action: onDismiss) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
+                        Text("戻る").font(.system(size: 12))
+                    }
+                    .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
+                Divider().frame(height: 14)
+                Image(systemName: isImage ? "photo" : "doc.text")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                Text(entry.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([entry.url])
+                } label: {
+                    Image(systemName: "folder").font(.system(size: 11)).foregroundColor(.secondary)
+                }.buttonStyle(.plain).help("Finderで表示")
+                Button {
+                    NSWorkspace.shared.open(entry.url)
+                } label: {
+                    Image(systemName: "arrow.up.forward.app").font(.system(size: 11)).foregroundColor(.secondary)
+                }.buttonStyle(.plain).help("外部アプリで開く")
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(Color.primary.opacity(0.03)).cornerRadius(10)
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
+
+            Spacer().frame(height: 12)
+
+            if isImage {
+                ImagePreview(path: entry.id)
+            } else {
+                MarkdownPreview(path: entry.id)
+            }
+        }
+    }
+}
+
+private struct ImagePreview: View {
+    let path: String
+
+    var body: some View {
+        if let img = NSImage(contentsOfFile: path) {
+            ScrollView([.horizontal, .vertical]) {
+                Image(nsImage: img)
+                    .resizable()
+                    .scaledToFit()
+                    .cornerRadius(8)
+                    .frame(maxWidth: .infinity)
+            }
+        } else {
+            Text("画像を読み込めませんでした").font(.system(size: 12)).foregroundColor(.secondary)
+                .frame(maxWidth: .infinity).padding(.vertical, 20)
+        }
+    }
+}
+
+private struct MarkdownPreview: View {
+    let path: String
+    @State private var content: String = ""
+
+    var body: some View {
+        ScrollView {
+            if let attr = try? AttributedString(
+                markdown: content,
+                options: .init(interpretedSyntax: .full)
+            ) {
+                Text(attr)
+                    .font(.system(size: 12))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
+            } else {
+                Text(content)
+                    .font(.system(size: 12, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
+            }
+        }
+        .onAppear { loadContent() }
+    }
+
+    private func loadContent() {
+        guard let data = FileManager.default.contents(atPath: path),
+              let str = String(data: data, encoding: .utf8)
+               ?? String(data: data, encoding: .isoLatin1) else {
+            content = "（ファイルを読み込めませんでした）"
+            return
+        }
+        // Cap at 200 kB to avoid freezing the UI with huge files.
+        if str.utf8.count > 200_000 {
+            content = String(str.prefix(200_000)) + "\n\n…（以降省略）"
+        } else {
+            content = str
         }
     }
 }

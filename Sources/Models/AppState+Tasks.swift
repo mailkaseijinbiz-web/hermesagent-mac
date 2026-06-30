@@ -138,6 +138,12 @@ extension AppState {
         workTasks[idx].updatedAt = Date().timeIntervalSince1970
     }
 
+    func updateTaskDetail(_ taskId: String, _ detail: String) {
+        guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }
+        workTasks[idx].detail = detail
+        workTasks[idx].updatedAt = Date().timeIntervalSince1970
+    }
+
     /// 締め切り期限を設定/解除（nil で解除）。
     func setTaskDue(_ taskId: String, _ due: Double?) {
         guard let idx = workTasks.firstIndex(where: { $0.id == taskId }) else { return }

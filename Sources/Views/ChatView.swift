@@ -721,10 +721,11 @@ struct MessageBlock: View {
         return out
     }
 
-    /// A piece of a reply: prose or a fenced code block.
+    /// A piece of a reply: prose, a fenced code block, or a chart.
     enum Segment {
         case text(String)
         case code(lang: String, body: String)
+        case chart(lang: String, body: String)  // ```chart / ```chart-bar / etc.
     }
 
     /// Split a reply on ``` fences so code renders monospace with a copy button.
@@ -740,7 +741,9 @@ struct MessageBlock: View {
             buf.removeAll()
         }
         func flushCode() {
-            segs.append(.code(lang: lang, body: buf.joined(separator: "\n")))
+            let body = buf.joined(separator: "\n")
+            let isChart = lang == "chart" || lang.hasPrefix("chart-") || lang == "graph"
+            segs.append(isChart ? .chart(lang: lang, body: body) : .code(lang: lang, body: body))
             buf.removeAll(); lang = ""
         }
         for line in s.components(separatedBy: "\n") {
@@ -812,32 +815,26 @@ struct MessageBlock: View {
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
                     if !msg.content.isEmpty {
-                        if msg.typewriter {
-                            // Plain during streaming (partial markdown would flicker).
-                            TypewriterText(fullText: msg.content)
-                                .font(.system(size: 14))
-                                .foregroundColor(msg.isError ? .red : .primary)
-                                .lineSpacing(4)
-                                .textSelection(.enabled)
-                        } else {
-                            // Final: split fenced code blocks out for monospace + copy.
-                            // File links are pulled out into chips below, so strip them here.
-                            VStack(alignment: .leading, spacing: 8) {
-                                ForEach(Array(MessageBlock.segments(MessageBlock.stripFileLinks(msg.content)).enumerated()), id: \.offset) { _, seg in
-                                    switch seg {
-                                    case .text(let t):
-                                        ProseView(text: t, isError: msg.isError)
-                                    case .code(let lang, let body):
-                                        CodeBlockView(language: lang, code: body)
-                                    }
+                        // Always render markdown (updates live while streaming). File links are
+                        // stripped to their name here and shown as chips below — so the long raw
+                        // file:// URLs never appear, even mid-stream.
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(MessageBlock.segments(MessageBlock.stripFileLinks(msg.content)).enumerated()), id: \.offset) { _, seg in
+                                switch seg {
+                                case .text(let t):
+                                    ProseView(text: t, isError: msg.isError)
+                                case .code(let lang, let body):
+                                    CodeBlockView(language: lang, code: body)
+                                case .chart(let lang, let body):
+                                    ChartBlockView(language: lang, json: body)
                                 }
                             }
                         }
                     }
 
                     // File links in the reply → clickable file chips (real file icon + name,
-                    // opens on tap). Shown once streaming has finished.
-                    if msg.role == .assistant, !msg.typewriter {
+                    // opens on tap). Appear as soon as a complete link has streamed in.
+                    if msg.role == .assistant {
                         let files = MessageBlock.fileLinks(msg.content)
                         if !files.isEmpty {
                             VStack(alignment: .leading, spacing: 6) {
@@ -1018,6 +1015,16 @@ struct FileChipView: View {
         }
         .buttonStyle(.plain)
         .help(path)
+        .contextMenu {
+            Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } label: {
+                Label("Finderで開く", systemImage: "folder")
+            }
+            Button { open() } label: { Label("ファイルを開く", systemImage: "arrow.up.forward.app") }
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(path, forType: .string)
+            } label: { Label("パスをコピー", systemImage: "doc.on.doc") }
+        }
     }
 
     private func open() {
@@ -1039,7 +1046,7 @@ struct ProseView: View {
     let isError: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 11) {
             ForEach(Array(MessageBlock.blocks(text).enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .heading(let level, let t):
@@ -1047,7 +1054,7 @@ struct ProseView: View {
                         .font(.system(size: headingSize(level), weight: level <= 2 ? .bold : .semibold))
                         .foregroundColor(isError ? .red : .primary)
                         .textSelection(.enabled)
-                        .padding(.top, 2)
+                        .padding(.top, 4)
                 case .bullet(let t):
                     listRow(marker: "•", text: t)
                 case .ordered(let marker, let t):
@@ -1058,7 +1065,7 @@ struct ProseView: View {
                         Text(MessageBlock.markdown(t))
                             .font(.system(size: 13))
                             .foregroundColor(.secondary)
-                            .lineSpacing(4)
+                            .lineSpacing(6)
                             .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                         Spacer(minLength: 0)
@@ -1070,7 +1077,7 @@ struct ProseView: View {
                     Text(MessageBlock.markdown(t))
                         .font(.system(size: 14))
                         .foregroundColor(isError ? .red : .primary)
-                        .lineSpacing(4)
+                        .lineSpacing(6)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }

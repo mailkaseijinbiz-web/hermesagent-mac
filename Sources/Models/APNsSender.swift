@@ -21,7 +21,8 @@ actor APNsSender {
     /// Returns device tokens that APNs reported as invalid (410 / Unregistered /
     /// BadDeviceToken) so the caller can purge them.
     @discardableResult
-    func send(to deviceTokens: [String], title: String, body: String, sessionId: String?, config: Config) async -> [String] {
+    func send(to deviceTokens: [String], title: String, body: String, sessionId: String?,
+              badges: [String: Int] = [:], config: Config) async -> [String] {
         guard !deviceTokens.isEmpty,
               !config.keyId.isEmpty, !config.teamId.isEmpty,
               let jwt = providerJWT(config: config) else { return [] }
@@ -29,16 +30,18 @@ actor APNsSender {
         var invalidTokens: [String] = []
         let host = config.useSandbox ? "api.sandbox.push.apple.com" : "api.push.apple.com"
 
-        var aps: [String: Any] = [
-            "alert": ["title": title, "body": body],
-            "sound": "default"
-        ]
-        aps["thread-id"] = sessionId ?? "hermes"
-        var payload: [String: Any] = ["aps": aps]
-        if let sid = sessionId { payload["sessionId"] = sid }
-        guard let bodyData = try? JSONSerialization.data(withJSONObject: payload) else { return [] }
-
         for token in deviceTokens {
+            // Per-token payload so each device gets its own app-icon badge count.
+            var aps: [String: Any] = [
+                "alert": ["title": title, "body": body],
+                "sound": "default"
+            ]
+            aps["thread-id"] = sessionId ?? "hermes"
+            if let badge = badges[token] { aps["badge"] = badge }
+            var payload: [String: Any] = ["aps": aps]
+            if let sid = sessionId { payload["sessionId"] = sid }
+            guard let bodyData = try? JSONSerialization.data(withJSONObject: payload) else { continue }
+
             guard let url = URL(string: "https://\(host)/3/device/\(token)") else { continue }
             var req = URLRequest(url: url)
             req.httpMethod = "POST"

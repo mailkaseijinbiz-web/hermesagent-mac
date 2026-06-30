@@ -27,10 +27,11 @@ struct ScheduleView: View {
                 Divider().opacity(0.5)
                 dayEvents
             }
-            .padding(.horizontal, 32).padding(.vertical, 24)
+            .padding(.horizontal, 32).padding(.top, 52).padding(.bottom, 24)
             .frame(maxWidth: 940)
             .frame(maxWidth: .infinity, alignment: .center)
         }
+        .ignoresSafeArea(edges: .top)
         .sheet(item: $editor) { t in
             EventEditSheet(existing: t.existing, defaultDay: selectedDay).environmentObject(appState)
         }

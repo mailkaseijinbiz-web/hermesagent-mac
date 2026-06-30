@@ -2,7 +2,16 @@ import SwiftUI
 
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var gmailSync = GmailSync.shared
     @State private var isSettingsHovered = false
+
+    private var hasUnreadGmail: Bool {
+        gmailSync.threads.contains(where: \.hasUnread)
+    }
+
+    private var hasUnreadTasks: Bool {
+        appState.workTasks.contains(where: { $0.status == .todo })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -11,13 +20,15 @@ struct SidebarView: View {
 
             // Core Menu Actions
             VStack(spacing: 2) {
-                SidebarMenuButton(icon: "square.grid.2x2", title: "ダッシュボード") {
+                SidebarMenuButton(icon: "square.grid.2x2", title: "ダッシュボード",
+                                  hasBadge: hasUnreadGmail) {
                     appState.view = "dashboard"
                 }
                 SidebarMenuButton(icon: "person.3", title: appState.companyDisplayName) {
                     appState.view = "company"
                 }
-                SidebarMenuButton(icon: "checklist", title: "タスク") {
+                SidebarMenuButton(icon: "checklist", title: "タスク",
+                                  hasBadge: hasUnreadTasks) {
                     appState.view = "tasks"
                 }
                 SidebarMenuButton(icon: "clock", title: "オートメーション") {
@@ -25,6 +36,12 @@ struct SidebarView: View {
                     Task {
                         await appState.fetchCronJobs()
                     }
+                }
+                SidebarMenuButton(icon: "newspaper", title: "ニュース") {
+                    appState.view = "news"
+                }
+                SidebarMenuButton(icon: "clock.arrow.circlepath", title: "ライフログ") {
+                    appState.view = "lifelog"
                 }
             }
             .padding(.horizontal, 12)
@@ -93,8 +110,17 @@ struct SidebarView: View {
     // 1社員の行。
     private func employeeRow(_ emp: Employee) -> some View {
         let active = appState.activeEmployeeId == emp.id
+        let hasUnread = appState.employeeUnreadIds.contains(emp.id)
         return HStack(spacing: 8) {
-            EmployeeAvatar(employee: emp, size: 34)
+            ZStack(alignment: .topTrailing) {
+                EmployeeAvatar(employee: emp, size: 34)
+                if hasUnread {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 9, height: 9)
+                        .offset(x: 2, y: -2)
+                }
+            }
             if emp.isPinned {
                 Image(systemName: "pin.fill").font(.system(size: 8)).foregroundColor(.orange)
             }
@@ -197,14 +223,23 @@ struct SidebarView: View {
 struct SidebarMenuButton: View {
     let icon: String
     let title: String
+    var hasBadge: Bool = false
     let action: () -> Void
     @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: icon)
-                .frame(width: 16)
-                .foregroundColor(isHovered ? .primary : .secondary)
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: icon)
+                    .frame(width: 16)
+                    .foregroundColor(isHovered ? .primary : .secondary)
+                if hasBadge {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 7, height: 7)
+                        .offset(x: 4, y: -3)
+                }
+            }
             Text(title)
                 .font(.system(size: 14, weight: .regular))
                 .foregroundColor(isHovered ? .primary : .secondary)

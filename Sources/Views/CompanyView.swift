@@ -61,9 +61,10 @@ struct CompanyView: View {
                     teamsSection
                 }
             }
-            .padding(.horizontal, 32).padding(.vertical, 24)
+            .padding(.horizontal, 32).padding(.top, 52).padding(.bottom, 24)
             .frame(maxWidth: 820)
         }
+        .ignoresSafeArea(edges: .top)
         .sheet(isPresented: $showHire) { HireSheet().environmentObject(appState) }
         .sheet(isPresented: $showMeeting) { MeetingSheet().environmentObject(appState) }
         .onAppear { appState.refreshUsage() }
