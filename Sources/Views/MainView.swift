@@ -106,8 +106,6 @@ struct MainView: View {
                         CompanyView()
                     } else if appState.view == "employee" {
                         EmployeeDetailView()
-                    } else if appState.view == "news" {
-                        NewsView()
                     } else if appState.view == "gmail" {
                         GmailView()
                     } else if appState.view == "schedule" {
@@ -118,9 +116,16 @@ struct MainView: View {
                         AppsView()
                     } else if appState.view == "automations" {
                         AutomationsView()
+                    } else if appState.view == "news" {
+                        MacNewsView()
+                    } else if appState.view == "lifelog" {
+                        MacLifeLogView()
                     } else {
                         ChatView()
                     }
+
+                    // ヘッダー下のグラデーション（コンテンツが被らないよう徐々に透明に）
+                    headerFadeGradient
 
                     // Header row: title (件名) + workspace badge on the left, action
                     // icons on the right — all on one aligned line with even padding.
@@ -171,6 +176,28 @@ struct MainView: View {
         }
     }
 
+    /// ヘッダー直下に置くグラデーション層。スクロールコンテンツとタイトルが重ならないよう
+    /// ウィンドウ背景色 → 透明 にフェードさせる。クリックは下層に透過。
+    private var headerFadeGradient: some View {
+        let bg = colorScheme == .dark
+            ? Color(red: 0.07, green: 0.07, blue: 0.08)
+            : Color.white
+        return LinearGradient(
+            stops: [
+                .init(color: bg,              location: 0.0),
+                .init(color: bg,              location: 0.55),
+                .init(color: bg.opacity(0.7), location: 0.75),
+                .init(color: bg.opacity(0),   location: 1.0),
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .frame(height: 80)
+        .frame(maxWidth: .infinity, alignment: .top)
+        .ignoresSafeArea(.container, edges: .top)
+        .allowsHitTesting(false)
+    }
+
     /// The title shown in the header (current chat 件名, or the active section name).
     private var headerTitle: String {
         switch appState.view {
@@ -181,6 +208,8 @@ struct MainView: View {
         case "tasks": return "タスク"
         case "apps": return "アプリ"
         case "automations": return "オートメーション"
+        case "news":        return "ニュース"
+        case "lifelog":     return "ライフログ"
         case "settings": return "設定"
         default:
             if let emp = appState.activeEmployee {

@@ -35,6 +35,7 @@ struct AppsView: View {
                 listContent
             } else {
                 ScrollView { listContent }
+                    .ignoresSafeArea(edges: .top)
             }
         }
         .sheet(item: $editor) { t in AppEditSheet(existing: t.existing).environmentObject(appState) }
@@ -51,7 +52,8 @@ struct AppsView: View {
                 }
             }
         }
-        .padding(.horizontal, embedded ? 2 : 32).padding(.vertical, embedded ? 4 : 24)
+        .padding(.horizontal, embedded ? 2 : 32)
+        .padding(.top, embedded ? 4 : 52).padding(.bottom, embedded ? 4 : 24)
         .frame(maxWidth: embedded ? .infinity : 940)
         .frame(maxWidth: .infinity, alignment: embedded ? .leading : .center)
     }

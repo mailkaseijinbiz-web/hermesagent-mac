@@ -4,6 +4,26 @@
 
 ---
 
+## 📅 2026-06-30 更新ログ
+
+**前回（06-28）から進んだこと**
+- 🚧 **大型の新機能「パーソナルAI ダッシュボード」が作業中（未コミット・約 +1,655 行 / -542 行）**。[personal-ai-direction] のビジョンを具体化する初の本格実装。内訳：
+  - **ベントーUI**（`DashboardView.swift` +474）：ドラッグ/リサイズ可能なウィジェット盤（`WidgetTile`、`compact()` で自動詰め）。`view` の既定が `dashboard` に変更（起動時の着地点が会話→ダッシュボードへ）。
+  - **MobileServer 大幅拡張**（+569 / 新ハンドラ 20・新ルート約22）：`/api/profile`（likes/goals/values）、`/api/self`＋`/api/self-graph`（自己モデル/グラフ）、`/api/location`・`/api/photos`（iOS から足あと・写真要約を受信）、`/api/review`（週次メタ認知レビュー生成）、`/api/dashboard/brief`、`/api/badge/clear`、`/api/stocks`・`/api/sauna-news`・`/api/mac-activity`、`/api/employees/{id}/file`。
+  - **AppState 本体に +522**：`dashboardLayout` / `dailyHistory` / `weeklyReview` / `locationSummary`＋`locationPoints` / `photoSummary` / `personalProfile` / `selfModel` / `employeeUnreadIds` など **新規 @Published 約14** と新モデル群を追加。
+  - 付随：`EmployeeDetailView`(+141)、`SidebarView`(+41 / 未読バッジ)、`ChatView`(+42)。
+- ✅ **dead code 削除がステージ済み**：`StructuredOutput.swift` / `NewsView.swift` / `OutputModeViews.swift`（計 -354）。06-28 で「機能判断待ち」だった **News 本体も撤去方向で確定**。
+- ✅ **`AppState` 分割の効果が数字に**：本体は **5,041 → 3,454 行**（22 extension へ継続切り出し）。Chat/Employee/Provider/Schedule/Lifecycle まで分離完了。
+
+**今日見つかった懸念（要対応）**
+- 🔴 **未コミットの巨大差分（+1,655 行）がテスト 0 のまま積み上がっている**。ユニットテストは **45 funcs のまま**で、新機能（レイアウト詰め `compact`/`overlaps`、`SelfModel` JSON 往復、レビュー生成パース）は純粋ロジックでテスト可能なのに未カバー。→ **コヒーレントな単位でコミット＋純粋ロジックの回帰テスト追加**を最優先（神オブジェクト分割で得た安全性を、無テストの大型機能で食い潰さない）。
+- 🟠 **アーキ退行リスク**：新パーソナルAIドメインが分割規律に反して **本体 `AppState.swift` に直書き**され、本体 @Published が **126 → 140** に再増加。→ `#3` の作法に合わせ **`AppState+PersonalAI`（または `+Dashboard`）extension へ隔離**すべき。
+- 🟠 **プライバシー（保存時暗号化）**：位置情報（`locationPoints`）・写真要約・`personalProfile`・`selfModel` という **高機微 PII が平文 UserDefaults に永続化**。認可は Google サインインゲート配下で OK だが、パーソナルAI化で機微度が上がったため **at-rest 暗号化方針**（Keychain ラップ鍵 + 暗号化ファイル等）の決定が必要。
+- 🟡 **パストラバーサル境界**：`/api/employees/{id}/file` の許可判定が `full.hasPrefix(workspace)` のみ。`workspace` と兄弟ディレクトリ（`<ws>-evil`）を通す恐れ。→ **末尾 `/` を付与した接頭辞判定 or 正規化後の包含チェック**へ。
+- 🟡 **iOS パリティ・ギャップが最大化**：`/api/location`・`/api/photos` の **送信側（iOS の足あと/写真要約プロデューサ）** とベントー盤の閲覧が iOS 未実装。新機能が Mac 先行で、薄クライアント方針の差分が開いた。
+
+---
+
 ## 📅 2026-06-28 更新ログ
 
 **前回から進んだこと（直近コミット `#3 cont` / `#5` 系）**
@@ -17,10 +37,11 @@
 - ✅ **`UpdateManager` のシェル注入を解消**：`sh` を `(command, args, cwd)` 化し、ブランチ名/コミットSHA/リポジトリ・アプリパスを zsh の位置パラメータ（`$1`,`$2`）として渡すよう全呼び出しを変更（ログインシェルの env 互換は維持）。値がコードではなくデータとして扱われ、悪意あるブランチ名やメタ文字を含むパスでの脱出を防止。`UpdateManager.swift`。
 - ✅ **開発者個人 Apple Team ID のハードコード除去**：`apnsTeamId` の既定を空に（`AppState.swift:345`）。あわせて `sendPushIfEnabled` のガードに `!apnsTeamId.isEmpty` を追加し、未設定時に不正な JWT を作らないようにした（`AppState.swift:1521`）。
 - ✅ **未配線の構造化出力 dead code を除去**：`OutputModeViews.swift` から未使用の `OutputModePicker`/`StructuredOutputContainer`/`NewsSummaryView`/`NewsTimelineView`/`NewsTableView`/`EmptyStructuredState` を削除（`NewsView` が使う `NewsCardsView`/`NewsEntryCard`/`SourceLinkRow` は保持）。連動して全くレンダリングされていなかった `AppState.chatOutputMode`（`@Published`・UserDefaults 永続）と `OutputViewMode` enum も削除。**AppState の `@Published` は 127 → 126**、差分は約 -210 行。
+- ✅ **永続化の沈黙失敗を surface 化（`#2` 着手）**：状態保存系の `try?` を `do/catch + Log.failure` 化 — `saveJSON`（teams/tasks/artifacts 汎用）/ `saveSessionOwner` / `saveEmployees` / `saveModelHealth` / フィードバックログ書込。**最重要は `loadEmployees`**：「データは在るのにデコード失敗→空配列で握り潰し→次の保存で名簿全消去」（過去の "社員が全員消えた" の典型症状）を必ず ERROR ログに残すよう変更。
 - ✅ ビルド成功・既存ユニットテスト 45 件すべて green（`run_tests.sh`）。
 
 **まだ開いている / 今日見つかった事項**
-- ⚠️ **沈黙失敗がまだ多い**：`try?` 142 箇所に対し `Log./reportFailure` は 20 箇所のみ。`#2` の継続。
+- 🟡 **沈黙失敗の残り**：永続化系は対応したが、`try?` は全体でまだ多数。残りの多くは正当（`Task.sleep` / ベストエフォートな `removeItem` クリーンアップ / Optional 機能のデコード既定値）。次は **同期系（CloudKit/Gmail/Calendar）と MobileServer のレスポンス系** を精査して必要なものだけ surface 化する。`#2` 継続。
 - 🟡 **残る dead code 判断は機能レベル**：`NewsView`/`GmailView`/`ScheduleView` は `MainView` から依然参照 → News/Gmail/Schedule 機能を残すか撤去かの方針決定が先（独断で削除しない）。
 - ⬜ **iOS テスト 0 のまま / iOS CI 未新設**。Mac は CI 正常・テスト 45 funcs。
 - ⬜ **LINE 自己回復（health＋失効検知＋デッドレターキュー）未着手**。
@@ -33,11 +54,11 @@
 **強み**：`AgentBackend` 抽象化（Hermes/ACP/agy を統一・テスト可能）、社員ごとの並列実行（プロセス/ACP分離）、ステートレスな MobileServer、読み書き分離の永続化（read-only SQLite + WAL）、cron 自動化の完成度（株モニタ・Gmail→タスクの E2E 実証）。
 
 **核心課題**：
-1. 公開リポジトリ化に伴うセキュリティ露出
+1. 公開リポジトリ化に伴うセキュリティ露出（＋パーソナルAI化で **機微 PII の at-rest 暗号化**が新たに重要）
 2. 自動化スタックの障害回復力（実際に LINE 401 障害が発生）
-3. `AppState` が 5,041 行・122 `@Published` の神オブジェクト
-4. テスト網羅率が低い（Mac 約2.6% / iOS 0%）※ただし CI 自体は正常稼働中
-5. 単一ハブ依存（iOS はオフライン不可）
+3. `AppState` 本体は 3,454 行まで縮小（5,041 から）も **@Published 140**。新パーソナルAIドメインを本体直書きで再肥大化させた退行に注意
+4. テスト網羅率が低い（Mac 45 funcs / iOS 0%）。**未コミットの +1,655 行が無テスト**で積み上がり中
+5. 単一ハブ依存（iOS はオフライン不可）＋ **新ダッシュボードで iOS パリティ差が拡大**
 
 ---
 

@@ -37,6 +37,8 @@ final class GmailSync: ObservableObject {
             lastSyncStatus = "同期完了（\(threads.count) スレッド）"
         } catch {
             lastSyncStatus = "同期失敗: \(error.localizedDescription)"
+            // UI を開いていなくても診断できるよう、失敗は app.log にも残す。
+            Log.failure("sync", "Gmail 同期に失敗", error)
         }
     }
 

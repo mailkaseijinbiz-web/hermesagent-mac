@@ -305,6 +305,26 @@ class MobileServer {
             handlePushRegister(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/presence"):
             handlePresence(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/badge/clear"):
+            handleBadgeClear(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/dashboard/brief"):
+            handleBriefUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/profile"):
+            handleProfileGet(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/profile"):
+            handleProfileUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/self"):
+            handleSelfGet(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/self"):
+            handleSelfUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/location"):
+            handleLocationUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/photos"):
+            handlePhotosUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/review"):
+            handleReviewGet(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/review"):
+            handleReviewRegenerate(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/cron"):
             handleCronList(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/cron"):
@@ -337,6 +357,9 @@ class MobileServer {
             handleAppUpdate(connection: connection, id: String(pathOnly.dropFirst("/api/apps/".count)), body: body, corsHeaders: corsHeaders)
         case ("DELETE", _) where pathOnly.hasPrefix("/api/apps/"):
             handleAppDelete(connection: connection, id: String(pathOnly.dropFirst("/api/apps/".count)), corsHeaders: corsHeaders)
+        case ("POST", _) where pathOnly.hasPrefix("/api/apps/") && pathOnly.hasSuffix("/launch"):
+            let appId = String(pathOnly.dropFirst("/api/apps/".count).dropLast("/launch".count))
+            handleAppLaunch(connection: connection, id: appId, corsHeaders: corsHeaders)
         case ("GET", "/api/tasks"):
             handleTasksList(connection: connection, employeeId: query["employeeId"], corsHeaders: corsHeaders)
         case ("POST", "/api/tasks"):
@@ -357,6 +380,9 @@ class MobileServer {
             handleArtifactUpdate(connection: connection, id: String(pathOnly.dropFirst("/api/artifacts/".count)), body: body, corsHeaders: corsHeaders)
         case ("DELETE", _) where pathOnly.hasPrefix("/api/artifacts/"):
             handleArtifactDelete(connection: connection, id: String(pathOnly.dropFirst("/api/artifacts/".count)), corsHeaders: corsHeaders)
+        case ("GET", _) where pathOnly.hasPrefix("/api/employees/") && pathOnly.hasSuffix("/file"):
+            let id = String(pathOnly.dropFirst("/api/employees/".count).dropLast("/file".count))
+            handleEmployeeFile(connection: connection, employeeId: id, relPath: query["path"] ?? "", corsHeaders: corsHeaders)
         case ("GET", _) where pathOnly.hasPrefix("/api/employees/") && pathOnly.hasSuffix("/files"):
             let id = String(pathOnly.dropFirst("/api/employees/".count).dropLast("/files".count))
             handleEmployeeFiles(connection: connection, employeeId: id, corsHeaders: corsHeaders)
@@ -366,6 +392,22 @@ class MobileServer {
             handleGmailList(connection: connection, corsHeaders: corsHeaders)
         case ("GET", _) where pathOnly.hasPrefix("/api/gmail/"):
             handleGmailThread(connection: connection, threadId: String(pathOnly.dropFirst("/api/gmail/".count)), corsHeaders: corsHeaders)
+        case ("GET", "/api/self-graph"):
+            handleSelfGraphGet(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/self-graph/nodes"):
+            handleSelfGraphNodeUpsert(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("DELETE", _) where pathOnly.hasPrefix("/api/self-graph/nodes/"):
+            handleSelfGraphNodeDelete(connection: connection, id: String(pathOnly.dropFirst("/api/self-graph/nodes/".count)), corsHeaders: corsHeaders)
+        case ("POST", "/api/self-graph/links"):
+            handleSelfGraphLinkUpsert(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("DELETE", "/api/self-graph/links"):
+            handleSelfGraphLinkDelete(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/stocks"):
+            handleStocks(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", "/api/sauna-news"):
+            handleSaunaNews(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", "/api/mac-activity"):
+            handleMacActivity(connection: connection, corsHeaders: corsHeaders)
         default:
             sendResponse(connection: connection, status: 404, body: "{\"error\":\"Not Found\"}", corsHeaders: corsHeaders)
         }
@@ -839,6 +881,186 @@ class MobileServer {
         }
     }
 
+    /// A device foregrounded and consumed its updates — reset its app-icon badge counter.
+    /// Body: {token}.
+    private nonisolated func handleBadgeClear(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["token"] as? String, !token.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing token\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.clearBadge(token: token)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// Modify the dashboard daily brief from the mobile client. Body: {instruction} to
+    /// have the AI rewrite it ("チャットで修正"), or {text} to set it directly. Returns the
+    /// updated {brief, briefAt}.
+    private nonisolated func handleBriefUpdate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Bad body\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let text = (json["text"] as? String) ?? ""
+        let instruction = (json["instruction"] as? String) ?? ""
+        let regenerate = (json["regenerate"] as? Bool) ?? false
+        Task { @MainActor in
+            // An AI brief is already being written — tell the client to back off rather than
+            // silently no-op and return a stale brief as if it succeeded.
+            if (regenerate || !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
+               AppState.shared.isGeneratingBrief {
+                self.sendResponse(connection: connection, status: 409,
+                                  body: "{\"error\":\"brief is being generated\"}", corsHeaders: corsHeaders)
+                return
+            }
+            if regenerate {
+                await AppState.shared.generateDailyBrief()
+            } else if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                AppState.shared.setDailyBrief(text)
+            } else if !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                await AppState.shared.reviseDailyBrief(instruction: instruction)
+            } else {
+                self.sendResponse(connection: connection, status: 400,
+                                  body: "{\"error\":\"Missing text, instruction or regenerate\"}", corsHeaders: corsHeaders)
+                return
+            }
+            let resp: [String: Any] = ["brief": AppState.shared.dailyBrief, "briefAt": AppState.shared.dailyBriefAt]
+            if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// GET /api/profile — return the user's personal profile (likes/goals/values/notes).
+    private nonisolated func handleProfileGet(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let json = AppState.shared.profileJSON
+            if let d = try? JSONSerialization.data(withJSONObject: json), let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// POST /api/profile — update the personal profile. Body: {likes?, goals?, values?, notes?}.
+    private nonisolated func handleProfileUpdate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Bad body\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.setProfileFields(likes: json["likes"] as? String,
+                                             goals: json["goals"] as? String,
+                                             values: json["values"] as? String,
+                                             notes: json["notes"] as? String)
+            let resp = AppState.shared.profileJSON
+            if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// GET /api/self — return the user's self-model (memory allocations + work hours).
+    private nonisolated func handleSelfGet(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            self.sendResponse(connection: connection, status: 200,
+                              body: AppState.shared.selfModelJSONString, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/self — replace the self-model. Body: full SelfModel JSON.
+    private nonisolated func handleSelfUpdate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8), !body.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Bad body\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            guard AppState.shared.updateSelfModel(jsonData: data) else {
+                self.sendResponse(connection: connection, status: 400,
+                                  body: "{\"error\":\"Invalid self-model JSON\"}", corsHeaders: corsHeaders)
+                return
+            }
+            self.sendResponse(connection: connection, status: 200,
+                              body: AppState.shared.selfModelJSONString, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/location — iOSから今日の「足あと」サマリ（場所名＋時刻）を受け取る。
+    /// 生の座標は受け取らない（プライバシー）。Body: {summary}.
+    private nonisolated func handleLocationUpdate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let summary = json["summary"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing summary\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let points = (json["points"] as? [[String: Any]])?.compactMap { d -> AppState.LocationPoint? in
+            guard let name = d["name"] as? String,
+                  let lat = (d["lat"] as? NSNumber)?.doubleValue,
+                  let lon = (d["lon"] as? NSNumber)?.doubleValue else { return nil }
+            return AppState.LocationPoint(name: name, lat: lat, lon: lon)
+        } ?? []
+        Task { @MainActor in
+            AppState.shared.updateLocation(summary: summary, points: points)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/photos — iOSから今日の写真の要約（枚数/内訳/撮影場所など）を受け取る。
+    /// 写真そのものは受け取らない（プライバシー）。Body: {summary}.
+    private nonisolated func handlePhotosUpdate(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let summary = json["summary"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing summary\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.updatePhotoSummary(summary)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/review — return the latest weekly metacognitive review {review, reviewAt}.
+    private nonisolated func handleReviewGet(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let resp: [String: Any] = ["review": AppState.shared.weeklyReview, "reviewAt": AppState.shared.weeklyReviewAt]
+            if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// POST /api/review — (re)generate the weekly review from daily history. Returns the result.
+    private nonisolated func handleReviewRegenerate(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            if AppState.shared.isGeneratingReview {
+                self.sendResponse(connection: connection, status: 409,
+                                  body: "{\"error\":\"review is being generated\"}", corsHeaders: corsHeaders)
+                return
+            }
+            await AppState.shared.generateWeeklyReview()
+            let resp: [String: Any] = ["review": AppState.shared.weeklyReview, "reviewAt": AppState.shared.weeklyReviewAt]
+            if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
     // MARK: - Cron / automations (mobile)
 
     private nonisolated func handleCronList(connection: NWConnection, corsHeaders: String) {
@@ -956,6 +1178,7 @@ class MobileServer {
             "id": a.id, "name": a.name, "detail": a.detail, "status": a.status.rawValue,
             "previewURL": a.previewURL, "runCommand": a.runCommand,
             "folderName": (a.folderPath as NSString).lastPathComponent,
+            "isRunning": AppState.shared.isAppRunning(a.id),
             "createdAt": a.createdAt, "updatedAt": a.updatedAt
         ]
         if let id = a.assigneeId { d["assigneeId"] = id
@@ -1088,6 +1311,23 @@ class MobileServer {
         Task { @MainActor in
             AppState.shared.deleteApp(id)
             self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleAppLaunch(connection: NWConnection, id: String, corsHeaders: String) {
+        Task { @MainActor in
+            let s = AppState.shared
+            guard s.apps.contains(where: { $0.id == id }) else {
+                self.sendResponse(connection: connection, status: 404, body: "{\"error\":\"not found\"}", corsHeaders: corsHeaders)
+                return
+            }
+            if !s.isAppRunning(id) { s.launchApp(id) }
+            let empById = Dictionary(s.employees.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            if let a = s.apps.first(where: { $0.id == id }) {
+                self.sendJSON(connection: connection, ["status": "launching", "app": self.appDict(a, empById)], corsHeaders: corsHeaders)
+            } else {
+                self.sendJSON(connection: connection, ["status": "launching"], corsHeaders: corsHeaders)
+            }
         }
     }
 
@@ -1247,7 +1487,7 @@ class MobileServer {
                     let attrs = try? fm.attributesOfItem(atPath: full)
                     let size = (attrs?[.size] as? Int) ?? 0
                     let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-                    files.append(["name": name, "isDir": isDir.boolValue, "size": size, "modified": modified])
+                    files.append(["name": name, "isDir": isDir.boolValue, "size": size, "modified": modified, "path": name])
                 }
             }
             // Directories first, then files (both already alphabetical).
@@ -1364,5 +1604,385 @@ class MobileServer {
         guard let data = try? JSONSerialization.data(withJSONObject: obj),
               let json = String(data: data, encoding: .utf8) else { return }
         sendRaw(connection: connection, text: "data: \(json)\n\n")
+    }
+
+    // MARK: - Employee file download / directory browse
+
+    /// GET /api/employees/:id/file?path=relative/path
+    /// ファイル → バイナリ配信。ディレクトリ → ファイル一覧 JSON。
+    private nonisolated func handleEmployeeFile(connection: NWConnection, employeeId: String,
+                                                relPath: String, corsHeaders: String) {
+        Task { @MainActor in
+            guard let emp = AppState.shared.employees.first(where: { $0.id == employeeId }),
+                  let workspace = emp.workspacePath, !workspace.isEmpty else {
+                self.sendResponse(connection: connection, status: 404,
+                                  body: "{\"error\":\"No workspace\"}", corsHeaders: corsHeaders); return
+            }
+            // Sanitize: strip traversal components then resolve symlinks before checking containment.
+            // `hasPrefix(workspace)` alone allows sibling dirs like "<ws>-evil/" — use a trailing-slash bound.
+            let clean = relPath.components(separatedBy: "/")
+                .filter { !$0.isEmpty && $0 != ".." && $0 != "." }
+                .joined(separator: "/")
+            let full = clean.isEmpty ? workspace
+                                     : (workspace as NSString).appendingPathComponent(clean)
+            let resolvedFull = URL(fileURLWithPath: full).resolvingSymlinksInPath().path
+            let resolvedWs   = URL(fileURLWithPath: workspace).resolvingSymlinksInPath().path
+            let wsDir = resolvedWs.hasSuffix("/") ? resolvedWs : resolvedWs + "/"
+            guard resolvedFull == resolvedWs || resolvedFull.hasPrefix(wsDir) else {
+                self.sendResponse(connection: connection, status: 403,
+                                  body: "{\"error\":\"Forbidden\"}", corsHeaders: corsHeaders); return
+            }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: full, isDirectory: &isDir) else {
+                self.sendResponse(connection: connection, status: 404,
+                                  body: "{\"error\":\"Not found\"}", corsHeaders: corsHeaders); return
+            }
+            if isDir.boolValue {
+                // Return directory listing with relative paths
+                var files: [[String: Any]] = []
+                if let entries = try? FileManager.default.contentsOfDirectory(atPath: full) {
+                    for name in entries.sorted() where !name.hasPrefix(".") {
+                        let child = (full as NSString).appendingPathComponent(name)
+                        var childDir: ObjCBool = false
+                        FileManager.default.fileExists(atPath: child, isDirectory: &childDir)
+                        let attrs = try? FileManager.default.attributesOfItem(atPath: child)
+                        let size = (attrs?[.size] as? Int) ?? 0
+                        let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                        let childRel = clean.isEmpty ? name : "\(clean)/\(name)"
+                        files.append(["name": name, "isDir": childDir.boolValue,
+                                      "size": size, "modified": modified, "path": childRel])
+                    }
+                }
+                files.sort { (($0["isDir"] as? Bool) ?? false ? 0 : 1, ($0["name"] as? String) ?? "")
+                          <  (($1["isDir"] as? Bool) ?? false ? 0 : 1, ($1["name"] as? String) ?? "") }
+                let dirName = clean.isEmpty ? (workspace as NSString).lastPathComponent : (clean as NSString).lastPathComponent
+                self.sendJSON(connection: connection,
+                              ["isDir": true, "dirName": dirName, "files": files],
+                              corsHeaders: corsHeaders)
+            } else {
+                guard let data = FileManager.default.contents(atPath: full) else {
+                    self.sendResponse(connection: connection, status: 500,
+                                      body: "{\"error\":\"Read failed\"}", corsHeaders: corsHeaders); return
+                }
+                let ext = (full as NSString).pathExtension
+                self.sendBinaryResponse(connection: connection, data: data,
+                                        contentType: Self.mimeType(for: ext), corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    private nonisolated func sendBinaryResponse(connection: NWConnection, data: Data,
+                                                 contentType: String, corsHeaders: String) {
+        var header = "HTTP/1.1 200 OK\r\n"
+        header += "Content-Type: \(contentType)\r\n"
+        header += "Content-Length: \(data.count)\r\n"
+        header += corsHeaders
+        header += "Connection: close\r\n\r\n"
+        var response = Data(header.utf8)
+        response.append(data)
+        connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+    }
+
+    private nonisolated static func mimeType(for ext: String) -> String {
+        switch ext.lowercased() {
+        case "pdf":             return "application/pdf"
+        case "png":             return "image/png"
+        case "jpg", "jpeg":     return "image/jpeg"
+        case "gif":             return "image/gif"
+        case "webp":            return "image/webp"
+        case "svg":             return "image/svg+xml"
+        case "txt", "md":       return "text/plain; charset=utf-8"
+        case "html", "htm":     return "text/html; charset=utf-8"
+        case "csv":             return "text/csv; charset=utf-8"
+        case "json":            return "application/json"
+        case "zip":             return "application/zip"
+        case "mp4":             return "video/mp4"
+        case "mov":             return "video/quicktime"
+        case "mp3":             return "audio/mpeg"
+        case "wav":             return "audio/wav"
+        case "swift", "py", "js", "ts", "rb", "sh", "yaml", "yml", "toml", "xml":
+            return "text/plain; charset=utf-8"
+        default:                return "application/octet-stream"
+        }
+    }
+
+    // MARK: - Self Graph
+
+    private nonisolated func handleSelfGraphGet(connection: NWConnection, corsHeaders: String) {
+        Task {
+            guard let data = try? await SelfGraphStore.shared.encoded(),
+                  let json = String(data: data, encoding: .utf8) else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"read failed\"}", corsHeaders: corsHeaders)
+                return
+            }
+            self.sendResponse(connection: connection, status: 200, body: json, corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleSelfGraphNodeUpsert(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let node = try? JSONDecoder().decode(SelfGraphNode.self, from: data) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid node JSON\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task {
+            do {
+                try await SelfGraphStore.shared.upsertNode(node)
+                guard let out = try? await SelfGraphStore.shared.encoded(),
+                      let json = String(data: out, encoding: .utf8) else {
+                    self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+                    return
+                }
+                self.sendResponse(connection: connection, status: 200, body: json, corsHeaders: corsHeaders)
+            } catch {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"save failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    private nonisolated func handleSelfGraphNodeDelete(connection: NWConnection, id: String, corsHeaders: String) {
+        Task {
+            do {
+                try await SelfGraphStore.shared.deleteNode(id: id)
+                self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+            } catch {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"delete failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    private nonisolated func handleSelfGraphLinkUpsert(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let link = try? JSONDecoder().decode(SelfGraphLink.self, from: data) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid link JSON\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task {
+            do {
+                try await SelfGraphStore.shared.upsertLink(link)
+                guard let out = try? await SelfGraphStore.shared.encoded(),
+                      let json = String(data: out, encoding: .utf8) else {
+                    self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+                    return
+                }
+                self.sendResponse(connection: connection, status: 200, body: json, corsHeaders: corsHeaders)
+            } catch {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"save failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    private nonisolated func handleSelfGraphLinkDelete(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let source = json["source"] as? String,
+              let target = json["target"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing source/target\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task {
+            do {
+                try await SelfGraphStore.shared.deleteLink(source: source, target: target)
+                self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+            } catch {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"delete failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    // MARK: - Stocks
+
+    private nonisolated func handleStocks(connection: NWConnection, corsHeaders: String) {
+        let cacheURL = URL(fileURLWithPath: NSHomeDirectory() + "/.hermes/stocks-cache.json")
+        // 30分以内のキャッシュがあればそのまま返す
+        if let data = try? Data(contentsOf: cacheURL),
+           let attrs = try? FileManager.default.attributesOfItem(atPath: cacheURL.path),
+           let mod = attrs[.modificationDate] as? Date,
+           Date().timeIntervalSince(mod) < 1800,
+           let body = String(data: data, encoding: .utf8) {
+            sendResponse(connection: connection, status: 200, body: body, corsHeaders: corsHeaders)
+            return
+        }
+        Task {
+            let body = await self.fetchStocksJSON()
+            // キャッシュ書き込み
+            if let data = body.data(using: .utf8) {
+                try? data.write(to: cacheURL)
+            }
+            self.sendResponse(connection: connection, status: 200, body: body, corsHeaders: corsHeaders)
+        }
+    }
+
+    nonisolated func fetchStocksJSON() async -> String {
+        let home = NSHomeDirectory()
+        let portfolioPath = home + "/.hermes/scripts/portfolio.txt"
+        let envPath = home + "/.hermes/scripts/.env"
+
+        // ポートフォリオ読み込み
+        guard let raw = try? String(contentsOfFile: portfolioPath, encoding: .utf8) else { return "[]" }
+        var holdings: [(ticker: String, label: String)] = []
+        for line in raw.components(separatedBy: "\n") {
+            let l = line.trimmingCharacters(in: .whitespaces)
+            guard !l.isEmpty, !l.hasPrefix("#") else { continue }
+            let parts: [String]
+            if l.contains("\t") {
+                parts = l.components(separatedBy: "\t").map { $0.trimmingCharacters(in: .whitespaces) }
+            } else {
+                let sp = l.split(maxSplits: 1, whereSeparator: { $0 == " " })
+                parts = sp.map { String($0) }
+            }
+            let ticker = parts[0]
+            guard ticker.range(of: "\\s", options: .regularExpression) == nil,
+                  !ticker.isEmpty else { continue }
+            let label = parts.count > 1 ? parts[1] : ticker
+            holdings.append((ticker, label))
+        }
+        guard !holdings.isEmpty else { return "[]" }
+
+        // APIキー読み込み
+        var apiKey = ""
+        if let envText = try? String(contentsOfFile: envPath, encoding: .utf8) {
+            for line in envText.components(separatedBy: "\n") {
+                let kv = line.trimmingCharacters(in: .whitespaces)
+                if kv.hasPrefix("TWELVEDATA_API_KEY=") {
+                    apiKey = String(kv.dropFirst("TWELVEDATA_API_KEY=".count))
+                        .trimmingCharacters(in: .init(charactersIn: "\"'"))
+                }
+            }
+        }
+        guard !apiKey.isEmpty else { return "[]" }
+
+        let symbols = holdings.map { $0.ticker }.joined(separator: ",")
+
+        // 現在値（quote）
+        let quoteURL = "https://api.twelvedata.com/quote?symbol=\(symbols)&apikey=\(apiKey)&dp=2"
+        guard let qURL = URL(string: quoteURL),
+              let (qData, _) = try? await URLSession.shared.data(from: qURL),
+              let quoteJSON = try? JSONSerialization.jsonObject(with: qData) as? [String: Any]
+        else { return "[]" }
+
+        // 30日推移（time_series）— 6時間キャッシュで API 節約
+        let histCachePath = home + "/.hermes/portfolio-history.json"
+        let histCacheMaxAge: Double = 6 * 3600
+        var historyByTicker: [String: [Double]] = [:]
+
+        struct HistCache: Codable { var savedAt: Double; var data: [String: [Double]] }
+        if let cacheData = try? Data(contentsOf: URL(fileURLWithPath: histCachePath)),
+           let cache = try? JSONDecoder().decode(HistCache.self, from: cacheData),
+           Date().timeIntervalSince1970 - cache.savedAt < histCacheMaxAge {
+            historyByTicker = cache.data
+        } else {
+            let tsURL = "https://api.twelvedata.com/time_series?symbol=\(symbols)&interval=1day&outputsize=30&apikey=\(apiKey)&dp=2"
+            if let tURL = URL(string: tsURL),
+               let (tsData, _) = try? await URLSession.shared.data(from: tURL),
+               let tsJSON = try? JSONSerialization.jsonObject(with: tsData) as? [String: Any] {
+                // シングル銘柄は {values:[...]} 、複数は {TICKER:{values:[...]}} の2形式
+                func extractValues(_ d: [String: Any]) -> [Double] {
+                    guard let vals = d["values"] as? [[String: Any]] else { return [] }
+                    return vals.compactMap { ($0["close"] as? String).flatMap(Double.init) }.reversed()
+                }
+                if tsJSON["values"] != nil {
+                    // シングル銘柄レスポンス
+                    if let t = holdings.first?.ticker {
+                        historyByTicker[t] = extractValues(tsJSON)
+                    }
+                } else {
+                    for h in holdings {
+                        if let d = tsJSON[h.ticker] as? [String: Any] {
+                            historyByTicker[h.ticker] = extractValues(d)
+                        }
+                    }
+                }
+                // キャッシュ保存
+                if let cacheOut = try? JSONEncoder().encode(HistCache(savedAt: Date().timeIntervalSince1970, data: historyByTicker)) {
+                    try? cacheOut.write(to: URL(fileURLWithPath: histCachePath))
+                }
+            }
+        }
+
+        var results: [[String: Any]] = []
+        for h in holdings {
+            // シングル銘柄のとき quoteJSON は ticker キーなしで直接返る
+            let q: [String: Any]?
+            if holdings.count == 1 {
+                q = quoteJSON["close"] != nil ? quoteJSON : quoteJSON[h.ticker] as? [String: Any]
+            } else {
+                q = quoteJSON[h.ticker] as? [String: Any]
+            }
+            guard let q else { continue }
+            let price     = q["close"] as? String ?? "—"
+            let changeRaw = q["change"] as? String ?? "0"
+            let pctRaw    = q["percent_change"] as? String ?? "0"
+            let changeVal = Double(changeRaw) ?? 0
+            let pctVal    = Double(pctRaw) ?? 0
+            var row: [String: Any] = [
+                "ticker": h.ticker,
+                "label": h.label,
+                "price": price,
+                "change": changeVal >= 0 ? "+\(changeRaw)" : changeRaw,
+                "changePercent": pctVal >= 0 ? "+\(pctRaw)%" : "\(pctRaw)%",
+                "isPositive": changeVal >= 0,
+            ]
+            if let hist = historyByTicker[h.ticker], !hist.isEmpty {
+                row["history"] = hist
+            }
+            results.append(row)
+        }
+        guard let out = try? JSONSerialization.data(withJSONObject: results),
+              let str = String(data: out, encoding: .utf8) else { return "[]" }
+        return str
+    }
+
+    // MARK: - Sauna News
+
+    private nonisolated func handleSaunaNews(connection: NWConnection, corsHeaders: String) {
+        Task {
+            let body = await self.fetchSaunaNewsJSON()
+            self.sendResponse(connection: connection, status: 200, body: body, corsHeaders: corsHeaders)
+        }
+    }
+
+    nonisolated func fetchSaunaNewsJSON() async -> String {
+        let query = "サウナ".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "sauna"
+        let urlStr = "https://news.google.com/rss/search?q=\(query)&hl=ja&gl=JP&ceid=JP:ja"
+        guard let url = URL(string: urlStr),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let xml = String(data: data, encoding: .utf8) else { return "[]" }
+
+        // シンプルな正規表現なしの XML パース
+        var items: [[String: String]] = []
+        let parts = xml.components(separatedBy: "<item>")
+        for part in parts.dropFirst().prefix(5) {
+            let title = xmlText(part, tag: "title")
+            let link  = xmlText(part, tag: "link")
+            let date  = xmlText(part, tag: "pubDate")
+            if !title.isEmpty {
+                items.append(["title": title, "link": link, "date": date])
+            }
+        }
+        guard let out = try? JSONSerialization.data(withJSONObject: items),
+              let str = String(data: out, encoding: .utf8) else { return "[]" }
+        return str
+    }
+
+    // MARK: - Mac Activity
+
+    private nonisolated func handleMacActivity(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let data = MacActivityLogger.shared.todayJSON()
+            let body = String(data: data, encoding: .utf8) ?? "[]"
+            self.sendResponse(connection: connection, status: 200, body: body, corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func xmlText(_ src: String, tag: String) -> String {
+        let open = "<\(tag)>"; let close = "</\(tag)>"
+        guard let r1 = src.range(of: open), let r2 = src.range(of: close, range: r1.upperBound..<src.endIndex) else { return "" }
+        var val = String(src[r1.upperBound..<r2.lowerBound])
+        // CDATA
+        if val.hasPrefix("<![CDATA[") && val.hasSuffix("]]>") {
+            val = String(val.dropFirst(9).dropLast(3))
+        }
+        return val.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
