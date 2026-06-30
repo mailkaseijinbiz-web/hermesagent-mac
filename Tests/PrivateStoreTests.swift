@@ -25,5 +25,16 @@ final class PrivateStoreTests: XCTestCase {
     func testEncryptedKeyListIncludesHealth() {
         XCTAssertTrue(PrivateStoreKeys.all.contains("latestHealth"))
         XCTAssertTrue(PrivateStoreKeys.all.contains("locationPoints"))
+        XCTAssertTrue(PrivateStoreKeys.all.contains("locationDaily"))
+        XCTAssertTrue(PrivateStoreKeys.all.contains("photoDaily"))
+    }
+
+    func testDailyTextSnapshotRoundTrip() throws {
+        let key = "test-daily-\(UUID().uuidString)"
+        defer { PrivateStore.remove(key: key) }
+        let snap = AppState.DailyTextSnapshot(text: "自宅 → カフェ", updatedAt: 1_700_000_000)
+        try PrivateStore.save(snap, key: key)
+        let loaded: AppState.DailyTextSnapshot? = PrivateStore.load(AppState.DailyTextSnapshot.self, key: key)
+        XCTAssertEqual(loaded, snap)
     }
 }

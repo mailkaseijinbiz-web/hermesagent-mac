@@ -25,6 +25,21 @@ final class MacActivityLoggerTests: XCTestCase {
         XCTAssertFalse(MacActivityLogger.shouldMergeAdjacent(previous: first, next: differentApp))
     }
 
+    func testActivityEntriesEncryptRoundTrip() throws {
+        let key = "test-activity-\(UUID().uuidString)"
+        defer { PrivateStore.remove(key: key) }
+        var entry = MacActivityEntry()
+        entry.appName = "Safari"
+        entry.label = "Safari — Example"
+        entry.url = "https://example.com"
+        entry.startTime = 100
+        entry.endTime = 200
+        let data = try JSONEncoder().encode([entry])
+        try PrivateStore.saveData(data, key: key)
+        let loaded = PrivateStore.loadData(key: key)
+        XCTAssertEqual(loaded, data)
+    }
+
     private func entry(app: String, title: String?, url: String?, start: Double, end: Double) -> MacActivityEntry {
         var entry = MacActivityEntry()
         entry.appName = app

@@ -591,15 +591,21 @@ class AppState: ObservableObject {
 
     // Location: a privacy-light daily "足あと" summary pushed from iOS (place names + times,
     // NOT raw coordinates). Injected into the brief/coaching context. Device-local.
-    @Published var locationSummary: String = UserDefaults.standard.string(forKey: "locationSummary") ?? "" {
-        didSet { UserDefaults.standard.set(locationSummary, forKey: "locationSummary") }
+    @Published var locationSummary: String = AppState.loadDailyText(
+        storeKey: "locationDaily", legacyTextKey: "locationSummary", legacyAtKey: "locationSummaryAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: locationSummary, at: locationSummaryAt, storeKey: "locationDaily") }
     }
-    @Published var locationSummaryAt: Double = UserDefaults.standard.double(forKey: "locationSummaryAt") {
-        didSet { UserDefaults.standard.set(locationSummaryAt, forKey: "locationSummaryAt") }
+    @Published var locationSummaryAt: Double = AppState.loadDailyText(
+        storeKey: "locationDaily", legacyTextKey: "locationSummary", legacyAtKey: "locationSummaryAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: locationSummary, at: locationSummaryAt, storeKey: "locationDaily") }
     }
     /// 自宅キーワード（空文字 = 未登録）。locationSummary 内の一致部分を「自宅」に置換して表示。
-    @Published var homeLocationKeyword: String = UserDefaults.standard.string(forKey: "homeLocationKeyword") ?? "" {
-        didSet { UserDefaults.standard.set(homeLocationKeyword, forKey: "homeLocationKeyword") }
+    @Published var homeLocationKeyword: String = AppState.loadPrivateString(
+        key: "homeLocationKeyword", legacyKey: "homeLocationKeyword"
+    ) {
+        didSet { AppState.saveJSON(homeLocationKeyword, "homeLocationKeyword") }
     }
     /// 自宅キーワードを反映した表示用サマリ。
     func resolvedLocationSummary(_ raw: String) -> String {
@@ -635,11 +641,15 @@ class AppState: ObservableObject {
 
     // Photos: a privacy-light daily summary pushed from iOS (counts/places only — never the
     // photos themselves). Injected into the brief/coaching context. Device-local.
-    @Published var photoSummary: String = UserDefaults.standard.string(forKey: "photoSummary") ?? "" {
-        didSet { UserDefaults.standard.set(photoSummary, forKey: "photoSummary") }
+    @Published var photoSummary: String = AppState.loadDailyText(
+        storeKey: "photoDaily", legacyTextKey: "photoSummary", legacyAtKey: "photoSummaryAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: photoSummary, at: photoSummaryAt, storeKey: "photoDaily") }
     }
-    @Published var photoSummaryAt: Double = UserDefaults.standard.double(forKey: "photoSummaryAt") {
-        didSet { UserDefaults.standard.set(photoSummaryAt, forKey: "photoSummaryAt") }
+    @Published var photoSummaryAt: Double = AppState.loadDailyText(
+        storeKey: "photoDaily", legacyTextKey: "photoSummary", legacyAtKey: "photoSummaryAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: photoSummary, at: photoSummaryAt, storeKey: "photoDaily") }
     }
     func updatePhotoSummary(_ s: String) {
         photoSummary = s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -800,6 +810,36 @@ class AppState: ObservableObject {
     static func loadTeams() -> [Team] { loadJSON("teams") ?? [] }
     static func loadTasks() -> [WorkTask] { loadJSON("workTasks") ?? [] }
     static func loadArtifacts() -> [Artifact] { loadJSON("artifacts") ?? [] }
+
+    struct DailyTextSnapshot: Codable, Equatable {
+        var text: String = ""
+        var updatedAt: Double = 0
+    }
+
+    static func loadDailyText(storeKey: String, legacyTextKey: String, legacyAtKey: String) -> DailyTextSnapshot {
+        if let snap: DailyTextSnapshot = loadJSON(storeKey) { return snap }
+        let text = UserDefaults.standard.string(forKey: legacyTextKey) ?? ""
+        let at = UserDefaults.standard.double(forKey: legacyAtKey)
+        let snap = DailyTextSnapshot(text: text, updatedAt: at)
+        if !text.isEmpty || at > 0 { saveJSON(snap, storeKey) }
+        UserDefaults.standard.removeObject(forKey: legacyTextKey)
+        UserDefaults.standard.removeObject(forKey: legacyAtKey)
+        return snap
+    }
+
+    static func saveDailyText(text: String, at: Double, storeKey: String) {
+        saveJSON(DailyTextSnapshot(text: text, updatedAt: at), storeKey)
+    }
+
+    static func loadPrivateString(key: String, legacyKey: String) -> String {
+        if let value: String = loadJSON(key) { return value }
+        guard UserDefaults.standard.object(forKey: legacyKey) != nil else { return "" }
+        let legacy = UserDefaults.standard.string(forKey: legacyKey) ?? ""
+        saveJSON(legacy, key)
+        UserDefaults.standard.removeObject(forKey: legacyKey)
+        return legacy
+    }
+
     static func loadJSON<T: Decodable>(_ key: String) -> T? {
         if PrivateStoreKeys.all.contains(key) {
             if let v: T = PrivateStore.load(T.self, key: key) { return v }

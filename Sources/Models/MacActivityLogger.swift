@@ -43,8 +43,34 @@ final class MacActivityLogger {
     private var currentURL:          String = ""
     private var pollTimer:           Timer? = nil
 
-    private var cacheFilePath: String {
-        "\(NSHomeDirectory())/.hermes/mac-activity-\(dayKey(Date())).json"
+    static nonisolated func activityStoreKey(for date: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return "mac-activity-\(f.string(from: date))"
+    }
+
+    static nonisolated func legacyActivityPath(for date: Date = Date()) -> String {
+        "\(NSHomeDirectory())/.hermes/\(activityStoreKey(for: date)).json"
+    }
+
+    static nonisolated func loadEntries(for date: Date = Date()) -> [MacActivityEntry] {
+        let key = activityStoreKey(for: date)
+        if let data = PrivateStore.loadData(key: key),
+           let entries = try? JSONDecoder().decode([MacActivityEntry].self, from: data) {
+            return entries
+        }
+        let path = legacyActivityPath(for: date)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let entries = try? JSONDecoder().decode([MacActivityEntry].self, from: data) else { return [] }
+        try? PrivateStore.saveData(data, key: key)
+        try? FileManager.default.removeItem(atPath: path)
+        return entries
+    }
+
+    static nonisolated func saveEntries(_ entries: [MacActivityEntry], for date: Date = Date()) throws {
+        let data = try JSONEncoder().encode(entries)
+        try PrivateStore.saveData(data, key: activityStoreKey(for: date))
     }
 
     func start() {
@@ -284,39 +310,16 @@ final class MacActivityLogger {
 
     /// 今日のキャッシュファイルをディスクから直接読む（ブリーフ文脈用途）。
     nonisolated func todayEntriesFromDisk() -> [MacActivityEntry] {
-        let home = NSHomeDirectory()
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        let path = "\(home)/.hermes/mac-activity-\(f.string(from: Date())).json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let entries = try? JSONDecoder().decode([MacActivityEntry].self, from: data)
-        else { return [] }
-        return entries
+        Self.loadEntries()
     }
 
     // MARK: - 永続化（日次）
 
     private func loadToday() {
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: cacheFilePath)),
-           let entries = try? JSONDecoder().decode([MacActivityEntry].self, from: data) {
-            completedEntries = entries
-        }
+        completedEntries = Self.loadEntries()
     }
 
     private func saveToday() {
-        let url = URL(fileURLWithPath: cacheFilePath)
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(completedEntries) {
-            try? data.write(to: url, options: .atomic)
-        }
-    }
-
-    private func dayKey(_ d: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f.string(from: d)
+        try? Self.saveEntries(completedEntries)
     }
 }

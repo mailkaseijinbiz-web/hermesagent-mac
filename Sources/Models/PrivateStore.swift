@@ -121,6 +121,9 @@ enum PrivateStoreKeys {
         "dailyHistory",
         "intentionCards",
         "intentionDismissedIds",
-        "intentionDismissedKinds"
+        "intentionDismissedKinds",
+        "locationDaily",
+        "photoDaily",
+        "homeLocationKeyword"
     ]
 }

@@ -78,4 +78,20 @@ final class IntentionCardTests: XCTestCase {
         state.latestHealth = snap
         XCTAssertEqual(state.vitalityMode(), "recovering")
     }
+
+    @MainActor
+    func testDismissedRestKindExcludedFromComputed() {
+        let state = AppState.shared
+        state.intentionDismissedKinds = ["rest"]
+        let result = state.computedIntentionCards()
+        XCTAssertFalse(result.cards.contains(where: { $0.kind == "rest" }))
+    }
+
+    @MainActor
+    func testIntentionContextIncludesDismissedKinds() {
+        let state = AppState.shared
+        state.intentionDismissedKinds = ["recover"]
+        let ctx = state.intentionContext()
+        XCTAssertTrue(ctx.contains("recover"))
+    }
 }
