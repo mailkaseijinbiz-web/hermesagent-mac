@@ -227,6 +227,7 @@ struct DashboardView: View {
     @ViewBuilder
     private func widget(_ id: String) -> some View {
         switch id {
+        case "intention": intentionWidget
         case "health":    healthWidget
         case "self":      selfWidget
         case "schedule":  scheduleWidget
@@ -239,6 +240,17 @@ struct DashboardView: View {
         case "review":    reviewWidget
         case "lifelog":   lifelogWidget
         default:          EmptyView()
+        }
+    }
+
+    // MARK: 意図カード (wide)
+
+    private var intentionWidget: some View {
+        card(title: "いまの意図", icon: "sparkle",
+             trailing: { regenButton(generating: appState.isGeneratingIntention) {
+                 Task { await appState.generateIntentionCards() }
+             } }) {
+            IntentionCardsView.dashboardWidget(appState: appState)
         }
     }
 

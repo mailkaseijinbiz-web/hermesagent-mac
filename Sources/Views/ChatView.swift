@@ -33,9 +33,10 @@ struct ChatView: View {
 
                 Spacer()
 
-                Text("何を作りましょうか？")
-                    .font(.system(size: 32, weight: .light))
+                Text("意図カードから選ぶか、話したいことを書いてください")
+                    .font(.system(size: 28, weight: .light))
                     .foregroundColor(.primary.opacity(0.9))
+                    .multilineTextAlignment(.center)
                     .padding(.bottom, 24)
 
                 composerView

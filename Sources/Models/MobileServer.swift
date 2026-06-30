@@ -309,6 +309,14 @@ class MobileServer {
             handleBadgeClear(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/dashboard/brief"):
             handleBriefUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/intention/today"):
+            handleIntentionGet(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/intention/today"):
+            handleIntentionRegenerate(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/intention/confirm"):
+            handleIntentionConfirm(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/intention/dismiss"):
+            handleIntentionDismiss(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/profile"):
             handleProfileGet(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/profile"):
@@ -899,6 +907,48 @@ class MobileServer {
         Task { @MainActor in
             AppState.shared.clearBadge(token: token)
             self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/intention/today — regenerate intention cards from vitals + context.
+    private nonisolated func handleIntentionRegenerate(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            if AppState.shared.isGeneratingIntention {
+                self.sendResponse(connection: connection, status: 409,
+                                  body: "{\"error\":\"intention is being generated\"}", corsHeaders: corsHeaders)
+                return
+            }
+            await AppState.shared.generateIntentionCards()
+            self.sendJSON(connection: connection, AppState.shared.intentionTodayJSON(), corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/intention/today — current intention card set.
+    private nonisolated func handleIntentionGet(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            self.sendJSON(connection: connection, AppState.shared.intentionTodayJSON(), corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/intention/confirm — user picked a card; execute its action.
+    private nonisolated func handleIntentionConfirm(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body), let id = json["id"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing id\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            let result = AppState.shared.confirmIntentionCard(id)
+            self.sendJSON(connection: connection, result, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/intention/dismiss — user rejected a card hypothesis.
+    private nonisolated func handleIntentionDismiss(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body), let id = json["id"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing id\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            AppState.shared.dismissIntentionCard(id)
+            self.sendJSON(connection: connection, AppState.shared.intentionTodayJSON(), corsHeaders: corsHeaders)
         }
     }
 

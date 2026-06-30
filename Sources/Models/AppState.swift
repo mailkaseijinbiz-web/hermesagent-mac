@@ -227,17 +227,18 @@ class AppState: ObservableObject {
     static let dashboardCols = 4
     static func defaultDashboardLayout() -> [WidgetTile] {
         [
-            .init(id: "health",    col: 0, row: 0, w: 2, h: 2),
-            .init(id: "self",      col: 2, row: 0, w: 2, h: 2),
-            .init(id: "schedule",  col: 0, row: 2, w: 2, h: 2),
-            .init(id: "tasks",     col: 2, row: 2, w: 2, h: 2),
-            .init(id: "location",  col: 0, row: 4, w: 1, h: 1),
-            .init(id: "photos",    col: 1, row: 4, w: 1, h: 1),
-            .init(id: "apps",      col: 2, row: 4, w: 1, h: 1),
-            .init(id: "employees", col: 3, row: 4, w: 1, h: 1),
-            .init(id: "brief",     col: 0, row: 5, w: 4, h: 2),
-            .init(id: "review",    col: 0, row: 7, w: 4, h: 2),
-            .init(id: "lifelog",   col: 0, row: 9, w: 4, h: 3),
+            .init(id: "intention", col: 0, row: 0, w: 4, h: 2),
+            .init(id: "health",    col: 0, row: 2, w: 2, h: 2),
+            .init(id: "self",      col: 2, row: 2, w: 2, h: 2),
+            .init(id: "schedule",  col: 0, row: 4, w: 2, h: 2),
+            .init(id: "tasks",     col: 2, row: 4, w: 2, h: 2),
+            .init(id: "location",  col: 0, row: 6, w: 1, h: 1),
+            .init(id: "photos",    col: 1, row: 6, w: 1, h: 1),
+            .init(id: "apps",      col: 2, row: 6, w: 1, h: 1),
+            .init(id: "employees", col: 3, row: 6, w: 1, h: 1),
+            .init(id: "brief",     col: 0, row: 7, w: 4, h: 2),
+            .init(id: "review",    col: 0, row: 9, w: 4, h: 2),
+            .init(id: "lifelog",   col: 0, row: 11, w: 4, h: 3),
         ]
     }
     @Published var dashboardLayout: [WidgetTile] = AppState.loadJSON("dashboardLayout") ?? AppState.defaultDashboardLayout() {
@@ -762,6 +763,27 @@ class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(dailyBriefAt, forKey: "dailyBriefAt") }
     }
     @Published var isGeneratingBrief: Bool = false
+
+    // Intention cards: AI/hybrid hypotheses drawn from vitals + multimodal context.
+    @Published var intentionCards: [IntentionCard] = AppState.loadJSON("intentionCards") ?? [] {
+        didSet { AppState.saveJSON(intentionCards, "intentionCards") }
+    }
+    @Published var intentionVitalHint: String = UserDefaults.standard.string(forKey: "intentionVitalHint") ?? "" {
+        didSet { UserDefaults.standard.set(intentionVitalHint, forKey: "intentionVitalHint") }
+    }
+    @Published var intentionVitalityMode: String = UserDefaults.standard.string(forKey: "intentionVitalityMode") ?? "steady" {
+        didSet { UserDefaults.standard.set(intentionVitalityMode, forKey: "intentionVitalityMode") }
+    }
+    @Published var intentionCardsAt: Double = UserDefaults.standard.double(forKey: "intentionCardsAt") {
+        didSet { UserDefaults.standard.set(intentionCardsAt, forKey: "intentionCardsAt") }
+    }
+    @Published var intentionSelectedId: String? = UserDefaults.standard.string(forKey: "intentionSelectedId") {
+        didSet { UserDefaults.standard.set(intentionSelectedId, forKey: "intentionSelectedId") }
+    }
+    @Published var intentionDismissedIds: [String] = AppState.loadJSON("intentionDismissedIds") ?? [] {
+        didSet { AppState.saveJSON(intentionDismissedIds, "intentionDismissedIds") }
+    }
+    @Published var isGeneratingIntention: Bool = false
 
     // The employee whose detail/management screen is open (view == "employee").
     @Published var detailEmployeeId: String? = nil
@@ -1551,6 +1573,7 @@ class AppState: ObservableObject {
 
             // 自動振り返り: 起動時に今日のブリーフがなければ生成 & 毎夜21:00に再生成
             await self.autoBriefIfStale()
+            await self.autoIntentionIfStale()
             self.startAutoBriefTimer()
 
             // Cloud sync (can take seconds) now overlaps the above instead of gating it.
