@@ -3,19 +3,24 @@ import SwiftUI
 /// Intention cards — surfaces AI/hybrid hypotheses; tap to act, swipe/context to dismiss.
 struct IntentionCardsView: View {
     let vitalHint: String
+    let vitalityMode: String
     let cards: [IntentionCard]
     let isGenerating: Bool
+    let isSilent: Bool
     var onConfirm: (IntentionCard) -> Void
     var onDismiss: (IntentionCard) -> Void
     var onRegenerate: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if !vitalHint.isEmpty {
-                Text(vitalHint)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+            HStack(spacing: 8) {
+                if !vitalityMode.isEmpty { VitalityModeBadge(mode: vitalityMode) }
+                if !vitalHint.isEmpty {
+                    Text(vitalHint)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
 
             if cards.isEmpty {
@@ -27,8 +32,12 @@ struct IntentionCardsView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 8)
-                } else {
+                } else if isSilent {
                     Text("今日は静かに過ごすのも正解です。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("まだ意図がありません。更新してください。")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -99,8 +108,10 @@ extension IntentionCardsView {
     static func dashboardWidget(appState: AppState) -> some View {
         IntentionCardsView(
             vitalHint: appState.intentionVitalHint,
+            vitalityMode: appState.intentionVitalityMode,
             cards: appState.visibleIntentionCards,
             isGenerating: appState.isGeneratingIntention,
+            isSilent: appState.intentionIsSilent,
             onConfirm: { card in _ = appState.confirmIntentionCard(card.id) },
             onDismiss: { card in appState.dismissIntentionCard(card.id) },
             onRegenerate: nil

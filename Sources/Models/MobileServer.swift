@@ -918,7 +918,8 @@ class MobileServer {
                                   body: "{\"error\":\"intention is being generated\"}", corsHeaders: corsHeaders)
                 return
             }
-            await AppState.shared.generateIntentionCards()
+            let isToday = Calendar.current.isDateInToday(Date(timeIntervalSince1970: AppState.shared.intentionCardsAt))
+            await AppState.shared.generateIntentionCards(preserveDismissals: isToday)
             self.sendJSON(connection: connection, AppState.shared.intentionTodayJSON(), corsHeaders: corsHeaders)
         }
     }
@@ -1533,6 +1534,7 @@ class MobileServer {
             snap.heartRate = i("heartRate")
             snap.restingHeartRate = i("restingHeartRate")
             snap.sleepHours = d("sleepHours")
+            snap.mindfulMinutes = i("mindfulMinutes")
             snap.bodyMassKg = d("bodyMassKg")
             snap.date = json["date"] as? String
             snap.source = json["source"] as? String
@@ -1552,7 +1554,7 @@ class MobileServer {
                 put("steps", h.steps); put("distanceKm", h.distanceKm); put("activeEnergyKcal", h.activeEnergyKcal)
                 put("exerciseMinutes", h.exerciseMinutes); put("heartRate", h.heartRate)
                 put("restingHeartRate", h.restingHeartRate); put("sleepHours", h.sleepHours)
-                put("bodyMassKg", h.bodyMassKg); put("date", h.date); put("source", h.source)
+                put("mindfulMinutes", h.mindfulMinutes); put("bodyMassKg", h.bodyMassKg); put("date", h.date); put("source", h.source)
                 dict["updatedAt"] = h.updatedAt
             }
             self.sendJSON(connection: connection, dict, corsHeaders: corsHeaders)

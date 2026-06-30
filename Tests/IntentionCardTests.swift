@@ -37,7 +37,9 @@ final class IntentionCardTests: XCTestCase {
 
     @MainActor
     func testComputedIntentionIncludesRest() {
-        let result = AppState.shared.computedIntentionCards()
+        let state = AppState.shared
+        state.intentionDismissedKinds = []
+        let result = state.computedIntentionCards()
         XCTAssertFalse(result.cards.isEmpty)
         XCTAssertTrue(result.cards.contains(where: { $0.kind == "rest" }))
         XCTAssertFalse(result.vitalHint.isEmpty)
@@ -50,5 +52,30 @@ final class IntentionCardTests: XCTestCase {
         snap.sleepHours = 4.5
         state.latestHealth = snap
         XCTAssertEqual(state.vitalityMode(), "depleted")
+    }
+
+    @MainActor
+    func testDismissTracksKind() {
+        let state = AppState.shared
+        let card = IntentionCard(
+            id: "test-dismiss", title: "T", subtitle: "S", icon: "moon", kind: "rest",
+            action: IntentionAction(type: "none", taskTitle: nil, taskId: nil, employeeRole: nil, chatPrompt: nil)
+        )
+        state.intentionCards = [card]
+        state.intentionDismissedIds = []
+        state.intentionDismissedKinds = []
+        state.dismissIntentionCard("test-dismiss")
+        XCTAssertTrue(state.intentionDismissedKinds.contains("rest"))
+        XCTAssertTrue(state.intentionIsSilent)
+    }
+
+    @MainActor
+    func testExerciseSoftensDepletedMode() {
+        let state = AppState.shared
+        var snap = HealthSnapshot()
+        snap.sleepHours = 4.5
+        snap.exerciseMinutes = 25
+        state.latestHealth = snap
+        XCTAssertEqual(state.vitalityMode(), "recovering")
     }
 }

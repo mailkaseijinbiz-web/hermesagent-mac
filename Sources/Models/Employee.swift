@@ -172,6 +172,7 @@ struct HealthSnapshot: Codable, Equatable {
     var heartRate: Int? = nil           // 直近の心拍
     var restingHeartRate: Int? = nil
     var sleepHours: Double? = nil        // 直近の睡眠
+    var mindfulMinutes: Int? = nil       // 今日のマインドフルネス（分）
     var bodyMassKg: Double? = nil
     var date: String? = nil             // データの対象日 "2026-06-28"
     var source: String? = nil           // 送信元デバイス名

@@ -248,7 +248,7 @@ struct DashboardView: View {
     private var intentionWidget: some View {
         card(title: "いまの意図", icon: "sparkle",
              trailing: { regenButton(generating: appState.isGeneratingIntention) {
-                 Task { await appState.generateIntentionCards() }
+                 Task { await appState.generateIntentionCards(preserveDismissals: true) }
              } }) {
             IntentionCardsView.dashboardWidget(appState: appState)
         }

@@ -525,6 +525,7 @@ class AppState: ObservableObject {
             if let v = snap.restingHeartRate { $0.restingHeartRate = v }
             if let v = snap.sleepHours { $0.sleepHours = v }
         }
+        scheduleIntentionRefreshIfNeeded()
     }
 
     // Rolling daily history (last ~60 days) so the AI can do WEEKLY metacognitive reviews
@@ -610,6 +611,7 @@ class AppState: ObservableObject {
         locationSummary = s.trimmingCharacters(in: .whitespacesAndNewlines)
         locationSummaryAt = Date().timeIntervalSince1970
         upsertToday { $0.locations = self.locationSummary }
+        scheduleIntentionRefreshIfNeeded()
     }
 
     // Per-place coordinates for today's footprint map (sent from iOS, to this private hub).
@@ -643,6 +645,7 @@ class AppState: ObservableObject {
         photoSummary = s.trimmingCharacters(in: .whitespacesAndNewlines)
         photoSummaryAt = Date().timeIntervalSince1970
         upsertToday { $0.photos = self.photoSummary }
+        scheduleIntentionRefreshIfNeeded()
     }
     var photoContext: String? {
         guard !photoSummary.isEmpty, photoSummaryAt > 0 else { return nil }
@@ -661,6 +664,7 @@ class AppState: ObservableObject {
         if let v = h.heartRate { parts.append("心拍 \(v)bpm") }
         if let v = h.restingHeartRate { parts.append("安静時心拍 \(v)bpm") }
         if let v = h.sleepHours { parts.append(String(format: "睡眠 %.1f時間", v)) }
+        if let v = h.mindfulMinutes, v > 0 { parts.append("マインドフル \(v)分") }
         if let v = h.bodyMassKg { parts.append(String(format: "体重 %.1fkg", v)) }
         guard !parts.isEmpty else { return nil }
         let day = (h.date?.isEmpty == false) ? "（\(h.date!)）" : ""
@@ -783,7 +787,12 @@ class AppState: ObservableObject {
     @Published var intentionDismissedIds: [String] = AppState.loadJSON("intentionDismissedIds") ?? [] {
         didSet { AppState.saveJSON(intentionDismissedIds, "intentionDismissedIds") }
     }
+    /// Kinds the user rejected today (recover/focus/rest/…) — suppress similar cards on refresh.
+    @Published var intentionDismissedKinds: [String] = AppState.loadJSON("intentionDismissedKinds") ?? [] {
+        didSet { AppState.saveJSON(intentionDismissedKinds, "intentionDismissedKinds") }
+    }
     @Published var isGeneratingIntention: Bool = false
+    var intentionRefreshTask: Task<Void, Never>?
 
     // The employee whose detail/management screen is open (view == "employee").
     @Published var detailEmployeeId: String? = nil
