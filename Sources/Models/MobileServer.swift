@@ -321,6 +321,12 @@ class MobileServer {
             handleLocationUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/photos"):
             handlePhotosUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/memo"):
+            handleMemoAdd(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/memos"):
+            handleMemosList(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/ingest"):
+            handleIngest(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/review"):
             handleReviewGet(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/review"):
@@ -1028,6 +1034,112 @@ class MobileServer {
         Task { @MainActor in
             AppState.shared.updatePhotoSummary(summary)
             self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// 共有/メモ用：base64（data: 接頭辞や URL-safe も許容）配列を `[Data]` に復号。
+    private nonisolated func decodeImages(_ json: [String: Any]) -> [Data] {
+        var raw: [String] = []
+        if let arr = json["images"] as? [String] { raw = arr }
+        if let one = json["image"] as? String { raw.append(one) }
+        return raw.compactMap { s -> Data? in
+            var b64 = s
+            if let comma = b64.range(of: ","), b64.hasPrefix("data:") { b64 = String(b64[comma.upperBound...]) }
+            b64 = b64.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            let pad = b64.count % 4
+            if pad > 0 { b64 += String(repeating: "=", count: 4 - pad) }
+            return Data(base64Encoded: b64)
+        }
+    }
+
+    /// POST /api/memo — メモを追加。Body: {text, images?:[base64], source?}.
+    private nonisolated func handleMemoAdd(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid JSON\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let text = (json["text"] as? String) ?? ""
+        let images = decodeImages(json)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Empty memo\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let source = json["source"] as? String
+        Task { @MainActor in
+            let memo = MacMemoStore.shared.addMemo(text, images: images, source: source)
+            let resp: [String: Any] = ["status": "ok", "id": memo.id, "imageCount": memo.imagePaths?.count ?? 0]
+            if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// GET /api/memos — 今日のメモ一覧（添付画像は枚数のみ、画像本体は配信しない）。
+    private nonisolated func handleMemosList(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let memos = MacMemoStore.shared.todayMemos.map { m -> [String: Any] in
+                ["id": m.id, "text": m.text, "time": m.time.timeIntervalSince1970,
+                 "imageCount": m.imagePaths?.count ?? 0, "source": m.source ?? ""]
+            }
+            if let d = try? JSONSerialization.data(withJSONObject: ["memos": memos]),
+               let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// POST /api/ingest — iOS 共有シート等から「Hermes に学習させる」対象を受け取る。
+    /// Web ページ・写真・テキストをメモ化し、パーソナル AI の文脈（今日のメモ）に取り込む。
+    /// Body: {kind:"url"|"image"|"text", url?, title?, text?, note?, image?/images?:[base64]}.
+    private nonisolated func handleIngest(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid JSON\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let kind   = (json["kind"] as? String)?.lowercased() ?? "text"
+        let url     = (json["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let title   = (json["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let text    = (json["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let note    = (json["note"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let images  = decodeImages(json)
+
+        // 共有内容を 1 本のメモ本文に整形（先頭にユーザーのメモ書き、続いて素材）。
+        var lines: [String] = []
+        if !note.isEmpty { lines.append(note) }
+        switch kind {
+        case "url":
+            lines.append("🔗 " + (title.isEmpty ? url : title))
+            if !url.isEmpty { lines.append(url) }
+            if !text.isEmpty { lines.append(String(text.prefix(2000))) }   // 本文抜粋は上限を設ける
+        case "image":
+            if note.isEmpty && title.isEmpty { lines.append("📷 共有された写真") }
+            if !title.isEmpty { lines.append(title) }
+            if !text.isEmpty { lines.append(String(text.prefix(2000))) }
+        default: // text
+            if !title.isEmpty { lines.append(title) }
+            if !text.isEmpty { lines.append(String(text.prefix(4000))) }
+        }
+        let memoText = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !memoText.isEmpty || !images.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Nothing to ingest\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let source = kind == "url" ? "web" : "share"
+        Task { @MainActor in
+            let memo = MacMemoStore.shared.addMemo(memoText, images: images, source: source)
+            Log.event("app", "INFO", "ingested \(kind) → memo \(memo.id) (\(memo.imagePaths?.count ?? 0) img)")
+            let resp: [String: Any] = ["status": "ok", "id": memo.id]
+            if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+            }
         }
     }
 

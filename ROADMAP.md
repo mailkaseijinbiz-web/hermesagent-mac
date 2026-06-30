@@ -4,6 +4,25 @@
 
 ---
 
+## 📅 2026-06-30 更新ログ（夕方・第2回）
+
+**前回（本日午前の記載）から進んだこと**
+- ✅ **巨大な未コミット差分が解消**：午前に懸念していた「未コミットの +1,655 行」は `03d7884 feat: lifelog/news/task improvements + Chrome tab tracking` としてコミット済み。ワーキングツリーは clean。
+- ✅ **パストラバーサル境界を修正**（午前の 🟡 を解消）：`/api/employees/{id}/file` の許可判定を「`..`/`.` 除去 → symlink 解決 → 末尾 `/` 付き接頭辞 or 完全一致」に強化（`MobileServer.swift:1622-1634`）。兄弟ディレクトリ（`<ws>-evil`）の漏れを塞いだ。
+- ✅ **PersonalAI ドメインを extension へ一部隔離**：`AppState+PersonalAI.swift`（321 行・`lifelogSummary` 生成/30分ステール判定、`dailyBriefContext` への iOS データ混合）を新設。
+- ✅ **新機能群が着地**：`MacActivityLogger`（Chrome/Safari/Arc の現在タブURLを AXUIElement で8秒ポーリング記録）、`MacLifeLogView`（iOS健康/位置/写真×Macアクティビティ混合＋AI要約＋自宅登録）、`MacNewsView`（30日スパークライン）、`TasksView` 詳細シート編集、`MacMemoStore`/`SelfGraph`/`ChartBlockView` 追加。
+
+**今日見つかった懸念（要対応・優先度順）**
+- 🔴 **PII の at-rest 暗号化が未着手なまま、機微度だけ急上昇**：本日の `MacActivityLogger` で **ブラウザの閲覧URL履歴**が新たに永続対象に。既存の `locationPoints`/`photoSummary`/`personalProfile`/`selfModel` と合わせ、**すべて平文**（`saveJSON` は `UserDefaults.standard.set(JSONEncoder…)`＝`~/Library/Preferences` の plist 平文／`AppState.swift:776`）。位置履歴＋写真要約＋閲覧履歴＋自己モデルは「個人の行動を丸ごと再構成できる」レベル。**Keychain ラップ鍵で暗号化したファイル（`~/.hermes/private/`・0600）へ移すのを最優先**に格上げ。
+- 🔴 **テスト網羅が午前から横ばい（45 funcs のまま）**：`03d7884` で約 +2,000 行が入ったが純粋ロジック（レイアウト `compact`/`overlaps`、`SelfModel` JSON 往復、`lifelogSummary` の 30分ステール判定、`MacActivityLogger` のURL正規化/重複圧縮）にテストが 1 件も足されていない。神オブジェクト分割で得た安全余地を無テストの大型機能で食い潰す構図が続く。**最小限の回帰テスト追加を継続最優先**。
+- 🟠 **アーキ退行が止まっていない**：PersonalAI を extension に切ったのに、本体 `AppState.swift` の `@Published` は **140 → 144**（合計 155）と更に増加。`MacActivityLogger`/lifelog 系の状態が本体に直書きされた疑い。本体行数は 3,267 まで縮小したが状態の集中は逆行。`AppState+Lifelog`（または `+MacActivity`）への隔離が必要。
+- 🟠 **`AXUIElement` でのブラウザタブ取得の権限/失敗系**：アクセシビリティ権限が無い/剥奪された場合の挙動、8秒ポーリングの CPU/電力影響、収集停止トグルの有無を確認すべき（プライバシー UX として「記録中」の可視化＋オフ手段が要る）。
+- 🟡 **`try?` が Models 配下で 179 箇所**：午前に永続化系は surface 化済みだが残りは多い。次は同期系（CloudKit/Gmail/Calendar）と MobileServer レスポンス系を精査。
+- ⬜ **LINE 自己回復・iOS テスト/CI・Google client secret 保護**は引き続き未着手。
+- 🟡 **iOS パリティ**：lifelog/位置/写真の**送信側プロデューサ**と新ビュー群（MacLifeLog/MacNews/Dashboard）の iOS 反映が未実装で差が拡大中。
+
+---
+
 ## 📅 2026-06-30 更新ログ
 
 **前回（06-28）から進んだこと**

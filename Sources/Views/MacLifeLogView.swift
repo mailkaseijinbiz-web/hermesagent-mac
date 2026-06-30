@@ -1,4 +1,7 @@
 import SwiftUI
+import Combine
+import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - Flow layout（チップの折り返し表示用）
 
@@ -62,6 +65,7 @@ struct MacLifeLogView: View {
     @State private var entries: [MacActivityEntry] = []
     @State private var showMemoInput      = false
     @State private var newMemoText        = ""
+    @State private var newMemoImages: [Data] = []
     @State private var editingMemo: MacMemo? = nil
     @State private var editMemoText       = ""
     @State private var showHomeEditor     = false
@@ -331,20 +335,21 @@ struct MacLifeLogView: View {
     }
 
     private var memoInputSheet: some View {
-        VStack(spacing: 0) {
+        let canSave = !newMemoText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !newMemoImages.isEmpty
+        return VStack(spacing: 0) {
             HStack {
                 Text("メモを追加").font(.system(size: 15, weight: .semibold))
                 Spacer()
-                Button("キャンセル") { showMemoInput = false; newMemoText = "" }
+                Button("キャンセル") { closeMemoInput() }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
                 Button("保存") {
                     let t = newMemoText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !t.isEmpty { memoStore.addMemo(t); newMemoText = "" }
-                    showMemoInput = false
+                    if canSave { memoStore.addMemo(t, images: newMemoImages) }
+                    closeMemoInput()
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(newMemoText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                 ? .secondary : Color.accentColor)
+                .foregroundStyle(canSave ? Color.accentColor : .secondary)
+                .disabled(!canSave)
             }
             .padding()
             Divider()
@@ -352,8 +357,58 @@ struct MacLifeLogView: View {
                 .font(.system(size: 14))
                 .frame(minHeight: 120)
                 .padding(8)
+            if !newMemoImages.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(newMemoImages.enumerated()), id: \.offset) { idx, data in
+                            ZStack(alignment: .topTrailing) {
+                                if let img = NSImage(data: data) {
+                                    Image(nsImage: img).resizable().scaledToFill()
+                                        .frame(width: 64, height: 64).clipped().cornerRadius(8)
+                                }
+                                Button { newMemoImages.remove(at: idx) } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 14)).foregroundStyle(.white, .black.opacity(0.5))
+                                }
+                                .buttonStyle(.plain).padding(2)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+                .frame(height: 72)
+            }
+            Divider()
+            HStack {
+                Button { pickMemoImages() } label: {
+                    Label("写真を追加", systemImage: "photo.on.rectangle")
+                        .font(.system(size: 13))
+                }
+                .buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
         }
         .frame(width: 400)
+    }
+
+    private func closeMemoInput() {
+        showMemoInput = false; newMemoText = ""; newMemoImages = []
+    }
+
+    /// Mac ネイティブのファイル選択で画像を取り込む（ユーザー選択ファイルなので追加 entitlement 不要）。
+    private func pickMemoImages() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.png, .jpeg, .heic, .image]
+        if panel.runModal() == .OK {
+            for url in panel.urls {
+                guard let data = try? Data(contentsOf: url) else { continue }
+                // 大きすぎる画像はそのまま保存（縮小は今後）。HEIC も JPEG 化せずバイト列で保持。
+                newMemoImages.append(data)
+            }
+        }
     }
 
     private func memoEditSheet(_ m: MacMemo) -> some View {
@@ -468,17 +523,38 @@ struct MacTimelineRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
         case .memo(let m):
-            Text(m.text)
-                .font(.system(size: 13))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Color.primary.opacity(0.04))
-                .cornerRadius(8)
-                .contextMenu {
-                    Button("編集") { onEditMemo(m) }
-                    Divider()
-                    Button("削除", role: .destructive) { onDeleteMemo(m.id) }
+            VStack(alignment: .leading, spacing: 6) {
+                if let src = m.source, !src.isEmpty {
+                    Label(src == "web" ? "共有 · Web" : "共有", systemImage: src == "web" ? "link" : "square.and.arrow.up")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
+                if !m.text.isEmpty {
+                    Text(m.text).font(.system(size: 13))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if let paths = m.imagePaths, !paths.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(paths, id: \.self) { name in
+                                if let img = NSImage(contentsOf: MacMemoStore.imageURL(name)) {
+                                    Image(nsImage: img).resizable().scaledToFill()
+                                        .frame(width: 96, height: 96).clipped().cornerRadius(8)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Color.primary.opacity(0.04))
+            .cornerRadius(8)
+            .contextMenu {
+                Button("編集") { onEditMemo(m) }
+                Divider()
+                Button("削除", role: .destructive) { onDeleteMemo(m.id) }
+            }
 
         case .iOSHealth(let h, _):
             iOSCard(icon: "iphone", label: "iPhone ヘルスケア", tint: .green) {

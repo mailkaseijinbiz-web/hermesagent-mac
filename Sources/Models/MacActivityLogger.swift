@@ -93,7 +93,7 @@ final class MacActivityLogger {
                 live.bundleId     = currentBundle.isEmpty ? nil : currentBundle
                 live.windowTitle  = currentWindowTitle.isEmpty ? nil : currentWindowTitle
                 live.url          = currentURL.isEmpty ? nil : currentURL
-                live.label        = buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
+                live.label        = Self.buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
                 live.startTime    = start.timeIntervalSince1970
                 live.endTime      = Date().timeIntervalSince1970
                 all.append(live)
@@ -113,7 +113,7 @@ final class MacActivityLogger {
                 live.bundleId     = currentBundle.isEmpty ? nil : currentBundle
                 live.windowTitle  = currentWindowTitle.isEmpty ? nil : currentWindowTitle
                 live.url          = currentURL.isEmpty ? nil : currentURL
-                live.label        = buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
+                live.label        = Self.buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
                 live.startTime    = start.timeIntervalSince1970
                 live.endTime      = Date().timeIntervalSince1970
                 all.append(live)
@@ -139,7 +139,7 @@ final class MacActivityLogger {
                 entry.bundleId    = currentBundle.isEmpty ? nil : currentBundle
                 entry.windowTitle = currentWindowTitle.isEmpty ? nil : currentWindowTitle
                 entry.url         = currentURL.isEmpty ? nil : currentURL
-                entry.label       = buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
+                entry.label       = Self.buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
                 entry.startTime   = start.timeIntervalSince1970
                 entry.endTime     = Date().timeIntervalSince1970
                 mergeOrAppend(entry)
@@ -200,7 +200,7 @@ final class MacActivityLogger {
             entry.bundleId    = currentBundle.isEmpty ? nil : currentBundle
             entry.windowTitle = currentWindowTitle.isEmpty ? nil : currentWindowTitle
             entry.url         = currentURL.isEmpty ? nil : currentURL
-            entry.label       = buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
+            entry.label       = Self.buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
             entry.startTime   = start.timeIntervalSince1970
             entry.endTime     = Date().timeIntervalSince1970
             mergeOrAppend(entry)
@@ -215,17 +215,21 @@ final class MacActivityLogger {
     // 同一アプリ・同一URL・同一タイトルの連続エントリは endTime を伸ばしてマージ
     private func mergeOrAppend(_ entry: MacActivityEntry) {
         if let prev = completedEntries.last,
-           prev.appName == entry.appName,
-           prev.url == entry.url,
-           prev.windowTitle == entry.windowTitle,
-           entry.startTime - prev.endTime < 30 {
+           Self.shouldMergeAdjacent(previous: prev, next: entry) {
             completedEntries[completedEntries.count - 1].endTime = entry.endTime
         } else {
             completedEntries.append(entry)
         }
     }
 
-    private func buildLabel(appName: String, windowTitle: String) -> String {
+    static nonisolated func shouldMergeAdjacent(previous: MacActivityEntry, next: MacActivityEntry, maxGap: TimeInterval = 30) -> Bool {
+        previous.appName == next.appName &&
+        previous.url == next.url &&
+        previous.windowTitle == next.windowTitle &&
+        next.startTime - previous.endTime < maxGap
+    }
+
+    static nonisolated func buildLabel(appName: String, windowTitle: String) -> String {
         windowTitle.isEmpty ? appName : "\(appName) — \(windowTitle)"
     }
 
