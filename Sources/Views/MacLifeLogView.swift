@@ -72,30 +72,8 @@ struct MacLifeLogView: View {
     @State private var homeKeywordDraft   = ""
     private let refreshTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
-    private var timeline: [MacLifeLogItem] {
-        let cal   = Calendar.current
-        var items = entries.map { MacLifeLogItem.activity($0) }
-                  + memoStore.todayMemos.map { MacLifeLogItem.memo($0) }
-
-        // iOS ヘルスデータ（今日受信分のみ）
-        if let h = appState.latestHealth, h.updatedAt > 0 {
-            let t = Date(timeIntervalSince1970: h.updatedAt)
-            if cal.isDateInToday(t) { items.append(.iOSHealth(h, t)) }
-        }
-        // iOS 位置情報（今日受信分のみ）
-        if !appState.locationSummary.isEmpty, appState.locationSummaryAt > 0 {
-            let t = Date(timeIntervalSince1970: appState.locationSummaryAt)
-            if cal.isDateInToday(t) {
-                items.append(.iOSLocation(appState.resolvedLocationSummary(appState.locationSummary), t))
-            }
-        }
-        // iOS 写真サマリ（今日受信分のみ）
-        if !appState.photoSummary.isEmpty, appState.photoSummaryAt > 0 {
-            let t = Date(timeIntervalSince1970: appState.photoSummaryAt)
-            if cal.isDateInToday(t) { items.append(.iOSPhoto(appState.photoSummary, t)) }
-        }
-
-        return items.sorted { $0.time < $1.time }
+    private var graphEvents: [DayTimelineEvent] {
+        appState.todayTimelineEvents()
     }
 
     var body: some View {
@@ -111,15 +89,26 @@ struct MacLifeLogView: View {
                     locationBadge.padding(.bottom, 14)
                 }
 
-                if timeline.isEmpty {
+                if !graphEvents.isEmpty {
+                    Text("今日の流れ")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 8)
+                }
+
+                if graphEvents.isEmpty {
                     emptyState
                 } else {
-                    ForEach(Array(timeline.enumerated()), id: \.element.id) { idx, item in
-                        MacTimelineRow(
-                            item: item,
-                            isLast: idx == timeline.count - 1,
-                            onEditMemo: { m in editingMemo = m; editMemoText = m.text },
-                            onDeleteMemo: { id in memoStore.deleteMemo(id: id) }
+                    ForEach(Array(graphEvents.enumerated()), id: \.element.id) { idx, ev in
+                        DayTimelineRowView(
+                            event: ev,
+                            isLast: idx == graphEvents.count - 1,
+                            onEditMemo: { id in
+                                if let m = memoStore.todayMemos.first(where: { $0.id == id }) {
+                                    editingMemo = m
+                                    editMemoText = m.text
+                                }
+                            }
                         )
                     }
                 }

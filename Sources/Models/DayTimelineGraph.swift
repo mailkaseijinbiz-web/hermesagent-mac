@@ -92,7 +92,7 @@ extension AppState {
             locationUpdatedAt: locationSummaryAt > 0 ? locationSummaryAt : nil,
             locationLine: locationSummary.isEmpty ? nil : resolvedLocationSummary(locationSummary),
             photoUpdatedAt: photoSummaryAt > 0 ? photoSummaryAt : nil,
-            photoLine: photoSummary.isEmpty ? nil : photoSummary,
+            photoLine: photoSummary.isEmpty ? nil : photoSummary
         )
     }
 

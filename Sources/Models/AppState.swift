@@ -801,10 +801,25 @@ class AppState: ObservableObject {
     static func loadTasks() -> [WorkTask] { loadJSON("workTasks") ?? [] }
     static func loadArtifacts() -> [Artifact] { loadJSON("artifacts") ?? [] }
     static func loadJSON<T: Decodable>(_ key: String) -> T? {
+        if PrivateStoreKeys.all.contains(key) {
+            if let v: T = PrivateStore.load(T.self, key: key) { return v }
+            guard let data = UserDefaults.standard.data(forKey: key),
+                  let decoded = try? JSONDecoder().decode(T.self, from: data) else { return nil }
+            try? PrivateStore.saveData(data, key: key)
+            UserDefaults.standard.removeObject(forKey: key)
+            return decoded
+        }
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
     }
     static func saveJSON<T: Encodable>(_ value: T, _ key: String) {
+        if PrivateStoreKeys.all.contains(key) {
+            do {
+                try PrivateStore.save(value, key: key)
+                UserDefaults.standard.removeObject(forKey: key)
+            } catch { Log.failure("app", "暗号化保存に失敗 (\(key))", error) }
+            return
+        }
         do { UserDefaults.standard.set(try JSONEncoder().encode(value), forKey: key) }
         catch { Log.failure("app", "状態の保存に失敗 (\(key))", error) }
     }
