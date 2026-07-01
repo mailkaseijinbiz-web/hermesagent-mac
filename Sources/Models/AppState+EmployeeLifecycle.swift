@@ -120,6 +120,8 @@ extension AppState {
         // Save the outgoing employee's current messages to their shadow (preserves streaming bubble).
         let outKey = empKey(activeEmployeeId)
         empMessages[outKey] = cappedShadow(messages)
+        touchEmpMessageShadow(forKey: outKey)
+        pruneEmpMessageShadows()
         if let curId = activeEmployeeId, let idx = employees.firstIndex(where: { $0.id == curId }) {
             employees[idx].sessionId = currentSessionId
             recordSessionOwner(currentSessionId, curId)

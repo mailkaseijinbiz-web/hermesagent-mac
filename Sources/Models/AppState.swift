@@ -431,6 +431,10 @@ class AppState: ObservableObject {
     @Published var pushDeviceTokens: [String] = UserDefaults.standard.stringArray(forKey: "pushDeviceTokens") ?? [] {
         didSet { UserDefaults.standard.set(pushDeviceTokens, forKey: "pushDeviceTokens") }
     }
+    // Live Activity push tokens (from /api/push/live-activity-token) — capped list for APNs updates.
+    @Published var liveActivityPushTokens: [String] = UserDefaults.standard.stringArray(forKey: "liveActivityPushTokens") ?? [] {
+        didSet { UserDefaults.standard.set(liveActivityPushTokens, forKey: "liveActivityPushTokens") }
+    }
     private var lastPushedMessageId: Int64 = 0
     
     // Settings Form State
@@ -874,6 +878,8 @@ class AppState: ObservableObject {
     var empProcesses:    [String: Process]  = [:]
     var empACPClients:   [String: ACPClient] = [:]
     var empMessages:     [String: [Message]] = [:]
+    /// Last-touch timestamps for empMessages keys — drives LRU pruning of idle shadows.
+    private var empMessageTouchAt: [String: Date] = [:]
     /// In-flight per-employee model application; a send awaits it so the first message can't run on
     /// the previous employee's model. internal (relocated from the employees section) so the extracted
     /// switchEmployee can assign it while handleSendMessage (main) awaits it.
@@ -890,8 +896,51 @@ class AppState: ObservableObject {
     /// most recent N (the streaming bubble is the last element, so it always survives). The full
     /// history still lives in StateDB and reloads when you reopen that conversation.
     private let maxShadowMessages = 600
+    /// Max distinct employee shadow arrays kept in memory (LRU prune of idle employees).
+    internal static let maxShadowEmployeeKeys = 12
     func cappedShadow(_ msgs: [Message]) -> [Message] {   // internal: used by switchEmployee (extracted) + handleSendMessage
         msgs.count > maxShadowMessages ? Array(msgs.suffix(maxShadowMessages)) : msgs
+    }
+
+    /// Keys to drop when `empMessages` exceeds `maxShadowEmployeeKeys`. Protected keys
+    /// (busy/streaming/active) are never removed; others are LRU by `lastTouch`.
+    nonisolated internal static func empMessageShadowKeysToPrune(
+        keys: [String],
+        lastTouch: [String: Date],
+        busyIds: Set<String>,
+        streamingIds: Set<String>,
+        activeId: String?,
+        maxKeys: Int = maxShadowEmployeeKeys
+    ) -> [String] {
+        guard keys.count > maxKeys else { return [] }
+        var protected = busyIds.union(streamingIds)
+        let activeKey = activeId ?? ""
+        if !activeKey.isEmpty { protected.insert(activeKey) }
+        let candidates = keys.filter { !protected.contains($0) }
+        let excess = keys.count - maxKeys
+        guard excess > 0, !candidates.isEmpty else { return [] }
+        let sorted = candidates.sorted {
+            (lastTouch[$0] ?? .distantPast) < (lastTouch[$1] ?? .distantPast)
+        }
+        return Array(sorted.prefix(excess))
+    }
+
+    func touchEmpMessageShadow(forKey key: String) {
+        empMessageTouchAt[key] = Date()
+    }
+
+    func pruneEmpMessageShadows() {
+        let toRemove = Self.empMessageShadowKeysToPrune(
+            keys: Array(empMessages.keys),
+            lastTouch: empMessageTouchAt,
+            busyIds: busyEmployeeIds,
+            streamingIds: streamingEmployeeIds,
+            activeId: activeEmployeeId
+        )
+        for k in toRemove {
+            empMessages.removeValue(forKey: k)
+            empMessageTouchAt.removeValue(forKey: k)
+        }
     }
 
     /// Convenience — stable key for an employee id (nil → "全体"). internal: used by domain extensions.
@@ -1796,29 +1845,58 @@ class AppState: ObservableObject {
     }
 
     func sendPushIfEnabled(title: String, body: String, sessionId: String?, proactive: Bool = false) {
-        guard apnsEnabled, !apnsKeyId.isEmpty, !apnsKeyPath.isEmpty, !apnsTeamId.isEmpty, !pushDeviceTokens.isEmpty else { return }
+        guard apnsEnabled, !apnsKeyId.isEmpty, !apnsKeyPath.isEmpty, !apnsTeamId.isEmpty else { return }
         let cfg = APNsSender.Config(
             keyPath: apnsKeyPath, keyId: apnsKeyId, teamId: apnsTeamId,
             bundleId: apnsBundleId, useSandbox: apnsUseSandbox
         )
+        let preview = String(body.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
         // Skip devices that are already viewing this session in the foreground — they
         // see the message live via SSE, so a banner would be redundant/annoying.
         var tokens = pushDeviceTokens
         if let sid = sessionId {
             tokens = tokens.filter { !isForegroundedOn(token: $0, sessionId: sid) }
         }
-        guard !tokens.isEmpty else { return }
-        // Bump each receiving device's badge, and send its current count as aps.badge.
-        for t in tokens { deviceBadge[t, default: 0] += 1 }
-        let badges = deviceBadge.filter { tokens.contains($0.key) }
-        Task { [weak self] in
-            let invalid = await APNsSender.shared.send(to: tokens, title: title, body: body,
-                                                       sessionId: sessionId, proactive: proactive,
-                                                       badges: badges, config: cfg)
-            if !invalid.isEmpty {
-                await MainActor.run {
-                    self?.pushDeviceTokens.removeAll { invalid.contains($0) }
-                    invalid.forEach { self?.deviceBadge[$0] = nil }   // prune stale badge entries too
+        if !tokens.isEmpty {
+            // Bump each receiving device's badge, and send its current count as aps.badge.
+            for t in tokens { deviceBadge[t, default: 0] += 1 }
+            let badges = deviceBadge.filter { tokens.contains($0.key) }
+            Task { [weak self] in
+                let invalid = await APNsSender.shared.send(to: tokens, title: title, body: body,
+                                                           sessionId: sessionId, proactive: proactive,
+                                                           badges: badges, config: cfg)
+                if !invalid.isEmpty {
+                    await MainActor.run {
+                        self?.pushDeviceTokens.removeAll { invalid.contains($0) }
+                        invalid.forEach { self?.deviceBadge[$0] = nil }
+                    }
+                }
+            }
+        }
+        if proactive, !liveActivityPushTokens.isEmpty {
+            var emoji = "✨"
+            var name = title
+            if let sid = sessionId, let empId = sessionOwner[sid],
+               let emp = employees.first(where: { $0.id == empId }) {
+                emoji = emp.role.emoji
+                name = emp.name
+            }
+            let contentState: [String: Any] = [
+                "employeeEmoji": emoji,
+                "employeeName": name,
+                "isStreaming": false,
+                "preview": preview,
+                "toolLabel": "チェックイン"
+            ]
+            let laTokens = liveActivityPushTokens
+            Task { [weak self] in
+                let laInvalid = await APNsSender.shared.sendLiveActivityUpdate(
+                    to: laTokens, contentState: contentState, config: cfg
+                )
+                if !laInvalid.isEmpty {
+                    await MainActor.run {
+                        self?.liveActivityPushTokens.removeAll { laInvalid.contains($0) }
+                    }
                 }
             }
         }
@@ -1830,6 +1908,15 @@ class AppState: ObservableObject {
         pushDeviceTokens.append(t)
         if pushDeviceTokens.count > 5 {
             pushDeviceTokens.removeFirst(pushDeviceTokens.count - 5)
+        }
+    }
+
+    func addLiveActivityPushToken(_ token: String) {
+        let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !liveActivityPushTokens.contains(t) else { return }
+        liveActivityPushTokens.append(t)
+        if liveActivityPushTokens.count > 5 {
+            liveActivityPushTokens.removeFirst(liveActivityPushTokens.count - 5)
         }
     }
 
@@ -2003,6 +2090,8 @@ class AppState: ObservableObject {
         ACPClient.shared.resetSession()
         empACPClients[empKey()]?.resetSession()
         empMessages.removeValue(forKey: empKey())  // clear any stale shadow for this employee
+        empMessageTouchAt.removeValue(forKey: empKey())
+        pruneEmpMessageShadows()
     }
 
     func handleSelectSession(_ session: Session) {
@@ -2255,6 +2344,8 @@ class AppState: ObservableObject {
         self.messages.append(Message(id: assistantId, role: .assistant, content: "", typewriter: true))
         // Snapshot current messages into the shadow (background streaming keeps chunks here).
         empMessages[curKey] = cappedShadow(messages)
+        touchEmpMessageShadow(forKey: curKey)
+        pruneEmpMessageShadows()
         // Mark this assistantId as the live turn for curKey (guards against late/superseded events).
         streamingAssistantIds[curKey] = assistantId
 
@@ -2473,6 +2564,8 @@ class AppState: ObservableObject {
             // live-turn marker makes any still-queued onEvent callbacks no-op. Only clear if it's
             // still OURS (a newer turn for this key may have already claimed the slot).
             self.empMessages.removeValue(forKey: owningKey)
+            self.empMessageTouchAt.removeValue(forKey: owningKey)
+            self.pruneEmpMessageShadows()
             if self.streamingAssistantIds[owningKey] == assistantId {
                 self.streamingAssistantIds.removeValue(forKey: owningKey)
             }
@@ -2507,6 +2600,8 @@ class AppState: ObservableObject {
         streamText = ""
         empStreamTexts.removeValue(forKey: owningKey)
         empMessages.removeValue(forKey: owningKey)
+        empMessageTouchAt.removeValue(forKey: owningKey)
+        pruneEmpMessageShadows()
         streamingAssistantIds.removeValue(forKey: owningKey)
         if owningKey == empKey() { streamStartedAt = nil; lastStreamActivityAt = nil }
         if streamingEmployeeIds.isEmpty { activeStatus = "online" }
@@ -2524,6 +2619,8 @@ class AppState: ObservableObject {
         streamText = ""
         empStreamTexts.removeValue(forKey: key)
         empMessages.removeValue(forKey: key)
+        empMessageTouchAt.removeValue(forKey: key)
+        pruneEmpMessageShadows()
         streamingAssistantIds.removeValue(forKey: key)   // late onEvent callbacks now no-op
         streamStartedAt = nil; lastStreamActivityAt = nil
         if streamingEmployeeIds.isEmpty { activeStatus = "online" }

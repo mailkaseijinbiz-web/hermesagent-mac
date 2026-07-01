@@ -6,6 +6,12 @@
 
 ## 📅 2026-07-01 更新ログ
 
+**`cursor/intention-cards` ブランチで完了（Phase F）**
+- ✅ **F1**：ActivityKit push scaffold — iOS `pushType: .token` + `pushTokenUpdates` → Mac `/api/push/live-activity-token`、Mac `APNsSender.sendLiveActivityUpdate`（`apns-push-type: liveactivity`）、proactive 時に Dynamic Island 更新
+- ✅ **F2**：`empMessages` メモリ上限（`maxShadowEmployeeKeys = 12`）+ LRU プルーニング（`pruneEmpMessageShadows`）
+- ✅ **F3**：`NetworkPeerPolicy` 抽出 + `MobileServerPeerTests`（loopback / Tailscale / LAN / public 分類）
+- Mac テスト +8 funcs（`EmpMessagePruneTests` +4、`MobileServerPeerTests` +4）
+
 **`cursor/intention-cards` ブランチで完了**
 - ✅ **B3/B4**：意図カード（Intention）Mac/iOS パリティ＋ウィジェット連携
 - ✅ **C**：高機微 PII の PrivateStore 暗号化（`locationDaily` / `photoDaily` / `lifelogDaily` 等）

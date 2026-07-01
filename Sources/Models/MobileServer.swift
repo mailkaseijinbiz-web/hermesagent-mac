@@ -1,6 +1,19 @@
 import Foundation
 import Network
 
+/// IP classification for MobileServer peer filtering (unit-testable).
+enum NetworkPeerPolicy {
+    /// True for routable public IPv4 — such peers are rejected before auth.
+    static func isPublicIPv4Peer(_ raw: String) -> Bool {
+        MobileServer.isRoutablePublicIPv4(raw)
+    }
+
+    /// True when the peer IP is not a routable public IPv4 (loopback, LAN, Tailscale, IPv6, unknown).
+    static func isTrustedPeerIP(_ raw: String) -> Bool {
+        !isPublicIPv4Peer(raw)
+    }
+}
+
 /// Lightweight HTTP server for iOS mobile app connectivity.
 /// Uses NWListener from the Network framework — zero external dependencies.
 @MainActor
@@ -106,7 +119,7 @@ class MobileServer {
 
     private nonisolated func isPublicPeer(_ connection: NWConnection) -> Bool {
         guard let ip = peerIP(connection) else { return false }   // unknown → allow (auth still gates)
-        return Self.isRoutablePublicIPv4(ip)
+        return NetworkPeerPolicy.isPublicIPv4Peer(ip)
     }
 
     /// True only for a routable public IPv4 address. Private/CGNAT/loopback/link-local IPv4 and
@@ -303,6 +316,8 @@ class MobileServer {
             handleNewSession(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/push/register"):
             handlePushRegister(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/push/live-activity-token"):
+            handleLiveActivityPushToken(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/presence"):
             handlePresence(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/badge/clear"):
@@ -881,6 +896,19 @@ class MobileServer {
         }
         Task { @MainActor in
             AppState.shared.addPushToken(token)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleLiveActivityPushToken(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["token"] as? String, !token.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing token\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.addLiveActivityPushToken(token)
             self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
         }
     }
