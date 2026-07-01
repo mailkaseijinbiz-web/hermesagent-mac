@@ -313,6 +313,8 @@ class AppState: ObservableObject {
     @Published var lineBridgeStatus: String = ""
     @Published var lineDeliveryAuthError: String? = nil
     var lineBridgeWatchdogTimer: Timer?
+    var mobileServerTailscaleWatchdogTimer: Timer?
+    var lineAuthBridgeRestartPending = false
     var previousLineAuthErrors: [String: String] = [:]
 
     /// Ensure the LINE bridge is running, then reflect its live state in the UI.
@@ -1243,6 +1245,7 @@ class AppState: ObservableObject {
             // cloud sync — none of them depend on it, and blocking here was the main launch stall.
             MobileServer.shared.start()
             self.isMobileServerRunning = true
+            startMobileServerTailscaleWatchdog()
             startStoreSync()                              // reflect iPhone/iPad/cron changes
             let bridge = Task { await self.startLineBridge() }   // bridge.py on :8650 (keep LINE working)
             self.startLineBridgeWatchdog()

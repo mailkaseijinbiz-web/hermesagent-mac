@@ -39,7 +39,15 @@ final class FailedDeliveryStore: ObservableObject {
             ), at: 0)
         }
         updated = FailedDeliveryLogic.cap(updated, maxEntries: Self.maxEntries)
+        updated = HermesExecPolicy.reconcileDeadLetters(records: updated, jobs: jobs)
         persist(updated)
+    }
+
+    /// Drop dead-letter rows for jobs whose `lastError` has cleared.
+    func reconcile(with jobs: [HermesCronJob]) {
+        let next = HermesExecPolicy.reconcileDeadLetters(records: records, jobs: jobs)
+        guard next.count != records.count else { return }
+        persist(next)
     }
 
     func clearAll() {

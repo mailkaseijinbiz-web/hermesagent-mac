@@ -20,6 +20,15 @@ enum NetworkPeerPolicy {
         if !ts.isEmpty, ts.contains(".") { addrs.append(ts) }
         return addrs
     }
+
+    /// True when Tailscale IPv4 changed (or appeared/vanished) and listeners should restart.
+    nonisolated static func shouldRebindTailscale(bound: String?, detected: String?) -> Bool {
+        let b = bound?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let d = detected?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if b == d { return false }
+        if d.isEmpty && b.isEmpty { return false }
+        return true
+    }
 }
 
 /// Lightweight HTTP server for iOS mobile app connectivity.
@@ -31,6 +40,7 @@ class MobileServer {
     private var listeners: [NWListener] = []
     private(set) var isRunning = false
     private(set) var port: UInt16 = AppConfig.mobilePort
+    private(set) var boundTailscaleIPv4: String?
     
     // Active SSE connections for chat streaming
     private var activeStreamConnections: [NWConnection] = []
@@ -101,6 +111,20 @@ class MobileServer {
         if started.isEmpty {
             print("[MobileServer] No listeners started")
         }
+        if let ts = tailscaleIP?.trimmingCharacters(in: .whitespacesAndNewlines), !ts.isEmpty {
+            boundTailscaleIPv4 = ts
+        } else {
+            boundTailscaleIPv4 = nil
+        }
+    }
+
+    /// Re-start listeners when Tailscale IPv4 appears or changes (e.g. Tailscale started after the hub).
+    func rebindIfTailscaleChanged(detected: String?) {
+        let normalized = detected?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = (normalized?.isEmpty == false) ? normalized : nil
+        guard NetworkPeerPolicy.shouldRebindTailscale(bound: boundTailscaleIPv4, detected: trimmed) else { return }
+        print("[MobileServer] Tailscale bind changed (\(boundTailscaleIPv4 ?? "none") → \(trimmed ?? "none")); rebinding")
+        start(port: port)
     }
 
     func stop() {

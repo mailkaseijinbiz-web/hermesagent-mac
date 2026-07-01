@@ -58,7 +58,19 @@ extension AppState {
         let hasNew = current.contains { id, err in previousLineAuthErrors[id] != err }
         if hasNew {
             triggerToast(message: Self.lineDeliveryAuthErrorMessage)
+            scheduleLineBridgeRestartForAuthError()
         }
         previousLineAuthErrors = current
+    }
+
+    /// Debounced bridge restart when cron reports LINE 401 (token may have been rotated externally).
+    private func scheduleLineBridgeRestartForAuthError() {
+        guard !lineAuthBridgeRestartPending else { return }
+        lineAuthBridgeRestartPending = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            await restartLineBridge()
+            lineAuthBridgeRestartPending = false
+        }
     }
 }

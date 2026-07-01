@@ -43,4 +43,17 @@ final class MobileServerPeerTests: XCTestCase {
             ["127.0.0.1", "100.127.255.1"]
         )
     }
+
+    func testShouldRebindWhenTailscaleAppears() {
+        XCTAssertTrue(NetworkPeerPolicy.shouldRebindTailscale(bound: nil, detected: "100.64.0.1"))
+    }
+
+    func testShouldRebindWhenTailscaleIPChanges() {
+        XCTAssertTrue(NetworkPeerPolicy.shouldRebindTailscale(bound: "100.64.0.1", detected: "100.64.0.2"))
+    }
+
+    func testShouldNotRebindWhenUnchanged() {
+        XCTAssertFalse(NetworkPeerPolicy.shouldRebindTailscale(bound: "100.64.0.1", detected: "100.64.0.1"))
+        XCTAssertFalse(NetworkPeerPolicy.shouldRebindTailscale(bound: nil, detected: nil))
+    }
 }

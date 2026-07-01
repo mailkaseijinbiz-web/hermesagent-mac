@@ -50,4 +50,14 @@ final class FailedDeliveryStoreTests: XCTestCase {
         XCTAssertEqual(capped.first?.error, "e0")
         XCTAssertEqual(capped.last?.error, "e29")
     }
+
+    func testReconcileDeadLettersViaPolicy() {
+        let rec = record(jobId: "job1", error: "timeout", at: Date())
+        let ok = HermesCronJob(
+            id: "job1", name: "t", schedule: "0 9 * * *", repeatCount: "0",
+            nextRun: "", deliver: "local", status: "active", script: nil, mode: nil,
+            lastRun: nil, lastError: nil
+        )
+        XCTAssertTrue(HermesExecPolicy.reconcileDeadLetters(records: [rec], jobs: [ok]).isEmpty)
+    }
 }
