@@ -126,6 +126,8 @@ struct MainView: View {
                             }
                     } else if appState.view == "news" {
                         MacNewsView()
+                    } else if appState.view == "collection" {
+                        MacCollectionView()
                     } else {
                         ChatView()
                     }
@@ -222,6 +224,7 @@ struct MainView: View {
         case "apps": return "アプリ"
         case "automations": return "オートメーション"
         case "news":        return "ニュース"
+        case "collection":  return "コレクション"
         case "settings": return "設定"
         default:
             if let emp = appState.activeEmployee {
@@ -238,7 +241,7 @@ struct MainView: View {
     /// Section screens (ホーム/ニュース/タスク/社員) — title only, no status chips or sidebar toggles.
     private var headerIsSectionScreen: Bool {
         switch appState.view {
-        case "home", "dashboard", "lifelog", "news", "tasks", "company", "employee":
+        case "home", "dashboard", "lifelog", "news", "tasks", "collection", "company", "employee":
             return true
         default:
             return false

@@ -32,6 +32,10 @@ struct SidebarView: View {
                                   isSelected: appState.view == "tasks") {
                     appState.view = "tasks"
                 }
+                SidebarMenuButton(icon: "tray.full", title: "コレクション",
+                                  isSelected: appState.view == "collection") {
+                    appState.view = "collection"
+                }
                 SidebarMenuButton(icon: "person.2.fill", title: "社員",
                                   isSelected: appState.view == "company") {
                     appState.view = "company"

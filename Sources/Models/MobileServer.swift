@@ -352,6 +352,11 @@ class MobileServer {
             handleMemosList(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/ingest"):
             handleIngest(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/collection"):
+            handleCollectionList(connection: connection, corsHeaders: corsHeaders)
+        case ("DELETE", _) where pathOnly.hasPrefix("/api/collection/"):
+            let id = String(pathOnly.dropFirst("/api/collection/".count))
+            handleCollectionDelete(connection: connection, id: id, corsHeaders: corsHeaders)
         case ("GET", "/api/review"):
             handleReviewGet(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/review"):
@@ -1241,17 +1246,59 @@ class MobileServer {
         let pageTitle = title.isEmpty ? nil : title
         let link = kind == "url" && !url.isEmpty ? url : nil
         Task { @MainActor in
+            let collectionItem = CollectionStore.shared.add(
+                kind: mediaKind,
+                title: title,
+                note: note,
+                url: url,
+                text: text,
+                images: images,
+                source: source
+            )
             let memo = MacMemoStore.shared.addMemo(
                 memoText, images: images, source: source,
                 link: link, pageTitle: pageTitle, mediaKind: mediaKind
             )
-            Log.event("app", "INFO", "ingested \(kind) → memo \(memo.id) (\(memo.imagePaths?.count ?? 0) img)")
-            let resp: [String: Any] = ["status": "ok", "id": memo.id]
+            Log.event("app", "INFO", "ingested \(kind) → collection \(collectionItem.id) memo \(memo.id) (\(memo.imagePaths?.count ?? 0) img)")
+            let resp: [String: Any] = ["status": "ok", "id": memo.id, "collectionId": collectionItem.id]
             if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
                 self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
             } else {
                 self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
             }
+        }
+    }
+
+    /// GET /api/collection — saved share/ingest items (newest first).
+    private nonisolated func handleCollectionList(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let items = CollectionStore.shared.items.map { item -> [String: Any] in
+                [
+                    "id": item.id,
+                    "kind": item.kind,
+                    "title": item.title,
+                    "note": item.note,
+                    "url": item.url,
+                    "text": item.text,
+                    "imageCount": item.imagePaths.count,
+                    "source": item.source,
+                    "createdAt": item.createdAt.timeIntervalSince1970,
+                ]
+            }
+            if let d = try? JSONSerialization.data(withJSONObject: ["items": items]),
+               let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// DELETE /api/collection/{id}
+    private nonisolated func handleCollectionDelete(connection: NWConnection, id: String, corsHeaders: String) {
+        Task { @MainActor in
+            CollectionStore.shared.delete(id: id)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
         }
     }
 
