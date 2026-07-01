@@ -40,6 +40,48 @@ final class MacActivityLoggerTests: XCTestCase {
         XCTAssertEqual(loaded, data)
     }
 
+    func testLegacyJSONFileMigratesToEncryptedStore() throws {
+        let storeKey = MacActivityLogger.activityStoreKey()
+        let todayLegacy = MacActivityLogger.legacyActivityPath()
+        defer {
+            PrivateStore.remove(key: storeKey)
+            try? FileManager.default.removeItem(atPath: todayLegacy)
+        }
+        try? PrivateStore.remove(key: storeKey)
+        try? FileManager.default.removeItem(atPath: todayLegacy)
+
+        var entry = MacActivityEntry()
+        entry.appName = "Chrome"
+        entry.label = "Chrome — Docs"
+        entry.url = "https://example.com/doc"
+        entry.startTime = 500
+        entry.endTime = 600
+        let data = try JSONEncoder().encode([entry])
+        try data.write(to: URL(fileURLWithPath: todayLegacy))
+
+        let migrated = MacActivityLogger.loadEntries()
+        XCTAssertEqual(migrated.count, 1)
+        XCTAssertEqual(migrated[0].appName, "Chrome")
+        XCTAssertEqual(migrated[0].url, "https://example.com/doc")
+        XCTAssertNotNil(PrivateStore.loadData(key: storeKey))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: todayLegacy))
+    }
+
+    func testStoredActivityDayKeysFindsEncryptedAndLegacy() throws {
+        let day = "2099-01-15"
+        let encKey = "mac-activity-\(day)"
+        defer { PrivateStore.remove(key: encKey) }
+        try PrivateStore.saveData(Data("[]".utf8), key: encKey)
+
+        let legacyPath = "\(NSHomeDirectory())/.hermes/mac-activity-2099-01-16.json"
+        defer { try? FileManager.default.removeItem(atPath: legacyPath) }
+        try Data("[]".utf8).write(to: URL(fileURLWithPath: legacyPath))
+
+        let keys = Set(MacActivityLogger.storedActivityDayKeys())
+        XCTAssertTrue(keys.contains(day))
+        XCTAssertTrue(keys.contains("2099-01-16"))
+    }
+
     private func entry(app: String, title: String?, url: String?, start: Double, end: Double) -> MacActivityEntry {
         var entry = MacActivityEntry()
         entry.appName = app
