@@ -215,7 +215,9 @@ struct HermesChannel: Identifiable, Equatable {
 class AppState: ObservableObject {
     static let shared = AppState()
     
-    @Published var view: String = "dashboard" // landing on the bento dashboard; "chat" | "company" | …
+    @Published var view: String = "home" // landing on lifelog home; "chat" | "company" | …
+    /// Vertical scroll depth of the active main pane (drives header fade in `MainView`).
+    @Published var mainScrollOffset: CGFloat = 0
     @Published var showCommandPalette = false   // ⌘K quick-jump overlay
 
     // Dashboard bento layout: each widget's position (col,row) + size (w,h) in square grid
@@ -255,6 +257,8 @@ class AppState: ObservableObject {
         }
     }
     @Published var showSettings: Bool = false   // settings shown as a modal dialog
+    /// When set, the settings modal opens on this section (matched by `SettingsModal.Section.rawValue`).
+    @Published var pendingSettingsSection: String? = nil
     @Published var sessions: [Session] = []
     @Published var currentSessionId: String? = nil
     @Published var messages: [Message] = []
@@ -2737,6 +2741,18 @@ class AppState: ObservableObject {
         toastMessage = ""
         toastActionLabel = nil
         toastAction = nil
+    }
+
+    /// Open the settings modal, optionally jumping to a section by its display name.
+    func openSettings(section: String? = nil) {
+        if let section { pendingSettingsSection = section }
+        showSettings = true
+    }
+
+    /// Open settings on the automations pane (cron jobs).
+    func openAutomationsSettings() {
+        Task { await fetchCronJobs() }
+        openSettings(section: "オートメーション")
     }
 
     /// Run the toast's action (e.g. Undo) and dismiss it.

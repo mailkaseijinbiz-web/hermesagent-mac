@@ -21,6 +21,7 @@ struct SettingsModal: View {
         case general = "一般"
         case model = "モデル"
         case apps = "アプリ"
+        case automations = "オートメーション"
         case google = "Google"
         case mobile = "モバイル"
         case cloud = "クラウド同期"
@@ -33,6 +34,7 @@ struct SettingsModal: View {
             case .general: return "gearshape"
             case .model: return "cpu"
             case .apps: return "hammer"
+            case .automations: return "clock"
             case .google: return "g.circle"
             case .mobile: return "iphone"
             case .cloud: return "cloud"
@@ -46,6 +48,7 @@ struct SettingsModal: View {
             case .general: return "一般 general 性格 personality"
             case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter antigravity agy gemini cli"
             case .apps: return "アプリ apps プロジェクト project 開発 develop 起動 launch 新規アプリ"
+            case .automations: return "オートメーション automation cron スケジュール 定期 ジョブ タスク 自動"
             case .google: return "google gmail calendar カレンダー メール oauth 認証 連携"
             case .mobile: return "モバイル mobile スマホ iphone ipad qr ペアリング 連携 同期 sync push 通知 認証"
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
@@ -165,6 +168,7 @@ struct SettingsModal: View {
                         case .general: generalSection
                         case .model: modelSection
                         case .apps: AppsView(embedded: true)
+                        case .automations: AutomationsView(embedded: true)
                         case .google: googleSection
                         case .mobile: mobileSection
                         case .cloud: cloudSection
@@ -184,7 +188,13 @@ struct SettingsModal: View {
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.35), radius: 24, x: 0, y: 12)
-        .onAppear { appState.fetchChannels() }
+        .onAppear {
+            appState.fetchChannels()
+            applyPendingSettingsSection()
+        }
+        .onChange(of: appState.showSettings) { _, open in
+            if open { applyPendingSettingsSection() }
+        }
         .onChange(of: appState.apiKey) { _, _ in settingsDirty = true }
         // 設定画面を閉じたら、変更（APIキー/プロバイダー）を自動適用して保存。
         .onDisappear {
@@ -199,6 +209,17 @@ struct SettingsModal: View {
     }
 
     // MARK: - Sections
+
+    private func applyPendingSettingsSection() {
+        guard let pending = appState.pendingSettingsSection,
+              let sec = Section.allCases.first(where: { $0.rawValue == pending }) else { return }
+        selected = sec
+        appState.pendingSettingsSection = nil
+        if sec == .automations {
+            appState.fetchAutomationResults()
+            Task { await appState.fetchCronJobs() }
+        }
+    }
 
     /// モバイル連携（QRペアリング・Google認証ゲート・Push通知）。以前はヘッダーのアイコンから
     /// ポップオーバーで開いていたが、設定内に集約した。MobileSyncView を再利用。

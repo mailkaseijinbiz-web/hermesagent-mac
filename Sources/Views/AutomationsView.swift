@@ -4,15 +4,35 @@ struct AutomationsView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) var colorScheme
     @State private var showSuggestions = false   // おすすめ欄は既定で折りたたみ（縦の長さを抑える）
+    /// Embedded inside the Settings panel: drop the outer ScrollView (settings scrolls) and
+    /// the close-X (settings has its own close), and tighten padding.
+    var embedded: Bool = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+        Group {
+            if embedded {
+                listContent
+            } else {
+                ScrollView { listContent }
+                    .ignoresSafeArea(edges: .top)
+            }
+        }
+        .onAppear {
+            appState.fetchAutomationResults()
+            appState.fetchChannels()
+        }
+        .sheet(isPresented: $appState.showCronCreateSheet) {
+            CronCreateSheet().environmentObject(appState)
+        }
+    }
+
+    private var listContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
                 // Header
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("スケジュールタスク (オートメーション)")
-                            .font(.system(size: 24, weight: .bold))
+                        Text(embedded ? "オートメーション" : "スケジュールタスク (オートメーション)")
+                            .font(.system(size: embedded ? 14 : 24, weight: embedded ? .semibold : .bold))
                         Text("定期的に自動実行するエージェントタスクやスクリプト（Cronジョブ）の管理を行います。")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
@@ -34,19 +54,21 @@ struct AutomationsView: View {
                     }
                     .buttonStyle(.plain)
                     
-                    Button(action: {
-                        appState.view = "chat"
-                    }) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.secondary)
-                            .frame(width: 24, height: 24)
-                            .background(Color.primary.opacity(0.05))
-                            .cornerRadius(12)
+                    if !embedded {
+                        Button(action: {
+                            appState.view = "chat"
+                        }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .frame(width: 24, height: 24)
+                                .background(Color.primary.opacity(0.05))
+                                .cornerRadius(12)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
-                .padding(.bottom, 8)
+                .padding(.bottom, embedded ? 0 : 8)
 
                 // Section 0.5: Suggested automations (collapsible — 既定で閉じる)
                 VStack(alignment: .leading, spacing: 12) {
@@ -162,19 +184,10 @@ struct AutomationsView: View {
                     }
                 }
             }
-            .padding(.horizontal, 32)
-            .padding(.top, 52).padding(.bottom, 24)
-            .frame(maxWidth: 760)
+            .padding(.horizontal, embedded ? 0 : 32)
+            .padding(.top, embedded ? 0 : 52).padding(.bottom, embedded ? 0 : 24)
+            .frame(maxWidth: embedded ? .infinity : 760)
             .frame(maxWidth: .infinity)   // 広い窓では中央寄せ（左に寄って間延びしないように）
-        }
-        .ignoresSafeArea(edges: .top)
-        .onAppear {
-            appState.fetchAutomationResults()
-            appState.fetchChannels()
-        }
-        .sheet(isPresented: $appState.showCronCreateSheet) {
-            CronCreateSheet().environmentObject(appState)
-        }
     }
 
 }

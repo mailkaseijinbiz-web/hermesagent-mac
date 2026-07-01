@@ -51,6 +51,9 @@ struct MainView: View {
             }
         }
         .animation(.easeInOut, value: appState.showToast)
+        .onChange(of: appState.view) { _, _ in
+            appState.mainScrollOffset = 0
+        }
     }
 
     private var mainContent: some View {
@@ -100,8 +103,8 @@ struct MainView: View {
 
                     if appState.view == "chat" {
                         ChatView()
-                    } else if appState.view == "dashboard" {
-                        DashboardView()
+                    } else if appState.view == "home" || appState.view == "dashboard" || appState.view == "lifelog" {
+                        MacLifeLogView()
                     } else if appState.view == "company" {
                         CompanyView()
                     } else if appState.view == "employee" {
@@ -115,11 +118,14 @@ struct MainView: View {
                     } else if appState.view == "apps" {
                         AppsView()
                     } else if appState.view == "automations" {
-                        AutomationsView()
+                        Color.clear
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .onAppear {
+                                appState.view = "home"
+                                appState.openAutomationsSettings()
+                            }
                     } else if appState.view == "news" {
                         MacNewsView()
-                    } else if appState.view == "lifelog" {
-                        MacLifeLogView()
                     } else {
                         ChatView()
                     }
@@ -176,8 +182,7 @@ struct MainView: View {
         }
     }
 
-    /// ヘッダー直下に置くグラデーション層。スクロールコンテンツとタイトルが重ならないよう
-    /// ウィンドウ背景色 → 透明 にフェードさせる。クリックは下層に透過。
+    /// ヘッダー直下に置くグラデーション層。スクロールでコンテンツがヘッダー下に入ったときだけ表示。
     private var headerFadeGradient: some View {
         let bg = colorScheme == .dark
             ? Color(red: 0.07, green: 0.07, blue: 0.08)
@@ -196,20 +201,27 @@ struct MainView: View {
         .frame(maxWidth: .infinity, alignment: .top)
         .ignoresSafeArea(.container, edges: .top)
         .allowsHitTesting(false)
+        .opacity(headerFadeOpacity)
+        .animation(.easeOut(duration: 0.15), value: appState.mainScrollOffset)
+    }
+
+    private var headerFadeOpacity: Double {
+        let offset = appState.mainScrollOffset
+        guard offset > 6 else { return 0 }
+        return Double(min(1, (offset - 6) / 18))
     }
 
     /// The title shown in the header (current chat 件名, or the active section name).
     private var headerTitle: String {
         switch appState.view {
-        case "dashboard": return "ダッシュボード"
-        case "company": return appState.companyDisplayName
+        case "home", "dashboard", "lifelog": return "ホーム"
+        case "company": return "社員"
         case "employee": return appState.detailEmployee.map { "\($0.name)（\($0.role.title)）" } ?? "社員"
         case "schedule": return "スケジュール"
         case "tasks": return "タスク"
         case "apps": return "アプリ"
         case "automations": return "オートメーション"
         case "news":        return "ニュース"
-        case "lifelog":     return "ライフログ"
         case "settings": return "設定"
         default:
             if let emp = appState.activeEmployee {
@@ -223,6 +235,16 @@ struct MainView: View {
         }
     }
 
+    /// Section screens (ホーム/ニュース/タスク/社員) — title only, no status chips or sidebar toggles.
+    private var headerIsSectionScreen: Bool {
+        switch appState.view {
+        case "home", "dashboard", "lifelog", "news", "tasks", "company", "employee":
+            return true
+        default:
+            return false
+        }
+    }
+
     private var headerBar: some View {
         HStack(spacing: 10) {
             Text(headerTitle)
@@ -230,7 +252,8 @@ struct MainView: View {
                 .foregroundColor(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Text(appState.workspaceName)
+            if !headerIsSectionScreen {
+                Text(appState.workspaceName)
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 7)
@@ -271,11 +294,13 @@ struct MainView: View {
             .help(appState.isStreaming ? "エージェントが稼働中です（経過時間と受信状況を表示）"
                   : (appState.backendHealthy ? "待機中（入力できます）"
                      : "バックエンドの応答が不安定です。hermes(ゲートウェイ)を確認してください。"))
+            }
 
             Spacer(minLength: 12)
 
             // モバイル連携（QRペアリング）は「設定 → モバイル」に集約したのでヘッダーからは撤去。
 
+            if !headerIsSectionScreen {
             Button(action: { toggleRightSidebar(.employee) }) {
                 Image(systemName: "square.grid.2x2")
                     .font(.system(size: 14))
@@ -302,6 +327,7 @@ struct MainView: View {
             }
             .buttonStyle(.plain)
             .help("ターミナル")
+            }
         }
         .padding(.horizontal, 20)
         .frame(maxWidth: .infinity)

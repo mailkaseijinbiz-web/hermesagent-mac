@@ -94,7 +94,7 @@ extension AppState {
         newCronNoAgent = false
         newCronDeliver = firstLineChannelId.map { "line:\($0)" } ?? "local"
         newCronPrompt = "次のスクリプト出力は、ユーザーの保有銘柄の最新株価(前日比)と関連ニュース見出しです。これを分析し、保有銘柄に影響しそうな重要な変動・ニュースを中心に、要点を日本語で簡潔にまとめて、LINE通知向けの短いレポートにしてください。各銘柄の前日比と注目すべきニュースの見出しを優先し、全体は読みやすい長さに。最後に「※投資助言ではなく情報整理です」と一言添えてください。"
-        view = "automations"
+        openAutomationsSettings()
         showCronCreateSheet = true   // 反映した内容を作成モーダルで開く
         if firstLineChannelId == nil {
             triggerToast(message: "LINE宛先が未登録のため配信先は『local』です（後で変更可）。")

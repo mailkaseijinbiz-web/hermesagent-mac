@@ -22,18 +22,21 @@ struct CommandPaletteView: View {
         out.append(Item(title: "新しいチャット", subtitle: "移動", icon: "square.and.pencil") {
             appState.handleNewChat(); appState.view = "chat"
         })
-        out.append(Item(title: "ダッシュボード", subtitle: "移動", icon: "square.grid.2x2") { appState.view = "dashboard" })
-        out.append(Item(title: "会社（AI社員）", subtitle: "移動", icon: "person.3") { appState.view = "company" })
+        out.append(Item(title: "ホーム", subtitle: "移動", icon: "house.fill") { appState.view = "home" })
+        out.append(Item(title: "ニュース", subtitle: "移動", icon: "newspaper") { appState.view = "news" })
+        out.append(Item(title: "タスク", subtitle: "移動", icon: "checklist") { appState.view = "tasks" })
+        out.append(Item(title: "社員", subtitle: "移動", icon: "person.2.fill") { appState.view = "company" })
         out.append(Item(title: "スケジュール", subtitle: "移動", icon: "calendar") { appState.view = "schedule" })
         out.append(Item(title: "アプリ", subtitle: "移動", icon: "hammer") { appState.view = "apps" })
         for a in appState.sortedApps {
             out.append(Item(title: "\(a.name) を起動", subtitle: "アプリ", icon: "play.fill") { appState.launchApp(a.id) })
             out.append(Item(title: "\(a.name) を開発", subtitle: "アプリ", icon: "hammer.fill") { appState.developApp(a.id) })
         }
-        out.append(Item(title: "オートメーション", subtitle: "移動", icon: "clock") {
-            appState.view = "automations"; Task { await appState.fetchCronJobs() }
+        out.append(Item(title: "オートメーション", subtitle: "設定", icon: "clock") {
+            appState.openAutomationsSettings()
+            close()
         })
-        out.append(Item(title: "設定を開く", subtitle: "移動", icon: "gearshape") { appState.showSettings = true })
+        out.append(Item(title: "設定を開く", subtitle: "移動", icon: "gearshape") { appState.openSettings(); close() })
 
         for e in appState.sortedEmployees {
             out.append(Item(title: "\(e.role.emoji) \(e.name)", subtitle: "社員 ・ \(e.role.title)", icon: "person.crop.circle") {

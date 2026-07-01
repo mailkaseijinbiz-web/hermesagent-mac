@@ -76,8 +76,7 @@ extension AppState {
            newCronName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             newCronName = "\(emp.name)の定期タスク"
         }
-        view = "automations"
-        Task { await fetchCronJobs() }
+        openAutomationsSettings()
         triggerToast(message: "担当者を設定しました。スケジュールと指示を入力して作成してください。")
     }
 
