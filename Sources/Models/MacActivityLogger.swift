@@ -25,6 +25,31 @@ struct MacActivityEntry: Codable, Identifiable {
 final class MacActivityLogger {
     static let shared = MacActivityLogger()
 
+    private static let enabledKey = "macActivityLoggingEnabled"
+
+    /// User-toggle for Mac activity logging (default true for backward compatibility).
+    static nonisolated var isEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: enabledKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: enabledKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
+    }
+
+    /// Whether this process has Accessibility permission (needed for browser URL logging).
+    static nonisolated var isAccessibilityTrusted: Bool {
+        AXIsProcessTrusted()
+    }
+
+    /// Prompt for Accessibility permission and open System Settings → Privacy → Accessibility.
+    static nonisolated func requestAccessibilityPermission() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     private let minDuration: TimeInterval = 30
     private let browserBundles: Set<String> = [
         "com.google.Chrome",
@@ -42,14 +67,69 @@ final class MacActivityLogger {
     private var currentWindowTitle:  String = ""
     private var currentURL:          String = ""
     private var pollTimer:           Timer? = nil
+    private var workspaceObserver:   NSObjectProtocol? = nil
+    private(set) var isRunning = false
 
-    private var cacheFilePath: String {
-        "\(NSHomeDirectory())/.hermes/mac-activity-\(dayKey(Date())).json"
+    /// Whether the logger is actively monitoring app switches / polling browser tabs.
+    var isActivelyRecording: Bool { isRunning }
+
+    static nonisolated func activityStoreKey(for date: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return "mac-activity-\(f.string(from: date))"
+    }
+
+    static nonisolated func legacyActivityPath(for date: Date = Date()) -> String {
+        "\(NSHomeDirectory())/.hermes/\(activityStoreKey(for: date)).json"
+    }
+
+    static nonisolated func loadEntries(for date: Date = Date()) -> [MacActivityEntry] {
+        let key = activityStoreKey(for: date)
+        if let data = PrivateStore.loadData(key: key),
+           let entries = try? JSONDecoder().decode([MacActivityEntry].self, from: data) {
+            return entries
+        }
+        let path = legacyActivityPath(for: date)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let entries = try? JSONDecoder().decode([MacActivityEntry].self, from: data) else { return [] }
+        try? PrivateStore.saveData(data, key: key)
+        try? FileManager.default.removeItem(atPath: path)
+        return entries
+    }
+
+    static nonisolated func saveEntries(_ entries: [MacActivityEntry], for date: Date = Date()) throws {
+        let data = try JSONEncoder().encode(entries)
+        try PrivateStore.saveData(data, key: activityStoreKey(for: date))
+    }
+
+    /// Day keys (`yyyy-MM-dd`) with saved Mac activity (encrypted or legacy JSON).
+    static nonisolated func storedActivityDayKeys() -> [String] {
+        let home = NSHomeDirectory()
+        let prefix = "mac-activity-"
+        var keys = Set<String>()
+
+        let privateDir = URL(fileURLWithPath: home).appendingPathComponent(".hermes/private")
+        if let files = try? FileManager.default.contentsOfDirectory(atPath: privateDir.path) {
+            for name in files where name.hasPrefix(prefix) && name.hasSuffix(".enc") {
+                keys.insert(String(name.dropFirst(prefix.count).dropLast(4)))
+            }
+        }
+        let hermesDir = URL(fileURLWithPath: home).appendingPathComponent(".hermes")
+        if let files = try? FileManager.default.contentsOfDirectory(atPath: hermesDir.path) {
+            for name in files where name.hasPrefix(prefix) && name.hasSuffix(".json") {
+                keys.insert(String(name.dropFirst(prefix.count).dropLast(5)))
+            }
+        }
+        return Array(keys)
     }
 
     func start() {
+        guard Self.isEnabled else { return }
+        guard !isRunning else { return }
+        isRunning = true
         loadToday()
-        NSWorkspace.shared.notificationCenter.addObserver(
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
         ) { [weak self] note in
@@ -66,9 +146,23 @@ final class MacActivityLogger {
         }
     }
 
+    /// Stop monitoring, flush the in-progress session, and tear down observers.
+    func stop() {
+        guard isRunning else { return }
+        flushCurrentSession()
+        pollTimer?.invalidate()
+        pollTimer = nil
+        if let obs = workspaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(obs)
+            workspaceObserver = nil
+        }
+        isRunning = false
+    }
+
     /// Hermes チャットが完了（返答が来た）したときに呼ぶ。
     func recordHermesSession(employeeName: String, sessionTitle: String,
                              start: Date, end: Date) {
+        guard Self.isEnabled else { return }
         let dur = end.timeIntervalSince(start)
         guard dur >= minDuration else { return }
         var entry = MacActivityEntry()
@@ -125,6 +219,7 @@ final class MacActivityLogger {
     // MARK: - アプリ切り替え
 
     private func onActivate(_ app: NSRunningApplication) {
+        guard Self.isEnabled else { return }
         guard app.activationPolicy == .regular else { return }
         let bundle = app.bundleIdentifier ?? ""
         let name   = app.localizedName ?? bundle.components(separatedBy: ".").last ?? "不明"
@@ -167,6 +262,7 @@ final class MacActivityLogger {
     // MARK: - ポーリング（ブラウザのタブ切り替え検知）
 
     private func pollCurrentSession() {
+        guard Self.isEnabled else { return }
         guard currentStart != nil, !currentApp.isEmpty else { return }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == currentPID else { return }
         let pid = currentPID
@@ -284,39 +380,48 @@ final class MacActivityLogger {
 
     /// 今日のキャッシュファイルをディスクから直接読む（ブリーフ文脈用途）。
     nonisolated func todayEntriesFromDisk() -> [MacActivityEntry] {
-        let home = NSHomeDirectory()
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        let path = "\(home)/.hermes/mac-activity-\(f.string(from: Date())).json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let entries = try? JSONDecoder().decode([MacActivityEntry].self, from: data)
-        else { return [] }
-        return entries
+        Self.loadEntries()
+    }
+
+    /// Close and persist the in-progress app session (if long enough).
+    private func flushCurrentSession() {
+        guard let start = currentStart, !currentApp.isEmpty else {
+            currentApp = ""
+            currentBundle = ""
+            currentPID = 0
+            currentStart = nil
+            currentWindowTitle = ""
+            currentURL = ""
+            return
+        }
+        let dur = Date().timeIntervalSince(start)
+        if dur >= minDuration {
+            var entry = MacActivityEntry()
+            entry.appName     = currentApp
+            entry.bundleId    = currentBundle.isEmpty ? nil : currentBundle
+            entry.windowTitle = currentWindowTitle.isEmpty ? nil : currentWindowTitle
+            entry.url         = currentURL.isEmpty ? nil : currentURL
+            entry.label       = Self.buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
+            entry.startTime   = start.timeIntervalSince1970
+            entry.endTime     = Date().timeIntervalSince1970
+            mergeOrAppend(entry)
+            saveToday()
+        }
+        currentApp = ""
+        currentBundle = ""
+        currentPID = 0
+        currentStart = nil
+        currentWindowTitle = ""
+        currentURL = ""
     }
 
     // MARK: - 永続化（日次）
 
     private func loadToday() {
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: cacheFilePath)),
-           let entries = try? JSONDecoder().decode([MacActivityEntry].self, from: data) {
-            completedEntries = entries
-        }
+        completedEntries = Self.loadEntries()
     }
 
     private func saveToday() {
-        let url = URL(fileURLWithPath: cacheFilePath)
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(completedEntries) {
-            try? data.write(to: url, options: .atomic)
-        }
-    }
-
-    private func dayKey(_ d: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f.string(from: d)
+        try? Self.saveEntries(completedEntries)
     }
 }

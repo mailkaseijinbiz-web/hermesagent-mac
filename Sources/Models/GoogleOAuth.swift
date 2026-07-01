@@ -21,9 +21,15 @@ final class GoogleOAuth: ObservableObject {
     @Published var clientId: String = UserDefaults.standard.string(forKey: "googleClientId") ?? "" {
         didSet { UserDefaults.standard.set(clientId, forKey: "googleClientId") }
     }
-    @Published var clientSecret: String = UserDefaults.standard.string(forKey: "googleClientSecret") ?? "" {
-        didSet { UserDefaults.standard.set(clientSecret, forKey: "googleClientSecret") }
+    @Published var clientSecret: String = "" {
+        didSet {
+            guard clientSecret != oldValue else { return }
+            keychainWrite(Self.clientSecretKeychainAccount, clientSecret.isEmpty ? nil : clientSecret)
+        }
     }
+
+    private static let clientSecretKeychainAccount = "google_client_secret"
+    private static let clientSecretUserDefaultsKey = "googleClientSecret"
 
     private(set) var accessToken: String? = nil
     private var tokenExpiry: Date = .distantPast
@@ -47,12 +53,39 @@ final class GoogleOAuth: ObservableObject {
     ]
 
     private init() {
+        clientSecret = Self.migrateClientSecret(
+            keychainValue: keychainRead(Self.clientSecretKeychainAccount),
+            userDefaultsValue: UserDefaults.standard.string(forKey: Self.clientSecretUserDefaultsKey),
+            writeKeychain: { [self] v in keychainWrite(Self.clientSecretKeychainAccount, v) },
+            clearUserDefaults: { UserDefaults.standard.removeObject(forKey: Self.clientSecretUserDefaultsKey) }
+        )
         email = UserDefaults.standard.string(forKey: "googleAccountEmail")
         isConnected = refreshToken != nil && !(email ?? "").isEmpty
         if isConnected {
             GoogleCalendarSync.shared.startPeriodicSync()
             GmailSync.shared.startPeriodicSync()
         }
+    }
+
+    /// Pure migration helper: prefer Keychain, fall back to legacy UserDefaults once, then clear UD.
+    nonisolated static func migrateClientSecret(
+        keychainValue: String?,
+        userDefaultsValue: String?,
+        writeKeychain: (String) -> Void = { _ in },
+        clearUserDefaults: () -> Void = {}
+    ) -> String {
+        let kc = keychainValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !kc.isEmpty {
+            if userDefaultsValue != nil { clearUserDefaults() }
+            return kc
+        }
+        let legacy = userDefaultsValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !legacy.isEmpty {
+            writeKeychain(legacy)
+            clearUserDefaults()
+            return legacy
+        }
+        return ""
     }
 
     // MARK: - Public API

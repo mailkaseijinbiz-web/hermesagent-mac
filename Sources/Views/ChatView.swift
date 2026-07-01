@@ -7,20 +7,10 @@ struct ChatView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) var colorScheme
     @State private var composerHeight: CGFloat = CustomTextEditor.minHeight
-    @State private var showModelInput = false
-    @State private var customModelText = ""
 
     // Cap the message/composer column width (centered) so text doesn't stretch
     // edge-to-edge on wide windows — a comfortable reading measure.
     private let contentMaxWidth: CGFloat = 820
-
-    // Show just the model id's last path component to keep the composer compact.
-    private func shortModelName(_ model: String) -> String {
-        if let slash = model.lastIndex(of: "/") {
-            return String(model[model.index(after: slash)...])
-        }
-        return model
-    }
 
     var body: some View {
         if appState.messages.isEmpty && !appState.isStreaming {
@@ -31,17 +21,33 @@ struct ChatView: View {
                         .padding(.top, 44)
                 }
 
-                Spacer()
+                if appState.activeEmployee?.isHealthAdvisor == true {
+                    // 健康アドバイザー: trend dashboard replaces the generic prompt — there's
+                    // always something concrete to show/ask about (steps, weight, etc.).
+                    Spacer(minLength: 24)
 
-                Text("何を作りましょうか？")
-                    .font(.system(size: 32, weight: .light))
-                    .foregroundColor(.primary.opacity(0.9))
-                    .padding(.bottom, 24)
+                    HealthAdvisorDashboardView()
 
-                composerView
-                    .frame(maxWidth: contentMaxWidth)
+                    Spacer(minLength: 24)
 
-                Spacer()
+                    composerView
+                        .frame(maxWidth: contentMaxWidth)
+
+                    Spacer(minLength: 24)
+                } else {
+                    Spacer()
+
+                    Text("意図カードから選ぶか、話したいことを書いてください")
+                        .font(.system(size: 28, weight: .light))
+                        .foregroundColor(.primary.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                        .padding(.bottom, 24)
+
+                    composerView
+                        .frame(maxWidth: contentMaxWidth)
+
+                    Spacer()
+                }
             }
             .padding(.horizontal, 32)
             .padding(.bottom, 24)
@@ -208,23 +214,6 @@ struct ChatView: View {
                         }
                         .buttonStyle(.plain)
 
-                        // When talking to an employee: register the typed request as that
-                        // employee's scheduled automation (jumps to the Automations screen).
-                        if let emp = appState.activeEmployee {
-                            Button {
-                                appState.registerAutomationForEmployee(emp.id, prompt: appState.inputValue)
-                            } label: {
-                                Image(systemName: "clock.badge.plus")
-                                    .font(.system(size: 13))
-                                    .foregroundColor(.primary.opacity(0.7))
-                                    .frame(width: 24, height: 24)
-                                    .background(Color.primary.opacity(0.05))
-                                    .cornerRadius(6)
-                            }
-                            .buttonStyle(.plain)
-                            .help("この依頼を\(emp.name)のオートメーションに登録")
-                        }
-
                         // Manager-only: delegate the typed task to a team member (Phase 2).
                         // Scoped to the manager's team if they lead one, else all members.
                         if appState.activeEmployee?.role == .manager {
@@ -267,111 +256,8 @@ struct ChatView: View {
                     
                     // Right group
                     HStack(spacing: 12) {
-                        // Chat vs Code mode (Claude Code風). Behavioral only.
-                        Menu {
-                            ForEach(AgentMode.allCases) { m in
-                                Button {
-                                    appState.agentMode = m
-                                } label: {
-                                    if appState.agentMode == m {
-                                        Label(m.label, systemImage: "checkmark")
-                                    } else {
-                                        Label(m.label, systemImage: m.icon)
-                                    }
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: appState.agentMode.icon)
-                                    .font(.system(size: 10))
-                                    .foregroundColor(.primary.opacity(0.6))
-                                Text(appState.agentMode.label)
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.primary.opacity(0.6))
-                                Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 8))
-                                    .foregroundColor(.primary.opacity(0.4))
-                            }
-                        }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-
-                        Menu {
-                            // Provider is fixed (Settings) — offer only models within it.
-                            if appState.provider == AntigravityCLI.providerId {
-                                Section("おすすめ（Antigravity）") {
-                                    ForEach(AntigravityCLI.presetModels, id: \.self) { m in
-                                        Button {
-                                            Task { await appState.setModel(m) }
-                                        } label: {
-                                            if appState.defaultModel == m {
-                                                Label(m, systemImage: "checkmark")
-                                            } else {
-                                                Text(m)
-                                            }
-                                        }
-                                    }
-                                }
-                                Divider()
-                                Button("カスタムモデルを入力…") {
-                                    customModelText = appState.defaultModel
-                                    showModelInput = true
-                                }
-                            } else {
-                                Section("おすすめ") {
-                                    ForEach(appState.currentModelPresets) { preset in
-                                        Button {
-                                            Task { await appState.setModel(preset.model) }
-                                        } label: {
-                                            if appState.defaultModel == preset.model {
-                                                Label(preset.label, systemImage: "checkmark")
-                                            } else {
-                                                Text(preset.label)
-                                            }
-                                        }
-                                    }
-                                }
-                                // Live OpenRouter catalog, grouped by provider (never stale).
-                                if !appState.availableModels.isEmpty {
-                                    Menu("すべてのモデル（\(appState.availableModels.count)）") {
-                                        ForEach(appState.modelsByProvider, id: \.provider) { group in
-                                            Menu(group.provider) {
-                                                ForEach(group.models.filter { !appState.modelIsHidden($0.id) }) { m in
-                                                    Button {
-                                                        Task { await appState.setModel(m.id) }
-                                                    } label: {
-                                                        if appState.defaultModel == m.id {
-                                                            Label(m.name, systemImage: "checkmark")
-                                                        } else {
-                                                            Text(m.name)
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Divider()
-                                Button("モデル一覧を更新") {
-                                    Task { await appState.fetchAvailableModels() }
-                                }
-                                Button("カスタムモデルを入力…") {
-                                    customModelText = appState.defaultModel
-                                    showModelInput = true
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 3) {
-                                Text(shortModelName(appState.defaultModel))
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.primary.opacity(0.6))
-                                Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 8))
-                                    .foregroundColor(.primary.opacity(0.4))
-                            }
-                        }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
+                        // Mode (chat/code) and model are configured per-employee / in
+                        // Settings → モデル — intentionally not shown in the composer.
 
                         Button(action: {
                             if appState.isStreaming {
@@ -408,15 +294,6 @@ struct ChatView: View {
             .onDrop(of: [.fileURL, .image], isTargeted: nil) { providers in
                 handleFileDrop(providers)
             }
-        }
-        .alert("カスタムモデル", isPresented: $showModelInput) {
-            TextField("例: openai/gpt-4o-mini", text: $customModelText)
-            Button("設定") {
-                Task { await appState.setCustomModel(customModelText) }
-            }
-            Button("キャンセル", role: .cancel) {}
-        } message: {
-            Text("使用するモデルIDを入力してください（現在のプロバイダー: \(appState.provider)）。")
         }
         // H2 approval flow: agent is requesting permission to run a tool.
         .alert(appState.pendingPermission?.title ?? "ツールの実行許可",

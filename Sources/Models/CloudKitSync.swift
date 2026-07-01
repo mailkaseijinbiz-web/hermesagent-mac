@@ -86,6 +86,8 @@ enum CloudKitSync {
         var teamId: String?
         var createdAt: Double
         var updatedAt: Double
+        var archived: Bool? = nil
+        var proactiveEnabled: Bool? = nil
     }
 
     /// The whole workspace roster, stored as one CKRecord (`Roster`) per workspace.

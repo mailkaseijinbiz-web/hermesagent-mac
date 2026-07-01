@@ -35,6 +35,8 @@ extension AppState {
         if !selfCtx.isEmpty { lines.append("【自分のリソース配分（頭のメモリ・稼働時間）】\n" + selfCtx) }
         if let loc = locationContext { lines.append(loc) }
         if let ph = photoContext { lines.append(ph) }
+        let memoCtx = MemoContext.format(MacMemoStore.shared.todayMemos)
+        if !memoCtx.isEmpty { lines.append("共有・備忘録:\n\(memoCtx)") }
         // Mac アクティビティ（今日使ったアプリ上位）
         let macEntries = MacActivityLogger.shared.todayEntriesFromDisk()
         if !macEntries.isEmpty {
@@ -45,7 +47,37 @@ extension AppState {
             }.joined(separator: " / ")
             lines.append("今日のMac作業: \(macSummary)")
         }
+        let timeline = timelineContextText()
+        if !timeline.isEmpty { lines.append("【時系列】\n\(timeline)") }
         return lines.joined(separator: "\n")
+    }
+
+    /// Personalized news headlines for the daily brief (RSS, no LLM).
+    func dailyBriefNewsContext(maxItems: Int = 6) async -> String {
+        let json = await MobileServer.shared.fetchSaunaNewsJSON()
+        guard let data = json.data(using: .utf8),
+              let items = try? JSONDecoder().decode([NewsFeedItem].self, from: data),
+              !items.isEmpty else { return "" }
+        return items.prefix(maxItems).map { item in
+            let src = item.source.isEmpty ? "" : "（\(item.source)）"
+            return "・\(item.title)\(src)"
+        }.joined(separator: "\n")
+    }
+
+    /// Full context block for brief generation (data + lifelog + news).
+    func buildDailyBriefContext() async -> String {
+        var parts: [String] = [dailyBriefContext()]
+        let lifelog = lifelogContext()
+        if !lifelog.isEmpty { parts.append("【今日の活動】\n\(lifelog)") }
+        if !lifelogSummary.isEmpty,
+           Calendar.current.isDateInToday(Date(timeIntervalSince1970: lifelogSummaryAt)) {
+            parts.append("【活動要約】\n\(lifelogSummary)")
+        }
+        let news = await dailyBriefNewsContext()
+        if !news.isEmpty {
+            parts.append("【関心トピックのニュース（関連があれば1〜2件だけ触れる）】\n\(news)")
+        }
+        return parts.joined(separator: "\n\n")
     }
 
     // MARK: - デイリーブリーフ生成
@@ -58,23 +90,36 @@ extension AppState {
         isGeneratingBrief = true
         defer { isGeneratingBrief = false }
         let hour = Calendar.current.component(.hour, from: Date())
-        let (frame, lead): (String, String) = {
+        let frame: String = {
             switch hour {
-            case 5..<11:  return ("今日の計画とひとことアドバイス", "今日の見通しを述べる")
-            case 11..<18: return ("今の状況の振り返りと、残りの時間の使い方", "ここまでの流れを振り返る")
-            default:      return ("今日一日の振り返りと、明日へのアドバイス", "今日の流れを振り返る")
+            case 5..<11:  return "今日の見通しと、意味のある一手"
+            case 11..<18: return "ここまでの振り返りと、残り時間の使い方"
+            default:      return "今日一日の振り返りと、明日への示唆"
             }
         }()
+        let ctx = await buildDailyBriefContext()
         let prompt = """
-        あなたはユーザー専属のパーソナルコーチ兼秘書です。以下のデータと、ユーザーの目標・好きなもの・健康状況をもとに、「\(frame)」を日本語で書いてください。
+        あなたはユーザー専属のパーソナルコーチ兼参謀です。以下のデータを読み、「\(frame)」を日本語で書いてください。
+        表面的な要約や一般論は避け、データのつながりから「意味のある洞察」を1つは必ず含めてください。
+
+        構成（見出しをそのまま使う）:
+        振り返り
+        - 今日の行動・健康・予定・メモをつなげ、3〜4文で俯瞰する。単なる羅列は禁止。偏りやパターン（作業過多、外出不足、睡眠との関係など）があれば指摘する。
+
+        つながり
+        - ユーザーの目標・嗜好・共有メモ・ニュースのうち、今日と関連が深いものを1〜2点選び、「なぜ今の自分に意味があるか」を1〜3文で述べる。ニュースは関連がある場合のみ短く触れ、タイトル程度でよい。
+
+        今日の提案
+        - 最大3つ、各行先頭は「・」。具体的で今日〜明日実行可能な行動。健康・仕事・余暇のバランスを意識する。
+
         ルール:
-        - 挨拶や前置きは書かない。事実ベースで簡潔に、押し付けない。
-        - まず2〜3文で\(lead)。
-        - 続けて「今日の提案」として、ユーザーの目標に近づく具体的な行動を最大3つ箇条書き。好きなこと（あれば）も無理なく絡める。
-        - データや目標が乏しければ無理に埋めない。
+        - 挨拶・前置き・「以上です」は書かない
+        - 押し付けがましい励まし、お決まりのコーチング口調は避ける
+        - 根拠のない推測や、データにない事実の捏造は禁止
+        - 全体400〜550字程度（長文にしない）
 
         【データ】
-        \(dailyBriefContext())
+        \(ctx)
         """
         let text = await runBriefPrompt(prompt)
         if text.isEmpty || looksLikeErrorResponse(text) {
@@ -95,15 +140,18 @@ extension AppState {
         isGeneratingBrief = true
         defer { isGeneratingBrief = false }
         let current = dailyBrief.isEmpty ? computedBrief() : dailyBrief
+        let ctx = await buildDailyBriefContext()
         let prompt = """
-        あなたは有能な秘書です。現在の「デイリーブリーフ」を、ユーザーの指示に従って日本語で書き直してください。
-        ルール: 挨拶や前置きは書かない。本文のみを出力。事実ベースで簡潔に。指示と無関係な既存の重要情報は保持する。
+        あなたは有能な参謀です。現在の「今日の振り返り」を、ユーザーの指示に従って書き直してください。
+        構成は「振り返り」「つながり」「今日の提案」の3見出しを維持。洞察と具体性を損なわないこと。
 
-        【現在のデイリーブリーフ】
+        ルール: 挨拶や前置きは書かない。本文のみ。指示と無関係な重要情報は保持。ニュースは関連がある場合のみ短く。
+
+        【現在の振り返り】
         \(current)
 
         【今日のデータ（参考）】
-        \(dailyBriefContext())
+        \(ctx)
 
         【ユーザーの修正指示】
         \(instr)
@@ -144,6 +192,7 @@ extension AppState {
         - 挨拶や前置きは書かない。
         - まず「気づき」として、データから読み取れるパターンや傾向（例: ある行動と睡眠/運動の相関、増減傾向）を根拠とともに2〜4点。
         - 続けて「来週への提案」として、目標に近づく具体的な行動を最大3つ。好きなことも無理なく絡める。
+        - 最後に「今週の意外なつながり」として、セレンディピティ候補から1点（あれば）。押し付けない。
         - データが乏しい点は憶測で埋めない。
 
         【ユーザーの目標・嗜好】
@@ -151,6 +200,8 @@ extension AppState {
 
         【リソース配分（頭のメモリ・稼働時間）】
         \(selfModelContext)
+
+        \(serendipityReviewBlock())
 
         【直近2週間の日次データ】
         \(data)
@@ -246,11 +297,9 @@ extension AppState {
             lines.append("写真: \(photoSummary)")
         }
 
-        // メモ
-        let memos = MacMemoStore.shared.todayMemos
-        if !memos.isEmpty {
-            lines.append("メモ: \(memos.map { $0.text }.joined(separator: " / "))")
-        }
+        // メモ（共有・Web・写真）
+        let memoCtx = MemoContext.format(MacMemoStore.shared.todayMemos)
+        if !memoCtx.isEmpty { lines.append("共有・備忘録:\n\(memoCtx)") }
 
         return lines.joined(separator: "\n")
     }
@@ -308,14 +357,29 @@ extension AppState {
     func computedBrief() -> String {
         let ev = todayEvents
         let todo = tasks(status: .todo), doing = tasks(status: .doing)
-        var parts: [String] = []
-        parts.append(ev.isEmpty ? "本日の登録予定はありません。" : "本日の予定は\(ev.count)件です。")
-        parts.append("未完了タスクは\(todo.count + doing.count)件（対応中\(doing.count)・未着手\(todo.count)）。")
-        if !runningApps.isEmpty { parts.append("起動中アプリ: \(runningApps.map { $0.name }.joined(separator: "、"))。") }
-        if !busyEmployees.isEmpty { parts.append("作業中の社員: \(busyEmployees.map { $0.name }.joined(separator: "、"))。") }
-        var s = parts.joined(separator: " ")
+        var reflection: [String] = []
+        if !lifelogSummary.isEmpty,
+           Calendar.current.isDateInToday(Date(timeIntervalSince1970: lifelogSummaryAt)) {
+            reflection.append(lifelogSummary)
+        } else {
+            reflection.append(ev.isEmpty ? "本日の登録予定はありません。" : "本日の予定は\(ev.count)件です。")
+            if let hl = healthSummaryLine { reflection.append(hl + "。") }
+            let macEntries = MacActivityLogger.shared.todayEntriesFromDisk()
+            if !macEntries.isEmpty {
+                let top = macEntries.sorted { $0.duration > $1.duration }.prefix(3)
+                let apps = top.map { $0.appName }.joined(separator: "、")
+                reflection.append("Mac作業の中心は\(apps)でした。")
+            }
+        }
+        reflection.append("未完了タスクは\(todo.count + doing.count)件（対応中\(doing.count)・未着手\(todo.count)）。")
+
+        var body = "振り返り\n" + reflection.joined(separator: " ")
+        let memoCtx = MemoContext.format(MacMemoStore.shared.todayMemos, max: 3, maxChars: 80)
+        if !memoCtx.isEmpty {
+            body += "\n\nつながり\n共有・備忘録から: \(memoCtx.replacingOccurrences(of: "\n", with: " / "))"
+        }
         let focus = (doing + todo).prefix(3).map { "・\($0.title)" }
-        if !focus.isEmpty { s += "\n\n今日の重点:\n" + focus.joined(separator: "\n") }
-        return s
+        if !focus.isEmpty { body += "\n\n今日の提案\n" + focus.joined(separator: "\n") }
+        return body
     }
 }

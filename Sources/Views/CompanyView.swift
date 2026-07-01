@@ -59,6 +59,9 @@ struct CompanyView: View {
                     emptyState
                 } else {
                     teamsSection
+                    if !appState.archivedEmployees.isEmpty {
+                        archivedSection
+                    }
                 }
             }
             .padding(.horizontal, 32).padding(.top, 52).padding(.bottom, 24)
@@ -133,6 +136,18 @@ struct CompanyView: View {
                 } isTargeted: { hovering in dropTargetUnassigned = hovering }
             }
         }
+    }
+
+    private var archivedSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionLabel("アーカイブ")
+            Text("非表示にした社員です。データは保持されます。")
+                .font(.system(size: 10)).foregroundColor(.secondary)
+            ForEach(appState.archivedEmployees) { emp in
+                ArchivedEmployeeRow(employee: emp)
+            }
+        }
+        .padding(.top, 8)
     }
 
     private func teamGroup(_ team: Team) -> some View {
@@ -274,6 +289,12 @@ struct EmployeeCard: View {
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(employee.role.color.opacity(0.12)).cornerRadius(4)
                 }
+                if employee.isProactiveEnabled {
+                    Text("能動連絡").font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.12)).cornerRadius(4)
+                }
                 Text("\(shortModel) ・ \(employee.mode == .code ? "コード" : "チャット")")
                     .font(.system(size: 11)).foregroundColor(.secondary)
                 if let u = appState.usageByEmployee[employee.id], u.tokens > 0 {
@@ -329,6 +350,18 @@ struct EmployeeCard: View {
                     generating = true
                     Task { await appState.generateAIAvatar(for: employee.id); generating = false }
                 } label: { Label("AIアバターを生成", systemImage: "wand.and.stars") }
+                Button {
+                    appState.toggleProactiveEmployee(employee.id)
+                } label: {
+                    Label(employee.isProactiveEnabled ? "能動的に話しかける（オン）" : "能動的に話しかける",
+                          systemImage: employee.isProactiveEnabled ? "bell.badge.fill" : "bell.badge")
+                }
+                Divider()
+                Button {
+                    appState.archiveEmployee(employee.id)
+                } label: {
+                    Label("アーカイブ", systemImage: "archivebox")
+                }
                 Divider()
                 Button(role: .destructive) { confirmingFire = true } label: {
                     Label("解雇", systemImage: "person.badge.minus")
@@ -418,6 +451,32 @@ struct HireSheet: View {
         }
         .padding(24)
         .frame(width: 520)
+    }
+}
+
+// MARK: - Archived employee row
+
+private struct ArchivedEmployeeRow: View {
+    @EnvironmentObject var appState: AppState
+    let employee: Employee
+
+    var body: some View {
+        HStack(spacing: 12) {
+            EmployeeAvatar(employee: employee, size: 36)
+                .opacity(0.55)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(employee.name).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
+                Text(employee.role.title).font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+            Spacer()
+            Button { appState.unarchiveEmployee(employee.id) } label: {
+                Text("アーカイブを解除").font(.system(size: 11, weight: .semibold))
+            }
+            .buttonStyle(.plain).foregroundStyle(.blue)
+        }
+        .padding(10)
+        .background(Color.primary.opacity(0.03))
+        .cornerRadius(8)
     }
 }
 

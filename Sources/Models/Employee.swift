@@ -172,6 +172,7 @@ struct HealthSnapshot: Codable, Equatable {
     var heartRate: Int? = nil           // 直近の心拍
     var restingHeartRate: Int? = nil
     var sleepHours: Double? = nil        // 直近の睡眠
+    var mindfulMinutes: Int? = nil       // 今日のマインドフルネス（分）
     var bodyMassKg: Double? = nil
     var date: String? = nil             // データの対象日 "2026-06-28"
     var source: String? = nil           // 送信元デバイス名
@@ -317,10 +318,24 @@ struct Employee: Identifiable, Codable, Equatable {
     /// employees (no "pinned" key) decode without error — a non-optional Bool would throw
     /// keyNotFound and wipe the whole roster. Read via `isPinned`.
     var pinned: Bool? = nil
+    /// Archived employees are hidden from the default roster but kept with their data.
+    var archived: Bool? = nil
+    /// When true, this employee sends a daily proactive check-in (Mac scheduler).
+    var proactiveEnabled: Bool? = nil
     /// Convenience: treat missing/nil as not-pinned.
     var isPinned: Bool { pinned ?? false }
+    var isArchived: Bool { archived ?? false }
+    var isProactiveEnabled: Bool { proactiveEnabled ?? false }
 
     var persona: String { personaOverride ?? role.persona }
+
+    /// True for the dedicated 健康アドバイザー employee (name-based — there is no separate
+    /// "specialty" field yet, so this mirrors the detection already used for health context
+    /// injection in `AppState.handleSendMessage`). Drives the health dashboard on the
+    /// welcome screen (`HealthAdvisorDashboardView`).
+    var isHealthAdvisor: Bool {
+        name.contains("健康") || name.lowercased().contains("health")
+    }
 
     /// 1–2 char initials for the deterministic avatar tile.
     var initials: String {

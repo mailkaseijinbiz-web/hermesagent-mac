@@ -4,6 +4,42 @@
 
 ---
 
+## 📅 2026-07-01 更新ログ
+
+**`cursor/intention-cards` ブランチで完了（Phase H）**
+- ✅ **Collection**：Mac `CollectionStore` + Mobile API + UI、iOS 閲覧（`CollectionView`）
+- ✅ **Home カレンダースコープ**：iOS `HomeView` に 日/週/月/年 切替（`HomeDateHelpers`）
+- ✅ **Mac アクティビティ要約**：iOS タイムラインに `MacActivitySummarizer` 集約表示
+- ✅ **CONCEPT**：creativity + serendipity ピラーを `CONCEPT.md` に追記
+- ✅ **Serendipity**：`SerendipityEngine` + `IntentionCard.rationale` + 週次レビュー serendipity セクション
+- ✅ **Home UI**：iOS タイムラインを `DisclosureGroup` で折りたたみ
+
+**`cursor/intention-cards` ブランチで完了（Phase G）**
+- ✅ **G1**：`AppState+ChatSend.swift` — 送信・セッション選択・添付・フィードバック（`handleSendMessage` 等）を本体から分離。`@Published` は本体 `// MARK: - Chat` に残置
+- ✅ **G2**：`AppState+CloudSync.swift` — Supabase / iCloud roster・メッセージミラー・ライブ同期を分離。`@Published` は本体 `// MARK: - Cloud sync` に残置
+- ✅ **G3**：push-to-start トークン scaffold — iOS `Activity.pushToStartTokenUpdates`（17.2+）→ `POST /api/push/live-activity-start-token`、Mac `liveActivityStartTokens`（cap 3）・`APNsSender.sendLiveActivityStart`（`aps.event = start`）、proactive 時に update トークンが無ければ start push
+- ✅ **G4**：設定「接続」セクション — ローカル URL・Tailscale IPv4（best-effort）・公衆 IP 拒否の注記
+- Mac 本体 `AppState.swift` 大幅縮小、Mac テスト +1 suite、iOS テスト +2 funcs
+
+**`cursor/intention-cards` ブランチで完了（Phase F）**
+- ✅ **F1**：ActivityKit push scaffold — iOS `pushType: .token` + `pushTokenUpdates` → Mac `/api/push/live-activity-token`、Mac `APNsSender.sendLiveActivityUpdate`（`apns-push-type: liveactivity`）、proactive 時に Dynamic Island 更新
+- ✅ **F2**：`empMessages` メモリ上限（`maxShadowEmployeeKeys = 12`）+ LRU プルーニング（`pruneEmpMessageShadows`）
+- ✅ **F3**：`NetworkPeerPolicy` 抽出 + `MobileServerPeerTests`（loopback / Tailscale / LAN / public 分類）
+- Mac テスト +8 funcs（`EmpMessagePruneTests` +4、`MobileServerPeerTests` +4）
+
+**`cursor/intention-cards` ブランチで完了**
+- ✅ **B3/B4**：意図カード（Intention）Mac/iOS パリティ＋ウィジェット連携
+- ✅ **C**：高機微 PII の PrivateStore 暗号化（`locationDaily` / `photoDaily` / `lifelogDaily` 等）
+- ✅ **D1**：`dailyBrief` / `weeklyReview` を `briefDaily` / `weeklyReviewDaily` へ暗号化移行（UserDefaults → PrivateStore、起動時マイグレーション）
+- ✅ **D2**：cron `lastError` を Mobile API JSON に追加、iOS オートメーション行にオレンジ表示
+- ✅ **D3**：iOS `HermesAgentLogicTests` ターゲット＋CI `xcodebuild test`（JSON デコード回帰）
+- ✅ **E1**：`AppState+Automation` へ cron 管理ロジック分離、`HermesCronJobParser` 抽出＋テスト
+- ✅ **E2**：配信失敗デッドレターキュー（`FailedDeliveryStore`・暗号化永続化・オートメーション UI）
+- ✅ **E3**：`MacLifeLogView` にライフログ記録インジケータ（記録中 / 記録オフ）
+- Mac テスト 115 funcs（+8）、iOS テスト 4 funcs 新設、両リポ CI green
+
+---
+
 ## 📅 2026-06-30 更新ログ（夕方・第2回）
 
 **前回（本日午前の記載）から進んだこと**

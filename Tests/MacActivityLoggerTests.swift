@@ -2,6 +2,31 @@ import XCTest
 @testable import HermesCustom
 
 final class MacActivityLoggerTests: XCTestCase {
+    func testIsEnabledDefaultsToTrueWhenUnset() {
+        let key = "macActivityLoggingEnabled"
+        let prior = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let prior { UserDefaults.standard.set(prior, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        UserDefaults.standard.removeObject(forKey: key)
+        XCTAssertTrue(MacActivityLogger.isEnabled)
+    }
+
+    func testIsEnabledPersistsToUserDefaults() {
+        let key = "macActivityLoggingEnabled"
+        let prior = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let prior { UserDefaults.standard.set(prior, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        MacActivityLogger.isEnabled = false
+        XCTAssertFalse(UserDefaults.standard.bool(forKey: key))
+        XCTAssertFalse(MacActivityLogger.isEnabled)
+        MacActivityLogger.isEnabled = true
+        XCTAssertTrue(MacActivityLogger.isEnabled)
+    }
+
     func testBuildLabelUsesAppNameWhenTitleIsEmpty() {
         XCTAssertEqual(MacActivityLogger.buildLabel(appName: "Safari", windowTitle: ""), "Safari")
     }
@@ -23,6 +48,63 @@ final class MacActivityLoggerTests: XCTestCase {
         XCTAssertFalse(MacActivityLogger.shouldMergeAdjacent(previous: first, next: differentURL))
         XCTAssertFalse(MacActivityLogger.shouldMergeAdjacent(previous: first, next: differentTitle))
         XCTAssertFalse(MacActivityLogger.shouldMergeAdjacent(previous: first, next: differentApp))
+    }
+
+    func testActivityEntriesEncryptRoundTrip() throws {
+        let key = "test-activity-\(UUID().uuidString)"
+        defer { PrivateStore.remove(key: key) }
+        var entry = MacActivityEntry()
+        entry.appName = "Safari"
+        entry.label = "Safari — Example"
+        entry.url = "https://example.com"
+        entry.startTime = 100
+        entry.endTime = 200
+        let data = try JSONEncoder().encode([entry])
+        try PrivateStore.saveData(data, key: key)
+        let loaded = PrivateStore.loadData(key: key)
+        XCTAssertEqual(loaded, data)
+    }
+
+    func testLegacyJSONFileMigratesToEncryptedStore() throws {
+        let storeKey = MacActivityLogger.activityStoreKey()
+        let todayLegacy = MacActivityLogger.legacyActivityPath()
+        defer {
+            PrivateStore.remove(key: storeKey)
+            try? FileManager.default.removeItem(atPath: todayLegacy)
+        }
+        try? PrivateStore.remove(key: storeKey)
+        try? FileManager.default.removeItem(atPath: todayLegacy)
+
+        var entry = MacActivityEntry()
+        entry.appName = "Chrome"
+        entry.label = "Chrome — Docs"
+        entry.url = "https://example.com/doc"
+        entry.startTime = 500
+        entry.endTime = 600
+        let data = try JSONEncoder().encode([entry])
+        try data.write(to: URL(fileURLWithPath: todayLegacy))
+
+        let migrated = MacActivityLogger.loadEntries()
+        XCTAssertEqual(migrated.count, 1)
+        XCTAssertEqual(migrated[0].appName, "Chrome")
+        XCTAssertEqual(migrated[0].url, "https://example.com/doc")
+        XCTAssertNotNil(PrivateStore.loadData(key: storeKey))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: todayLegacy))
+    }
+
+    func testStoredActivityDayKeysFindsEncryptedAndLegacy() throws {
+        let day = "2099-01-15"
+        let encKey = "mac-activity-\(day)"
+        defer { PrivateStore.remove(key: encKey) }
+        try PrivateStore.saveData(Data("[]".utf8), key: encKey)
+
+        let legacyPath = "\(NSHomeDirectory())/.hermes/mac-activity-2099-01-16.json"
+        defer { try? FileManager.default.removeItem(atPath: legacyPath) }
+        try Data("[]".utf8).write(to: URL(fileURLWithPath: legacyPath))
+
+        let keys = Set(MacActivityLogger.storedActivityDayKeys())
+        XCTAssertTrue(keys.contains(day))
+        XCTAssertTrue(keys.contains("2099-01-16"))
     }
 
     private func entry(app: String, title: String?, url: String?, start: Double, end: Double) -> MacActivityEntry {

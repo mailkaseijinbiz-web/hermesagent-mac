@@ -14,11 +14,14 @@ extension AppState {
         list.filter { $0.role == .manager } + list.filter { $0.role != .manager }
     }
 
-    /// All employees with managers ordered first (see `managersFirst`).
-    var sortedEmployees: [Employee] { managersFirst(employees) }
+    /// All active (non-archived) employees with managers ordered first.
+    var sortedEmployees: [Employee] { managersFirst(activeEmployees) }
+    /// Employees hidden from the default roster (soft archive).
+    var archivedEmployees: [Employee] { managersFirst(employees.filter { $0.isArchived }) }
+    var activeEmployees: [Employee] { employees.filter { !$0.isArchived } }
 
-    func employees(inTeam teamId: String) -> [Employee] { managersFirst(employees.filter { $0.teamId == teamId }) }
-    var unassignedEmployees: [Employee] { managersFirst(employees.filter { $0.teamId == nil }) }
+    func employees(inTeam teamId: String) -> [Employee] { managersFirst(activeEmployees.filter { $0.teamId == teamId }) }
+    var unassignedEmployees: [Employee] { managersFirst(activeEmployees.filter { $0.teamId == nil }) }
 
     @discardableResult
     func createTeam(name: String) -> Team {

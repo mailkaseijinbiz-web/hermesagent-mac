@@ -1,5 +1,11 @@
 import Foundation
 
+enum LineBridgeHealth: Equatable {
+    case ok
+    case portDown
+    case notInstalled
+}
+
 /// Supervises the LINE bridge (`~/.hermes/line-bridge/run_bridge.sh` → `bridge.py` on :8650).
 /// The app keeps it running so LINE send/receive always works — same idea as MobileServer.
 /// Idempotent: never double-starts if something already listens on the port (ours or an
@@ -17,6 +23,16 @@ final class LineBridge: @unchecked Sendable {
 
     /// The bridge files exist, so it can be started.
     var isInstalled: Bool { FileManager.default.fileExists(atPath: runScript) }
+
+    /// Lightweight health: installed → port probe → optional GET /health (200 = ok).
+    func healthCheck() -> LineBridgeHealth {
+        guard isInstalled else { return .notInstalled }
+        guard isPortUp() else { return .portDown }
+        if let code = httpHealthStatusCode() {
+            return code == 200 ? .ok : .portDown
+        }
+        return .ok
+    }
 
     /// True if something is listening on 127.0.0.1:port (a quick localhost TCP connect).
     func isPortUp() -> Bool {
@@ -73,5 +89,21 @@ final class LineBridge: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         process?.terminate()
         process = nil
+    }
+
+    /// GET http://127.0.0.1:port/health with a short timeout. Nil if unreachable or no /health.
+    private func httpHealthStatusCode() -> Int? {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/health") else { return nil }
+        var status: Int?
+        let sem = DispatchSemaphore(value: 0)
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 2
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            status = (resp as? HTTPURLResponse)?.statusCode
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 2.5)
+        return status
     }
 }

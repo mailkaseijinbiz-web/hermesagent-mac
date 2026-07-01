@@ -3,16 +3,39 @@ import SwiftUI
 struct AutomationsView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) var colorScheme
+    @ObservedObject private var failedDeliveryStore = FailedDeliveryStore.shared
     @State private var showSuggestions = false   // おすすめ欄は既定で折りたたみ（縦の長さを抑える）
+    @State private var showFailedDeliveries = true
+    /// Embedded inside the Settings panel: drop the outer ScrollView (settings scrolls) and
+    /// the close-X (settings has its own close), and tighten padding.
+    var embedded: Bool = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+        Group {
+            if embedded {
+                listContent
+            } else {
+                ScrollView { listContent }
+                    .ignoresSafeArea(edges: .top)
+            }
+        }
+        .onAppear {
+            appState.fetchAutomationResults()
+            appState.fetchChannels()
+            Task { await appState.fetchCronJobs() }
+        }
+        .sheet(isPresented: $appState.showCronCreateSheet) {
+            CronCreateSheet().environmentObject(appState)
+        }
+    }
+
+    private var listContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
                 // Header
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("スケジュールタスク (オートメーション)")
-                            .font(.system(size: 24, weight: .bold))
+                        Text(embedded ? "オートメーション" : "スケジュールタスク (オートメーション)")
+                            .font(.system(size: embedded ? 14 : 24, weight: embedded ? .semibold : .bold))
                         Text("定期的に自動実行するエージェントタスクやスクリプト（Cronジョブ）の管理を行います。")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
@@ -34,19 +57,25 @@ struct AutomationsView: View {
                     }
                     .buttonStyle(.plain)
                     
-                    Button(action: {
-                        appState.view = "chat"
-                    }) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.secondary)
-                            .frame(width: 24, height: 24)
-                            .background(Color.primary.opacity(0.05))
-                            .cornerRadius(12)
+                    if !embedded {
+                        Button(action: {
+                            appState.view = "chat"
+                        }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .frame(width: 24, height: 24)
+                                .background(Color.primary.opacity(0.05))
+                                .cornerRadius(12)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
-                .padding(.bottom, 8)
+                .padding(.bottom, embedded ? 0 : 8)
+
+                if !failedDeliveryStore.records.isEmpty {
+                    failedDeliveriesSection
+                }
 
                 // Section 0.5: Suggested automations (collapsible — 既定で閉じる)
                 VStack(alignment: .leading, spacing: 12) {
@@ -162,19 +191,85 @@ struct AutomationsView: View {
                     }
                 }
             }
-            .padding(.horizontal, 32)
-            .padding(.top, 52).padding(.bottom, 24)
-            .frame(maxWidth: 760)
+            .padding(.horizontal, embedded ? 0 : 32)
+            .padding(.top, embedded ? 0 : 52).padding(.bottom, embedded ? 0 : 24)
+            .frame(maxWidth: embedded ? .infinity : 760)
             .frame(maxWidth: .infinity)   // 広い窓では中央寄せ（左に寄って間延びしないように）
+    }
+
+    private var failedDeliveriesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { showFailedDeliveries.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: showFailedDeliveries ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10)).foregroundColor(.orange)
+                        Text("最近の配信失敗")
+                            .font(.system(size: 14, weight: .semibold)).foregroundColor(.orange)
+                        Text("\(failedDeliveryStore.records.count)")
+                            .font(.system(size: 10)).foregroundColor(.orange.opacity(0.7))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                if showFailedDeliveries {
+                    Button("すべてクリア") { failedDeliveryStore.clearAll() }
+                        .font(.system(size: 11))
+                        .buttonStyle(.plain)
+                        .foregroundColor(.orange)
+                }
+            }
+
+            if showFailedDeliveries {
+                List {
+                    ForEach(failedDeliveryStore.records) { rec in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Text(rec.jobName)
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text(CronJobRow.humanDeliver(rec.deliver, channels: appState.channels))
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 5).padding(.vertical, 1)
+                                    .background(Color.primary.opacity(0.06))
+                                    .clipShape(Capsule())
+                                Spacer()
+                                Text(Self.failedDeliveryTime(rec.recordedAt))
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary.opacity(0.8))
+                            }
+                            Text(rec.error)
+                                .font(.system(size: 11))
+                                .foregroundColor(.orange)
+                                .lineLimit(2)
+                        }
+                        .padding(.vertical, 4)
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                failedDeliveryStore.clear(recordId: rec.id)
+                            } label: {
+                                Label("消去", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+                .frame(minHeight: min(CGFloat(failedDeliveryStore.records.count) * 56, 220))
+                .background(Color.orange.opacity(0.04))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.2), lineWidth: 0.5))
+            }
         }
-        .ignoresSafeArea(edges: .top)
-        .onAppear {
-            appState.fetchAutomationResults()
-            appState.fetchChannels()
-        }
-        .sheet(isPresented: $appState.showCronCreateSheet) {
-            CronCreateSheet().environmentObject(appState)
-        }
+    }
+
+    private static func failedDeliveryTime(_ date: Date) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.locale = Locale(identifier: "ja_JP")
+        f.unitsStyle = .short
+        return f.localizedString(for: date, relativeTo: Date())
     }
 
 }

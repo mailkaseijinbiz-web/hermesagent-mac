@@ -21,6 +21,7 @@ struct SettingsModal: View {
         case general = "一般"
         case model = "モデル"
         case apps = "アプリ"
+        case automations = "オートメーション"
         case google = "Google"
         case mobile = "モバイル"
         case cloud = "クラウド同期"
@@ -33,6 +34,7 @@ struct SettingsModal: View {
             case .general: return "gearshape"
             case .model: return "cpu"
             case .apps: return "hammer"
+            case .automations: return "clock"
             case .google: return "g.circle"
             case .mobile: return "iphone"
             case .cloud: return "cloud"
@@ -46,6 +48,7 @@ struct SettingsModal: View {
             case .general: return "一般 general 性格 personality"
             case .model: return "モデル model プロバイダー provider 推論 inference api キー key oauth nous openrouter antigravity agy gemini cli"
             case .apps: return "アプリ apps プロジェクト project 開発 develop 起動 launch 新規アプリ"
+            case .automations: return "オートメーション automation cron スケジュール 定期 ジョブ タスク 自動"
             case .google: return "google gmail calendar カレンダー メール oauth 認証 連携"
             case .mobile: return "モバイル mobile スマホ iphone ipad qr ペアリング 連携 同期 sync push 通知 認証"
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
@@ -165,6 +168,7 @@ struct SettingsModal: View {
                         case .general: generalSection
                         case .model: modelSection
                         case .apps: AppsView(embedded: true)
+                        case .automations: AutomationsView(embedded: true)
                         case .google: googleSection
                         case .mobile: mobileSection
                         case .cloud: cloudSection
@@ -184,7 +188,13 @@ struct SettingsModal: View {
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.35), radius: 24, x: 0, y: 12)
-        .onAppear { appState.fetchChannels() }
+        .onAppear {
+            appState.fetchChannels()
+            applyPendingSettingsSection()
+        }
+        .onChange(of: appState.showSettings) { _, open in
+            if open { applyPendingSettingsSection() }
+        }
         .onChange(of: appState.apiKey) { _, _ in settingsDirty = true }
         // 設定画面を閉じたら、変更（APIキー/プロバイダー）を自動適用して保存。
         .onDisappear {
@@ -200,17 +210,68 @@ struct SettingsModal: View {
 
     // MARK: - Sections
 
+    private func applyPendingSettingsSection() {
+        guard let pending = appState.pendingSettingsSection,
+              let sec = Section.allCases.first(where: { $0.rawValue == pending }) else { return }
+        selected = sec
+        appState.pendingSettingsSection = nil
+        if sec == .automations {
+            appState.fetchAutomationResults()
+            Task { await appState.fetchCronJobs() }
+        }
+    }
+
     /// モバイル連携（QRペアリング・Google認証ゲート・Push通知）。以前はヘッダーのアイコンから
     /// ポップオーバーで開いていたが、設定内に集約した。MobileSyncView を再利用。
     private var mobileSection: some View {
         card(title: "モバイルと同期") {
-            HStack {
-                Spacer()
-                MobileSyncView()
-                    .environmentObject(appState)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer()
+            VStack(alignment: .leading, spacing: 12) {
+                connectivitySection
+                Divider()
+                HStack {
+                    Spacer()
+                    MobileSyncView()
+                        .environmentObject(appState)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
             }
+        }
+    }
+
+    @State private var tailscaleIPv4: String?
+
+    /// Local / Tailscale URLs for pairing the iOS client with this Mac hub.
+    private var connectivitySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("接続")
+                .font(.system(size: 12, weight: .semibold))
+            HStack(spacing: 8) {
+                Text("ローカル")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .frame(width: 72, alignment: .leading)
+                Text("http://127.0.0.1:\(AppConfig.mobilePort)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            HStack(spacing: 8) {
+                Text("Tailscale")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .frame(width: 72, alignment: .leading)
+                Text(tailscaleIPv4.map { "http://\($0):\(AppConfig.mobilePort)" } ?? "—")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(tailscaleIPv4 == nil ? .secondary : .primary)
+                    .textSelection(.enabled)
+            }
+            Text("※ 公衆IPからの接続は拒否されます（NetworkPeerPolicy）。")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary.opacity(0.85))
+                .lineLimit(nil)
+        }
+        .task {
+            tailscaleIPv4 = await Task.detached(priority: .utility) { TailscaleIPv4.lookup() }.value
         }
     }
 
@@ -402,6 +463,50 @@ struct SettingsModal: View {
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             updateCard
+            macActivityLoggingCard
+        }
+    }
+
+    @AppStorage("macActivityLoggingEnabled") private var macActivityLoggingEnabled = true
+
+    private var macActivityLoggingCard: some View {
+        card(title: "プライバシーとライフログ") {
+            Toggle(isOn: $macActivityLoggingEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Mac作業ログを記録").font(.system(size: 13, weight: .medium))
+                    Text("使用中のアプリ名とブラウザのURLを日次で記録し、ライフログに表示します。")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+                }
+            }
+            .toggleStyle(.switch)
+            .onChange(of: macActivityLoggingEnabled) { _, enabled in
+                MacActivityLogger.isEnabled = enabled
+                if enabled {
+                    MacActivityLogger.shared.start()
+                } else {
+                    MacActivityLogger.shared.stop()
+                }
+            }
+
+            if macActivityLoggingEnabled && !MacActivityLogger.isAccessibilityTrusted {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.system(size: 12))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("アクセシビリティの許可が必要です")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("ブラウザのURLを記録するには、システム設定で Hermes にアクセシビリティを許可してください。")
+                            .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(nil)
+                        Button("アクセシビリティ設定を開く") {
+                            MacActivityLogger.requestAccessibilityPermission()
+                        }
+                        .font(.system(size: 11))
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .padding(.top, 4)
+            }
         }
     }
 
@@ -416,6 +521,26 @@ struct SettingsModal: View {
                 }.buttonStyle(.plain)
             }
         )) {
+            if let err = appState.lineDeliveryAuthError {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12)).foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(err)
+                            .font(.system(size: 11)).foregroundColor(.orange).lineLimit(nil)
+                        HStack(spacing: 12) {
+                            Link("LINE設定手順",
+                                 destination: URL(string: "https://developers.line.biz/ja/docs/messaging-api/getting-started/")!)
+                                .font(.system(size: 11))
+                            Button("ブリッジを再起動") { Task { await appState.restartLineBridge() } }
+                                .font(.system(size: 11)).buttonStyle(.bordered)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08))
+                .cornerRadius(8)
+            }
             HStack(spacing: 8) {
                 Circle().fill(appState.isLineBridgeRunning ? Color.green : Color.orange)
                     .frame(width: 7, height: 7)

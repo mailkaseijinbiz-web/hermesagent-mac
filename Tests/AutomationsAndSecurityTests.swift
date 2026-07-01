@@ -86,4 +86,14 @@ final class AutomationsAndSecurityTests: XCTestCase {
             XCTAssertTrue(MobileServer.isRoutablePublicIPv4(ip), "expected public: \(ip)")
         }
     }
+
+    // MARK: - LINE delivery 401 detection
+
+    func testIsLineDeliveryAuthError() {
+        XCTAssertTrue(AppState.isLineDeliveryAuthError("⚠ Delivery failed: LINE push 401: invalid token"))
+        XCTAssertTrue(AppState.isLineDeliveryAuthError("line api returned 401"))
+        XCTAssertFalse(AppState.isLineDeliveryAuthError("LINE timeout"))
+        XCTAssertFalse(AppState.isLineDeliveryAuthError("push 401 to slack"))
+        XCTAssertFalse(AppState.isLineDeliveryAuthError(nil))
+    }
 }

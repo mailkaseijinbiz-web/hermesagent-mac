@@ -1,13 +1,34 @@
 import Foundation
 import Network
 
+/// IP classification for MobileServer peer filtering (unit-testable).
+enum NetworkPeerPolicy {
+    /// True for routable public IPv4 — such peers are rejected before auth.
+    static func isPublicIPv4Peer(_ raw: String) -> Bool {
+        MobileServer.isRoutablePublicIPv4(raw)
+    }
+
+    /// True when the peer IP is not a routable public IPv4 (loopback, LAN, Tailscale, IPv6, unknown).
+    static func isTrustedPeerIP(_ raw: String) -> Bool {
+        !isPublicIPv4Peer(raw)
+    }
+
+    /// Bind targets: loopback plus optional Tailscale IPv4 (unit-testable).
+    nonisolated static func listenBindAddresses(tailscaleIPv4: String?) -> [String] {
+        var addrs = ["127.0.0.1"]
+        let ts = tailscaleIPv4?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !ts.isEmpty, ts.contains(".") { addrs.append(ts) }
+        return addrs
+    }
+}
+
 /// Lightweight HTTP server for iOS mobile app connectivity.
 /// Uses NWListener from the Network framework — zero external dependencies.
 @MainActor
 class MobileServer {
     static let shared = MobileServer()
     
-    private var listener: NWListener?
+    private var listeners: [NWListener] = []
     private(set) var isRunning = false
     private(set) var port: UInt16 = AppConfig.mobilePort
     
@@ -20,46 +41,73 @@ class MobileServer {
     private var eventTimer: Task<Void, Never>? = nil
 
     private init() {}
-    
+
     func start(port: UInt16 = AppConfig.mobilePort) {
         self.port = port
-        
-        do {
-            let params = NWParameters.tcp
-            params.allowLocalEndpointReuse = true
-            listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
-        } catch {
-            print("[MobileServer] Failed to create listener: \(error)")
-            return
+        stop()
+
+        let tailscaleIP = TailscaleIPv4.lookup()
+        let bindAddresses = NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: tailscaleIP)
+        if tailscaleIP == nil {
+            print("[MobileServer] Tailscale IPv4 unavailable; binding loopback only")
+        } else {
+            print("[MobileServer] Binding to \(bindAddresses.joined(separator: ", "))")
         }
-        
-        listener?.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready:
-                print("[MobileServer] Server ready on port \(port)")
-                Task { @MainActor in
-                    self?.isRunning = true
+
+        let nwPort = NWEndpoint.Port(rawValue: port)!
+        var started: [NWListener] = []
+
+        for addr in bindAddresses {
+            do {
+                let params = NWParameters.tcp
+                params.allowLocalEndpointReuse = true
+                params.requiredLocalEndpoint = NWEndpoint.hostPort(
+                    host: NWEndpoint.Host(addr),
+                    port: nwPort
+                )
+                let listener = try NWListener(using: params)
+
+                listener.stateUpdateHandler = { [weak self] state in
+                    switch state {
+                    case .ready:
+                        print("[MobileServer] Listening on \(addr):\(port)")
+                        Task { @MainActor in
+                            self?.isRunning = true
+                        }
+                    case .failed(let error):
+                        print("[MobileServer] Listener on \(addr) failed: \(error)")
+                        if addr == "127.0.0.1" {
+                            Task { @MainActor in
+                                self?.isRunning = false
+                            }
+                        }
+                    default:
+                        break
+                    }
                 }
-            case .failed(let error):
-                print("[MobileServer] Server failed: \(error)")
-                Task { @MainActor in
-                    self?.isRunning = false
+
+                listener.newConnectionHandler = { [weak self] connection in
+                    self?.handleConnection(connection)
                 }
-            default:
-                break
+
+                listener.start(queue: .global(qos: .userInitiated))
+                started.append(listener)
+            } catch {
+                print("[MobileServer] Failed to create listener on \(addr): \(error)")
             }
         }
-        
-        listener?.newConnectionHandler = { [weak self] connection in
-            self?.handleConnection(connection)
+
+        listeners = started
+        if started.isEmpty {
+            print("[MobileServer] No listeners started")
         }
-        
-        listener?.start(queue: .global(qos: .userInitiated))
     }
-    
+
     func stop() {
-        listener?.cancel()
-        listener = nil
+        for listener in listeners {
+            listener.cancel()
+        }
+        listeners.removeAll()
         isRunning = false
 
         for conn in activeStreamConnections {
@@ -78,12 +126,11 @@ class MobileServer {
     // MARK: - Connection Handling
     
     private nonisolated func handleConnection(_ connection: NWConnection) {
-        // Defense-in-depth: the listener binds all interfaces (0.0.0.0), so on a public/guest
-        // network the API could be probed from the internet. Drop connections from clearly-public
-        // IPv4 peers before doing any work — legitimate clients reach the hub over loopback,
-        // Tailscale (100.64/10 or IPv6 ULA), or the private LAN. The Google/local-key auth gate
-        // still applies to everything that passes. Conservative on purpose: anything we can't
-        // classify as routable-public IPv4 (incl. all IPv6) is allowed so we never break a real client.
+        // Defense-in-depth: listeners bind loopback + Tailscale only, but drop clearly-public
+        // IPv4 peers before doing any work anyway. Legitimate clients reach the hub over loopback
+        // or Tailscale (100.64/10 or IPv6 ULA). The Google/local-key auth gate still applies.
+        // Conservative on purpose: anything we can't classify as routable-public IPv4 (incl. all
+        // IPv6) is allowed so we never break a real client.
         if isPublicPeer(connection) {
             Log.server.notice("rejected connection from public peer: \(self.peerIP(connection) ?? "?", privacy: .public)")
             connection.cancel()
@@ -106,7 +153,7 @@ class MobileServer {
 
     private nonisolated func isPublicPeer(_ connection: NWConnection) -> Bool {
         guard let ip = peerIP(connection) else { return false }   // unknown → allow (auth still gates)
-        return Self.isRoutablePublicIPv4(ip)
+        return NetworkPeerPolicy.isPublicIPv4Peer(ip)
     }
 
     /// True only for a routable public IPv4 address. Private/CGNAT/loopback/link-local IPv4 and
@@ -303,12 +350,24 @@ class MobileServer {
             handleNewSession(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/push/register"):
             handlePushRegister(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/push/live-activity-token"):
+            handleLiveActivityPushToken(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/push/live-activity-start-token"):
+            handleLiveActivityStartToken(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/presence"):
             handlePresence(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/badge/clear"):
             handleBadgeClear(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/dashboard/brief"):
             handleBriefUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/intention/today"):
+            handleIntentionGet(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/intention/today"):
+            handleIntentionRegenerate(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/intention/confirm"):
+            handleIntentionConfirm(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/intention/dismiss"):
+            handleIntentionDismiss(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/profile"):
             handleProfileGet(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/profile"):
@@ -327,10 +386,17 @@ class MobileServer {
             handleMemosList(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/ingest"):
             handleIngest(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/collection"):
+            handleCollectionList(connection: connection, corsHeaders: corsHeaders)
+        case ("DELETE", _) where pathOnly.hasPrefix("/api/collection/"):
+            let id = String(pathOnly.dropFirst("/api/collection/".count))
+            handleCollectionDelete(connection: connection, id: id, corsHeaders: corsHeaders)
         case ("GET", "/api/review"):
             handleReviewGet(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/review"):
             handleReviewRegenerate(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", "/api/lifelog/summary"):
+            handleLifelogSummaryGet(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/cron"):
             handleCronList(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/cron"):
@@ -376,8 +442,12 @@ class MobileServer {
             handleTaskDelete(connection: connection, id: String(pathOnly.dropFirst("/api/tasks/".count)), corsHeaders: corsHeaders)
         case ("POST", "/api/health"):
             handleHealthUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/health/weight"):
+            handleWeightRecord(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/health"):
             handleHealthGet(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", "/api/health/weights"):
+            handleWeightHistory(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/artifacts"):
             handleArtifactsList(connection: connection, employeeId: query["employeeId"], corsHeaders: corsHeaders)
         case ("POST", "/api/artifacts"):
@@ -507,7 +577,7 @@ class MobileServer {
         let hermesItems = rows.map { r -> (dict: [String: Any], updatedAt: Double) in
             let title = r.title.isEmpty ? (r.preview.isEmpty ? "(無題)" : String(r.preview.prefix(40))) : r.title
             return ([
-                "id": r.id, "title": title, "preview": String(r.preview.prefix(80)),
+                "id": r.id, "title": title, "preview": String(r.preview.prefix(280)),
                 "lastActive": iso.string(from: Date(timeIntervalSince1970: r.updatedAt)),
                 "source": r.source, "messageCount": r.messageCount, "lastMessageId": r.lastMessageId
             ], r.updatedAt)
@@ -515,7 +585,7 @@ class MobileServer {
         let agyItems = agy.map { s -> (dict: [String: Any], updatedAt: Double) in
             let preview = s.messages.last?.content ?? ""
             return ([
-                "id": s.id, "title": s.title.isEmpty ? "(無題)" : s.title, "preview": String(preview.prefix(80)),
+                "id": s.id, "title": s.title.isEmpty ? "(無題)" : s.title, "preview": String(preview.prefix(280)),
                 "lastActive": iso.string(from: Date(timeIntervalSince1970: s.updatedAt)),
                 "source": "antigravity", "messageCount": s.messages.count, "lastMessageId": 0
             ], s.updatedAt)
@@ -678,7 +748,8 @@ class MobileServer {
                     "accent": e.role.accentHex,
                     "model": e.model,
                     "mode": e.mode.rawValue,
-                    "blurb": e.role.blurb
+                    "blurb": e.role.blurb,
+                    "proactiveEnabled": e.isProactiveEnabled
                 ]
             }
             let json: [String: Any] = ["employees": emps]
@@ -870,6 +941,32 @@ class MobileServer {
         }
     }
 
+    private nonisolated func handleLiveActivityPushToken(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["token"] as? String, !token.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing token\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.addLiveActivityPushToken(token)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleLiveActivityStartToken(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["token"] as? String, !token.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing token\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.addLiveActivityStartToken(token)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
     /// A device reports which session it's viewing in the foreground, so the Mac can
     /// skip pushing that session's updates to it. Body: {token, sessionId?, active}.
     private nonisolated func handlePresence(connection: NWConnection, body: String, corsHeaders: String) {
@@ -899,6 +996,49 @@ class MobileServer {
         Task { @MainActor in
             AppState.shared.clearBadge(token: token)
             self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/intention/today — regenerate intention cards from vitals + context.
+    private nonisolated func handleIntentionRegenerate(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            if AppState.shared.isGeneratingIntention {
+                self.sendResponse(connection: connection, status: 409,
+                                  body: "{\"error\":\"intention is being generated\"}", corsHeaders: corsHeaders)
+                return
+            }
+            let isToday = Calendar.current.isDateInToday(Date(timeIntervalSince1970: AppState.shared.intentionCardsAt))
+            await AppState.shared.generateIntentionCards(preserveDismissals: isToday)
+            self.sendJSON(connection: connection, AppState.shared.intentionTodayJSON(), corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/intention/today — current intention card set.
+    private nonisolated func handleIntentionGet(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            self.sendJSON(connection: connection, AppState.shared.intentionTodayJSON(), corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/intention/confirm — user picked a card; execute its action.
+    private nonisolated func handleIntentionConfirm(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body), let id = json["id"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing id\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            let result = AppState.shared.confirmIntentionCard(id)
+            self.sendJSON(connection: connection, result, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/intention/dismiss — user rejected a card hypothesis.
+    private nonisolated func handleIntentionDismiss(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body), let id = json["id"] as? String else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing id\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            AppState.shared.dismissIntentionCard(id)
+            self.sendJSON(connection: connection, AppState.shared.intentionTodayJSON(), corsHeaders: corsHeaders)
         }
     }
 
@@ -1048,8 +1188,9 @@ class MobileServer {
             b64 = b64.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
             let pad = b64.count % 4
             if pad > 0 { b64 += String(repeating: "=", count: 4 - pad) }
-            return Data(base64Encoded: b64)
-        }
+            guard let data = Data(base64Encoded: b64), data.count <= 2_000_000 else { return nil }
+            return data
+        }.prefix(3).map { $0 }
     }
 
     /// POST /api/memo — メモを追加。Body: {text, images?:[base64], source?}.
@@ -1120,7 +1261,11 @@ class MobileServer {
         case "image":
             if note.isEmpty && title.isEmpty { lines.append("📷 共有された写真") }
             if !title.isEmpty { lines.append(title) }
-            if !text.isEmpty { lines.append(String(text.prefix(2000))) }
+            if !text.isEmpty { lines.append(String(text.prefix(500))) }
+        case "video":
+            if !title.isEmpty { lines.append("🎬 \(title)") }
+            else { lines.append("🎬 ライフログ動画") }
+            if !text.isEmpty { lines.append(String(text.prefix(500))) }
         default: // text
             if !title.isEmpty { lines.append(title) }
             if !text.isEmpty { lines.append(String(text.prefix(4000))) }
@@ -1131,10 +1276,25 @@ class MobileServer {
             return
         }
         let source = kind == "url" ? "web" : "share"
+        let mediaKind = kind == "url" ? "url" : (kind == "video" ? "video" : (kind == "image" ? "image" : "text"))
+        let pageTitle = title.isEmpty ? nil : title
+        let link = kind == "url" && !url.isEmpty ? url : nil
         Task { @MainActor in
-            let memo = MacMemoStore.shared.addMemo(memoText, images: images, source: source)
-            Log.event("app", "INFO", "ingested \(kind) → memo \(memo.id) (\(memo.imagePaths?.count ?? 0) img)")
-            let resp: [String: Any] = ["status": "ok", "id": memo.id]
+            let collectionItem = CollectionStore.shared.add(
+                kind: mediaKind,
+                title: title,
+                note: note,
+                url: url,
+                text: text,
+                images: images,
+                source: source
+            )
+            let memo = MacMemoStore.shared.addMemo(
+                memoText, images: images, source: source,
+                link: link, pageTitle: pageTitle, mediaKind: mediaKind
+            )
+            Log.event("app", "INFO", "ingested \(kind) → collection \(collectionItem.id) memo \(memo.id) (\(memo.imagePaths?.count ?? 0) img)")
+            let resp: [String: Any] = ["status": "ok", "id": memo.id, "collectionId": collectionItem.id]
             if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
                 self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
             } else {
@@ -1143,10 +1303,58 @@ class MobileServer {
         }
     }
 
+    /// GET /api/collection — saved share/ingest items (newest first).
+    private nonisolated func handleCollectionList(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let items = CollectionStore.shared.items.map { item -> [String: Any] in
+                [
+                    "id": item.id,
+                    "kind": item.kind,
+                    "title": item.title,
+                    "note": item.note,
+                    "url": item.url,
+                    "text": item.text,
+                    "imageCount": item.imagePaths.count,
+                    "source": item.source,
+                    "createdAt": item.createdAt.timeIntervalSince1970,
+                ]
+            }
+            if let d = try? JSONSerialization.data(withJSONObject: ["items": items]),
+               let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// DELETE /api/collection/{id}
+    private nonisolated func handleCollectionDelete(connection: NWConnection, id: String, corsHeaders: String) {
+        Task { @MainActor in
+            CollectionStore.shared.delete(id: id)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
     /// GET /api/review — return the latest weekly metacognitive review {review, reviewAt}.
     private nonisolated func handleReviewGet(connection: NWConnection, corsHeaders: String) {
         Task { @MainActor in
             let resp: [String: Any] = ["review": AppState.shared.weeklyReview, "reviewAt": AppState.shared.weeklyReviewAt]
+            if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// GET /api/lifelog/summary — today's AI lifelog summary {summary, summaryAt}.
+    private nonisolated func handleLifelogSummaryGet(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let resp: [String: Any] = [
+                "summary": AppState.shared.lifelogSummary,
+                "summaryAt": AppState.shared.lifelogSummaryAt
+            ]
             if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
                 self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
             } else {
@@ -1483,6 +1691,7 @@ class MobileServer {
             snap.heartRate = i("heartRate")
             snap.restingHeartRate = i("restingHeartRate")
             snap.sleepHours = d("sleepHours")
+            snap.mindfulMinutes = i("mindfulMinutes")
             snap.bodyMassKg = d("bodyMassKg")
             snap.date = json["date"] as? String
             snap.source = json["source"] as? String
@@ -1502,10 +1711,44 @@ class MobileServer {
                 put("steps", h.steps); put("distanceKm", h.distanceKm); put("activeEnergyKcal", h.activeEnergyKcal)
                 put("exerciseMinutes", h.exerciseMinutes); put("heartRate", h.heartRate)
                 put("restingHeartRate", h.restingHeartRate); put("sleepHours", h.sleepHours)
-                put("bodyMassKg", h.bodyMassKg); put("date", h.date); put("source", h.source)
+                put("mindfulMinutes", h.mindfulMinutes); put("bodyMassKg", h.bodyMassKg); put("date", h.date); put("source", h.source)
                 dict["updatedAt"] = h.updatedAt
             }
             self.sendJSON(connection: connection, dict, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/health/weight — メモ由来の体重を Mac ハブに記録（iOS → HealthKit 後の同期）。
+    private nonisolated func handleWeightRecord(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body),
+              let kg = (json["kg"] as? Double) ?? (json["kg"] as? Int).map(Double.init) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing kg\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let recordedAt = (json["recordedAt"] as? Double) ?? Date().timeIntervalSince1970
+        let memoId = json["memoId"] as? String
+        let source = (json["source"] as? String) ?? "ios-memo"
+        Task { @MainActor in
+            AppState.shared.recordWeightFromMemo(
+                kg: kg,
+                at: Date(timeIntervalSince1970: recordedAt),
+                memoId: memoId,
+                source: source
+            )
+            self.sendJSON(connection: connection, ["ok": true], corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/health/weights — 体重履歴（新しい順、最大120件）。
+    private nonisolated func handleWeightHistory(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let records = WeightRecordStore.all().sorted { $0.recordedAt > $1.recordedAt }.prefix(120)
+            let arr: [[String: Any]] = records.map { r in
+                var d: [String: Any] = ["id": r.id, "kg": r.kg, "recordedAt": r.recordedAt, "source": r.source]
+                if let m = r.memoId { d["memoId"] = m }
+                return d
+            }
+            self.sendJSON(connection: connection, ["weights": arr], corsHeaders: corsHeaders)
         }
     }
 
@@ -2055,24 +2298,20 @@ class MobileServer {
     }
 
     nonisolated func fetchSaunaNewsJSON() async -> String {
-        let query = "サウナ".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "sauna"
-        let urlStr = "https://news.google.com/rss/search?q=\(query)&hl=ja&gl=JP&ceid=JP:ja"
-        guard let url = URL(string: urlStr),
-              let (data, _) = try? await URLSession.shared.data(from: url),
-              let xml = String(data: data, encoding: .utf8) else { return "[]" }
-
-        // シンプルな正規表現なしの XML パース
-        var items: [[String: String]] = []
-        let parts = xml.components(separatedBy: "<item>")
-        for part in parts.dropFirst().prefix(5) {
-            let title = xmlText(part, tag: "title")
-            let link  = xmlText(part, tag: "link")
-            let date  = xmlText(part, tag: "pubDate")
-            if !title.isEmpty {
-                items.append(["title": title, "link": link, "date": date])
-            }
+        let topics = await MainActor.run {
+            NewsFeedParser.topics(from: AppState.shared.personalProfile.likes)
         }
-        guard let out = try? JSONSerialization.data(withJSONObject: items),
+        var groups: [[NewsFeedItem]] = []
+        for topic in topics {
+            let query = topic.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? topic
+            let urlStr = "https://news.google.com/rss/search?q=\(query)&hl=ja&gl=JP&ceid=JP:ja"
+            guard let url = URL(string: urlStr),
+                  let (data, _) = try? await URLSession.shared.data(from: url),
+                  let xml = String(data: data, encoding: .utf8) else { continue }
+            groups.append(NewsFeedParser.parseGoogleNewsRSS(xml, topic: topic, limit: 5))
+        }
+        let merged = NewsFeedParser.merge(groups, max: 10)
+        guard let out = try? JSONEncoder().encode(merged),
               let str = String(data: out, encoding: .utf8) else { return "[]" }
         return str
     }

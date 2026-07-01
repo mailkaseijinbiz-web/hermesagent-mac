@@ -215,7 +215,11 @@ struct HermesChannel: Identifiable, Equatable {
 class AppState: ObservableObject {
     static let shared = AppState()
     
-    @Published var view: String = "dashboard" // landing on the bento dashboard; "chat" | "company" | …
+    @Published var view: String = "home" // landing on lifelog home; "chat" | "company" | …
+    /// Collection row to scroll/highlight after an intention card tap.
+    @Published var highlightedCollectionItemId: String? = nil
+    /// Vertical scroll depth of the active main pane (drives header fade in `MainView`).
+    @Published var mainScrollOffset: CGFloat = 0
     @Published var showCommandPalette = false   // ⌘K quick-jump overlay
 
     // Dashboard bento layout: each widget's position (col,row) + size (w,h) in square grid
@@ -227,17 +231,18 @@ class AppState: ObservableObject {
     static let dashboardCols = 4
     static func defaultDashboardLayout() -> [WidgetTile] {
         [
-            .init(id: "health",    col: 0, row: 0, w: 2, h: 2),
-            .init(id: "self",      col: 2, row: 0, w: 2, h: 2),
-            .init(id: "schedule",  col: 0, row: 2, w: 2, h: 2),
-            .init(id: "tasks",     col: 2, row: 2, w: 2, h: 2),
-            .init(id: "location",  col: 0, row: 4, w: 1, h: 1),
-            .init(id: "photos",    col: 1, row: 4, w: 1, h: 1),
-            .init(id: "apps",      col: 2, row: 4, w: 1, h: 1),
-            .init(id: "employees", col: 3, row: 4, w: 1, h: 1),
-            .init(id: "brief",     col: 0, row: 5, w: 4, h: 2),
-            .init(id: "review",    col: 0, row: 7, w: 4, h: 2),
-            .init(id: "lifelog",   col: 0, row: 9, w: 4, h: 3),
+            .init(id: "intention", col: 0, row: 0, w: 4, h: 2),
+            .init(id: "health",    col: 0, row: 2, w: 2, h: 2),
+            .init(id: "self",      col: 2, row: 2, w: 2, h: 2),
+            .init(id: "schedule",  col: 0, row: 4, w: 2, h: 2),
+            .init(id: "tasks",     col: 2, row: 4, w: 2, h: 2),
+            .init(id: "location",  col: 0, row: 6, w: 1, h: 1),
+            .init(id: "photos",    col: 1, row: 6, w: 1, h: 1),
+            .init(id: "apps",      col: 2, row: 6, w: 1, h: 1),
+            .init(id: "employees", col: 3, row: 6, w: 1, h: 1),
+            .init(id: "brief",     col: 0, row: 7, w: 4, h: 2),
+            .init(id: "review",    col: 0, row: 9, w: 4, h: 2),
+            .init(id: "lifelog",   col: 0, row: 11, w: 4, h: 3),
         ]
     }
     @Published var dashboardLayout: [WidgetTile] = AppState.loadJSON("dashboardLayout") ?? AppState.defaultDashboardLayout() {
@@ -254,6 +259,10 @@ class AppState: ObservableObject {
         }
     }
     @Published var showSettings: Bool = false   // settings shown as a modal dialog
+    /// When set, the settings modal opens on this section (matched by `SettingsModal.Section.rawValue`).
+    @Published var pendingSettingsSection: String? = nil
+    // MARK: - Chat
+
     @Published var sessions: [Session] = []
     @Published var currentSessionId: String? = nil
     @Published var messages: [Message] = []
@@ -302,6 +311,9 @@ class AppState: ObservableObject {
     // LINE bridge (bridge.py on :8650) — auto-started with the app so LINE always works.
     @Published var isLineBridgeRunning: Bool = false
     @Published var lineBridgeStatus: String = ""
+    @Published var lineDeliveryAuthError: String? = nil
+    var lineBridgeWatchdogTimer: Timer?
+    var previousLineAuthErrors: [String: String] = [:]
 
     /// Ensure the LINE bridge is running, then reflect its live state in the UI.
     func startLineBridge() async {
@@ -415,9 +427,21 @@ class AppState: ObservableObject {
     // The tool-permission request currently awaiting the user's decision (drives the dialog).
     @Published var pendingPermission: ACPPermission? = nil
     private var permissionCont: CheckedContinuation<String?, Never>? = nil
+    // Polls every 5 min for due proactive employee check-ins (see AppState+EmployeeProactive.swift).
+    var proactiveSchedulerTimer: Timer?
+    /// Session id for an in-flight proactive check-in — bypasses pushOnlyAutomations once.
+    var proactivePushSessionId: String?
     // Registered iOS device tokens (from /api/push/register)
     @Published var pushDeviceTokens: [String] = UserDefaults.standard.stringArray(forKey: "pushDeviceTokens") ?? [] {
         didSet { UserDefaults.standard.set(pushDeviceTokens, forKey: "pushDeviceTokens") }
+    }
+    // Live Activity push tokens (from /api/push/live-activity-token) — capped list for APNs updates.
+    @Published var liveActivityPushTokens: [String] = UserDefaults.standard.stringArray(forKey: "liveActivityPushTokens") ?? [] {
+        didSet { UserDefaults.standard.set(liveActivityPushTokens, forKey: "liveActivityPushTokens") }
+    }
+    // Push-to-start tokens (from /api/push/live-activity-start-token) — start a Live Activity remotely.
+    @Published var liveActivityStartTokens: [String] = UserDefaults.standard.stringArray(forKey: "liveActivityStartTokens") ?? [] {
+        didSet { UserDefaults.standard.set(liveActivityStartTokens, forKey: "liveActivityStartTokens") }
     }
     private var lastPushedMessageId: Int64 = 0
     
@@ -461,6 +485,8 @@ class AppState: ObservableObject {
     // When true, handleSendMessage skips local command interception (used by runAppAction to
     // forward an augmented prompt to the agent without re-matching its own command pattern).
     var bypassCommandIntercept = false
+    /// When set, handleSendMessage uses this as the agent prompt and shows a short user bubble.
+    var proactiveSendPrompt: String?
     @Published var pluginsList: [HermesPlugin] = []
     @Published var isFetchingPlugins: Bool = false
     @Published var pluginInstallInput: String = ""
@@ -523,7 +549,21 @@ class AppState: ObservableObject {
             if let v = snap.activeEnergyKcal { $0.activeEnergyKcal = Int(v) }
             if let v = snap.restingHeartRate { $0.restingHeartRate = v }
             if let v = snap.sleepHours { $0.sleepHours = v }
+            if let v = snap.bodyMassKg { $0.bodyMassKg = v }
         }
+        scheduleIntentionRefreshIfNeeded()
+    }
+
+    /// メモから体重を記録し、履歴・最新ヘルス・日次履歴を更新する。
+    func recordWeightFromMemo(kg: Double, at date: Date = Date(), memoId: String? = nil, source: String = "memo") {
+        guard let record = WeightRecordStore.append(kg: kg, at: date, memoId: memoId, source: source) else { return }
+        var snap = latestHealth ?? HealthSnapshot()
+        snap.bodyMassKg = record.kg
+        snap.updatedAt = Date().timeIntervalSince1970
+        if snap.date == nil { snap.date = dayKey(date) }
+        latestHealth = snap
+        upsertToday { $0.bodyMassKg = record.kg }
+        scheduleIntentionRefreshIfNeeded()
     }
 
     // Rolling daily history (last ~60 days) so the AI can do WEEKLY metacognitive reviews
@@ -534,6 +574,7 @@ class AppState: ObservableObject {
         var activeEnergyKcal: Int? = nil
         var restingHeartRate: Int? = nil
         var sleepHours: Double? = nil
+        var bodyMassKg: Double? = nil
         var locations: String = ""
         var photos: String = ""
     }
@@ -544,7 +585,7 @@ class AppState: ObservableObject {
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
         return f.string(from: d)
     }
-    private func upsertToday(_ mutate: (inout DayRecord) -> Void) {
+    func upsertToday(_ mutate: (inout DayRecord) -> Void) {
         let key = dayKey()
         if let i = dailyHistory.firstIndex(where: { $0.date == key }) {
             mutate(&dailyHistory[i])
@@ -554,63 +595,52 @@ class AppState: ObservableObject {
         if dailyHistory.count > 60 { dailyHistory.removeFirst(dailyHistory.count - 60) }
     }
 
+    // MARK: - Lifelog
+
     // Weekly metacognitive review (pattern detection over dailyHistory). Persisted.
-    @Published var weeklyReview: String = UserDefaults.standard.string(forKey: "weeklyReview") ?? "" {
-        didSet { UserDefaults.standard.set(weeklyReview, forKey: "weeklyReview") }
+    @Published var weeklyReview: String = AppState.loadDailyText(
+        storeKey: "weeklyReviewDaily", legacyTextKey: "weeklyReview", legacyAtKey: "weeklyReviewAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: weeklyReview, at: weeklyReviewAt, storeKey: "weeklyReviewDaily") }
     }
-    @Published var weeklyReviewAt: Double = UserDefaults.standard.double(forKey: "weeklyReviewAt") {
-        didSet { UserDefaults.standard.set(weeklyReviewAt, forKey: "weeklyReviewAt") }
+    @Published var weeklyReviewAt: Double = AppState.loadDailyText(
+        storeKey: "weeklyReviewDaily", legacyTextKey: "weeklyReview", legacyAtKey: "weeklyReviewAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: weeklyReview, at: weeklyReviewAt, storeKey: "weeklyReviewDaily") }
     }
     @Published var isGeneratingReview = false
 
     // Lifelog daily summary (AI-generated snapshot of today's Mac + iOS activity).
-    @Published var lifelogSummary: String = UserDefaults.standard.string(forKey: "lifelogSummary") ?? "" {
-        didSet { UserDefaults.standard.set(lifelogSummary, forKey: "lifelogSummary") }
+    @Published var lifelogSummary: String = AppState.loadDailyText(
+        storeKey: "lifelogDaily", legacyTextKey: "lifelogSummary", legacyAtKey: "lifelogSummaryAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: lifelogSummary, at: lifelogSummaryAt, storeKey: "lifelogDaily") }
     }
-    @Published var lifelogSummaryAt: Double = UserDefaults.standard.double(forKey: "lifelogSummaryAt") {
-        didSet { UserDefaults.standard.set(lifelogSummaryAt, forKey: "lifelogSummaryAt") }
+    @Published var lifelogSummaryAt: Double = AppState.loadDailyText(
+        storeKey: "lifelogDaily", legacyTextKey: "lifelogSummary", legacyAtKey: "lifelogSummaryAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: lifelogSummary, at: lifelogSummaryAt, storeKey: "lifelogDaily") }
     }
     @Published var isGeneratingLifelogSummary = false
-    /// 直近 `days` 日の日次データを1行/日のテキストに整形（履歴が無ければ空）。
-    func weeklyReviewContext(days: Int = 14) -> String {
-        let recent = dailyHistory.suffix(days)
-        guard !recent.isEmpty else { return "" }
-        return recent.map { r in
-            var p: [String] = [r.date]
-            if let v = r.steps { p.append("歩\(v)") }
-            if let v = r.activeEnergyKcal { p.append("\(v)kcal") }
-            if let v = r.restingHeartRate { p.append("安静\(v)") }
-            if let v = r.sleepHours { p.append(String(format: "睡眠%.1fh", v)) }
-            if !r.locations.isEmpty { p.append("場所[\(r.locations)]") }
-            if !r.photos.isEmpty { p.append("写真[\(r.photos)]") }
-            return p.joined(separator: " / ")
-        }.joined(separator: "\n")
-    }
 
     // Location: a privacy-light daily "足あと" summary pushed from iOS (place names + times,
     // NOT raw coordinates). Injected into the brief/coaching context. Device-local.
-    @Published var locationSummary: String = UserDefaults.standard.string(forKey: "locationSummary") ?? "" {
-        didSet { UserDefaults.standard.set(locationSummary, forKey: "locationSummary") }
+    @Published var locationSummary: String = AppState.loadDailyText(
+        storeKey: "locationDaily", legacyTextKey: "locationSummary", legacyAtKey: "locationSummaryAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: locationSummary, at: locationSummaryAt, storeKey: "locationDaily") }
     }
-    @Published var locationSummaryAt: Double = UserDefaults.standard.double(forKey: "locationSummaryAt") {
-        didSet { UserDefaults.standard.set(locationSummaryAt, forKey: "locationSummaryAt") }
+    @Published var locationSummaryAt: Double = AppState.loadDailyText(
+        storeKey: "locationDaily", legacyTextKey: "locationSummary", legacyAtKey: "locationSummaryAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: locationSummary, at: locationSummaryAt, storeKey: "locationDaily") }
     }
     /// 自宅キーワード（空文字 = 未登録）。locationSummary 内の一致部分を「自宅」に置換して表示。
-    @Published var homeLocationKeyword: String = UserDefaults.standard.string(forKey: "homeLocationKeyword") ?? "" {
-        didSet { UserDefaults.standard.set(homeLocationKeyword, forKey: "homeLocationKeyword") }
+    @Published var homeLocationKeyword: String = AppState.loadPrivateString(
+        key: "homeLocationKeyword", legacyKey: "homeLocationKeyword"
+    ) {
+        didSet { AppState.saveJSON(homeLocationKeyword, "homeLocationKeyword") }
     }
-    /// 自宅キーワードを反映した表示用サマリ。
-    func resolvedLocationSummary(_ raw: String) -> String {
-        let kw = homeLocationKeyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !kw.isEmpty else { return raw }
-        return raw.replacingOccurrences(of: kw, with: "自宅", options: .caseInsensitive)
-    }
-    func updateLocationSummary(_ s: String) {
-        locationSummary = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        locationSummaryAt = Date().timeIntervalSince1970
-        upsertToday { $0.locations = self.locationSummary }
-    }
-
     // Per-place coordinates for today's footprint map (sent from iOS, to this private hub).
     struct LocationPoint: Codable, Equatable, Identifiable {
         var name: String; var lat: Double; var lon: Double
@@ -619,36 +649,18 @@ class AppState: ObservableObject {
     @Published var locationPoints: [LocationPoint] = AppState.loadJSON("locationPoints") ?? [] {
         didSet { AppState.saveJSON(locationPoints, "locationPoints") }
     }
-    func updateLocation(summary: String, points: [LocationPoint]) {
-        updateLocationSummary(summary)
-        locationPoints = points.filter { $0.lat != 0 || $0.lon != 0 }
-    }
-    /// 今日の足あとを文脈に。古い（前日以前）サマリは使わない。自宅キーワードは「自宅」に置換。
-    var locationContext: String? {
-        guard !locationSummary.isEmpty, locationSummaryAt > 0 else { return nil }
-        guard Calendar.current.isDateInToday(Date(timeIntervalSince1970: locationSummaryAt)) else { return nil }
-        return "今日の行動(訪れた場所): \(resolvedLocationSummary(locationSummary))"
-    }
-
     // Photos: a privacy-light daily summary pushed from iOS (counts/places only — never the
     // photos themselves). Injected into the brief/coaching context. Device-local.
-    @Published var photoSummary: String = UserDefaults.standard.string(forKey: "photoSummary") ?? "" {
-        didSet { UserDefaults.standard.set(photoSummary, forKey: "photoSummary") }
+    @Published var photoSummary: String = AppState.loadDailyText(
+        storeKey: "photoDaily", legacyTextKey: "photoSummary", legacyAtKey: "photoSummaryAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: photoSummary, at: photoSummaryAt, storeKey: "photoDaily") }
     }
-    @Published var photoSummaryAt: Double = UserDefaults.standard.double(forKey: "photoSummaryAt") {
-        didSet { UserDefaults.standard.set(photoSummaryAt, forKey: "photoSummaryAt") }
+    @Published var photoSummaryAt: Double = AppState.loadDailyText(
+        storeKey: "photoDaily", legacyTextKey: "photoSummary", legacyAtKey: "photoSummaryAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: photoSummary, at: photoSummaryAt, storeKey: "photoDaily") }
     }
-    func updatePhotoSummary(_ s: String) {
-        photoSummary = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        photoSummaryAt = Date().timeIntervalSince1970
-        upsertToday { $0.photos = self.photoSummary }
-    }
-    var photoContext: String? {
-        guard !photoSummary.isEmpty, photoSummaryAt > 0 else { return nil }
-        guard Calendar.current.isDateInToday(Date(timeIntervalSince1970: photoSummaryAt)) else { return nil }
-        return "今日の写真: \(photoSummary)"
-    }
-
     /// 健康データの日本語1行サマリー（健康アドバイザーのチャットへ注入／表示用）。データ無しは nil。
     var healthSummaryLine: String? {
         guard let h = latestHealth else { return nil }
@@ -660,6 +672,7 @@ class AppState: ObservableObject {
         if let v = h.heartRate { parts.append("心拍 \(v)bpm") }
         if let v = h.restingHeartRate { parts.append("安静時心拍 \(v)bpm") }
         if let v = h.sleepHours { parts.append(String(format: "睡眠 %.1f時間", v)) }
+        if let v = h.mindfulMinutes, v > 0 { parts.append("マインドフル \(v)分") }
         if let v = h.bodyMassKg { parts.append(String(format: "体重 %.1fkg", v)) }
         guard !parts.isEmpty else { return nil }
         let day = (h.date?.isEmpty == false) ? "（\(h.date!)）" : ""
@@ -755,13 +768,43 @@ class AppState: ObservableObject {
 
     // Dashboard daily brief: an AI-written narrative summary of today, persisted with its
     // timestamp so the dashboard can show "as of HH:mm" and auto-refresh when stale.
-    @Published var dailyBrief: String = UserDefaults.standard.string(forKey: "dailyBrief") ?? "" {
-        didSet { UserDefaults.standard.set(dailyBrief, forKey: "dailyBrief") }
+    @Published var dailyBrief: String = AppState.loadDailyText(
+        storeKey: "briefDaily", legacyTextKey: "dailyBrief", legacyAtKey: "dailyBriefAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: dailyBrief, at: dailyBriefAt, storeKey: "briefDaily") }
     }
-    @Published var dailyBriefAt: Double = UserDefaults.standard.double(forKey: "dailyBriefAt") {
-        didSet { UserDefaults.standard.set(dailyBriefAt, forKey: "dailyBriefAt") }
+    @Published var dailyBriefAt: Double = AppState.loadDailyText(
+        storeKey: "briefDaily", legacyTextKey: "dailyBrief", legacyAtKey: "dailyBriefAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: dailyBrief, at: dailyBriefAt, storeKey: "briefDaily") }
     }
     @Published var isGeneratingBrief: Bool = false
+
+    // Intention cards: AI/hybrid hypotheses drawn from vitals + multimodal context.
+    @Published var intentionCards: [IntentionCard] = AppState.loadJSON("intentionCards") ?? [] {
+        didSet { AppState.saveJSON(intentionCards, "intentionCards") }
+    }
+    @Published var intentionVitalHint: String = UserDefaults.standard.string(forKey: "intentionVitalHint") ?? "" {
+        didSet { UserDefaults.standard.set(intentionVitalHint, forKey: "intentionVitalHint") }
+    }
+    @Published var intentionVitalityMode: String = UserDefaults.standard.string(forKey: "intentionVitalityMode") ?? "steady" {
+        didSet { UserDefaults.standard.set(intentionVitalityMode, forKey: "intentionVitalityMode") }
+    }
+    @Published var intentionCardsAt: Double = UserDefaults.standard.double(forKey: "intentionCardsAt") {
+        didSet { UserDefaults.standard.set(intentionCardsAt, forKey: "intentionCardsAt") }
+    }
+    @Published var intentionSelectedId: String? = UserDefaults.standard.string(forKey: "intentionSelectedId") {
+        didSet { UserDefaults.standard.set(intentionSelectedId, forKey: "intentionSelectedId") }
+    }
+    @Published var intentionDismissedIds: [String] = AppState.loadJSON("intentionDismissedIds") ?? [] {
+        didSet { AppState.saveJSON(intentionDismissedIds, "intentionDismissedIds") }
+    }
+    /// Kinds the user rejected today (recover/focus/rest/…) — suppress similar cards on refresh.
+    @Published var intentionDismissedKinds: [String] = AppState.loadJSON("intentionDismissedKinds") ?? [] {
+        didSet { AppState.saveJSON(intentionDismissedKinds, "intentionDismissedKinds") }
+    }
+    @Published var isGeneratingIntention: Bool = false
+    var intentionRefreshTask: Task<Void, Never>?
 
     // The employee whose detail/management screen is open (view == "employee").
     @Published var detailEmployeeId: String? = nil
@@ -769,11 +812,56 @@ class AppState: ObservableObject {
     static func loadTeams() -> [Team] { loadJSON("teams") ?? [] }
     static func loadTasks() -> [WorkTask] { loadJSON("workTasks") ?? [] }
     static func loadArtifacts() -> [Artifact] { loadJSON("artifacts") ?? [] }
+
+    struct DailyTextSnapshot: Codable, Equatable {
+        var text: String = ""
+        var updatedAt: Double = 0
+    }
+
+    static func loadDailyText(storeKey: String, legacyTextKey: String, legacyAtKey: String) -> DailyTextSnapshot {
+        if let snap: DailyTextSnapshot = loadJSON(storeKey) { return snap }
+        let text = UserDefaults.standard.string(forKey: legacyTextKey) ?? ""
+        let at = UserDefaults.standard.double(forKey: legacyAtKey)
+        let snap = DailyTextSnapshot(text: text, updatedAt: at)
+        if !text.isEmpty || at > 0 { saveJSON(snap, storeKey) }
+        UserDefaults.standard.removeObject(forKey: legacyTextKey)
+        UserDefaults.standard.removeObject(forKey: legacyAtKey)
+        return snap
+    }
+
+    static func saveDailyText(text: String, at: Double, storeKey: String) {
+        saveJSON(DailyTextSnapshot(text: text, updatedAt: at), storeKey)
+    }
+
+    static func loadPrivateString(key: String, legacyKey: String) -> String {
+        if let value: String = loadJSON(key) { return value }
+        guard UserDefaults.standard.object(forKey: legacyKey) != nil else { return "" }
+        let legacy = UserDefaults.standard.string(forKey: legacyKey) ?? ""
+        saveJSON(legacy, key)
+        UserDefaults.standard.removeObject(forKey: legacyKey)
+        return legacy
+    }
+
     static func loadJSON<T: Decodable>(_ key: String) -> T? {
+        if PrivateStoreKeys.all.contains(key) {
+            if let v: T = PrivateStore.load(T.self, key: key) { return v }
+            guard let data = UserDefaults.standard.data(forKey: key),
+                  let decoded = try? JSONDecoder().decode(T.self, from: data) else { return nil }
+            try? PrivateStore.saveData(data, key: key)
+            UserDefaults.standard.removeObject(forKey: key)
+            return decoded
+        }
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
     }
     static func saveJSON<T: Encodable>(_ value: T, _ key: String) {
+        if PrivateStoreKeys.all.contains(key) {
+            do {
+                try PrivateStore.save(value, key: key)
+                UserDefaults.standard.removeObject(forKey: key)
+            } catch { Log.failure("app", "暗号化保存に失敗 (\(key))", error) }
+            return
+        }
         do { UserDefaults.standard.set(try JSONEncoder().encode(value), forKey: key) }
         catch { Log.failure("app", "状態の保存に失敗 (\(key))", error) }
     }
@@ -798,6 +886,8 @@ class AppState: ObservableObject {
     var empProcesses:    [String: Process]  = [:]
     var empACPClients:   [String: ACPClient] = [:]
     var empMessages:     [String: [Message]] = [:]
+    /// Last-touch timestamps for empMessages keys — drives LRU pruning of idle shadows.
+    var empMessageTouchAt: [String: Date] = [:]
     /// In-flight per-employee model application; a send awaits it so the first message can't run on
     /// the previous employee's model. internal (relocated from the employees section) so the extracted
     /// switchEmployee can assign it while handleSendMessage (main) awaits it.
@@ -806,7 +896,7 @@ class AppState: ObservableObject {
     /// `onEvent` callback — delivered after the turn finalized, or after a NEWER turn started
     /// for the same employee — no-op instead of overwriting finalized content or re-creating
     /// `empStreamTexts` (the parallel-streaming race). Bounded: one entry per key.
-    private var streamingAssistantIds: [String: UUID] = [:]
+    var streamingAssistantIds: [String: UUID] = [:]
 
     /// Cap on each employee's shadow message array. Shadows snapshot the FULL `messages` per
     /// employee you switch away from / who is streaming — with many employees and image messages
@@ -814,8 +904,51 @@ class AppState: ObservableObject {
     /// most recent N (the streaming bubble is the last element, so it always survives). The full
     /// history still lives in StateDB and reloads when you reopen that conversation.
     private let maxShadowMessages = 600
+    /// Max distinct employee shadow arrays kept in memory (LRU prune of idle employees).
+    internal static let maxShadowEmployeeKeys = 12
     func cappedShadow(_ msgs: [Message]) -> [Message] {   // internal: used by switchEmployee (extracted) + handleSendMessage
         msgs.count > maxShadowMessages ? Array(msgs.suffix(maxShadowMessages)) : msgs
+    }
+
+    /// Keys to drop when `empMessages` exceeds `maxShadowEmployeeKeys`. Protected keys
+    /// (busy/streaming/active) are never removed; others are LRU by `lastTouch`.
+    nonisolated internal static func empMessageShadowKeysToPrune(
+        keys: [String],
+        lastTouch: [String: Date],
+        busyIds: Set<String>,
+        streamingIds: Set<String>,
+        activeId: String?,
+        maxKeys: Int = maxShadowEmployeeKeys
+    ) -> [String] {
+        guard keys.count > maxKeys else { return [] }
+        var protected = busyIds.union(streamingIds)
+        let activeKey = activeId ?? ""
+        if !activeKey.isEmpty { protected.insert(activeKey) }
+        let candidates = keys.filter { !protected.contains($0) }
+        let excess = keys.count - maxKeys
+        guard excess > 0, !candidates.isEmpty else { return [] }
+        let sorted = candidates.sorted {
+            (lastTouch[$0] ?? .distantPast) < (lastTouch[$1] ?? .distantPast)
+        }
+        return Array(sorted.prefix(excess))
+    }
+
+    func touchEmpMessageShadow(forKey key: String) {
+        empMessageTouchAt[key] = Date()
+    }
+
+    func pruneEmpMessageShadows() {
+        let toRemove = Self.empMessageShadowKeysToPrune(
+            keys: Array(empMessages.keys),
+            lastTouch: empMessageTouchAt,
+            busyIds: busyEmployeeIds,
+            streamingIds: streamingEmployeeIds,
+            activeId: activeEmployeeId
+        )
+        for k in toRemove {
+            empMessages.removeValue(forKey: k)
+            empMessageTouchAt.removeValue(forKey: k)
+        }
     }
 
     /// Convenience — stable key for an employee id (nil → "全体"). internal: used by domain extensions.
@@ -829,7 +962,7 @@ class AppState: ObservableObject {
     }
 
     /// Lazily create (or return existing) a dedicated ACPClient for an employee.
-    private func getOrCreateACPClient(for key: String) -> ACPClient {
+    func getOrCreateACPClient(for key: String) -> ACPClient {
         if let c = empACPClients[key] { return c }
         let c = ACPClient()
         c.autoAllow = acpAutoAllow
@@ -891,144 +1024,13 @@ class AppState: ObservableObject {
     }
 
 
-    // MARK: - Cloud sync (Supabase)
+    // MARK: - Cloud sync
 
     /// Normalized Supabase base URL (no trailing slash).
     var supabaseBase: String? {
         let u = supabaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !u.isEmpty else { return nil }
         return u.hasSuffix("/") ? String(u.dropLast()) : u
-    }
-
-    /// Probe the Supabase REST endpoint + employees table to verify URL/key/SQL setup.
-    func testCloudConnection() async {
-        isTestingCloud = true
-        defer { isTestingCloud = false }
-        guard let base = supabaseBase, !supabaseAnonKey.isEmpty,
-              let url = URL(string: "\(base)/rest/v1/employees?select=id&limit=1") else {
-            cloudSyncStatus = "URL と APIキーを入力してください"; return
-        }
-        var req = URLRequest(url: url); req.timeoutInterval = 12
-        req.setValue(supabaseAnonKey, forHTTPHeaderField: "apikey")
-        req.setValue("Bearer \(supabaseAnonKey)", forHTTPHeaderField: "Authorization")
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if code == 200 {
-                cloudSyncStatus = "接続OK ✓（employees テーブルを確認）"
-            } else {
-                let body = String(data: data, encoding: .utf8)?.prefix(140) ?? ""
-                cloudSyncStatus = "失敗 HTTP \(code): \(body)"
-            }
-        } catch {
-            cloudSyncStatus = "接続エラー: \(error.localizedDescription)"
-        }
-    }
-
-    /// The workspace key grouping this user's devices (explicit, else allowed email, else default).
-    var effectiveCloudWorkspace: String {
-        let w = cloudWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !w.isEmpty { return w }
-        return mobileAllowedEmail.isEmpty ? "default" : mobileAllowedEmail
-    }
-
-    func cloudHeaders(_ req: inout URLRequest) {
-        req.setValue(supabaseAnonKey, forHTTPHeaderField: "apikey")
-        req.setValue("Bearer \(supabaseAnonKey)", forHTTPHeaderField: "Authorization")
-    }
-
-    /// Shared (cross-device) fields only — session/workspace/avatar stay device-local.
-    private func employeeRow(_ e: Employee) -> [String: Any] {
-        [
-            "id": e.id,
-            "workspace": effectiveCloudWorkspace,
-            "name": e.name,
-            "role": e.role.rawValue,
-            "provider": e.provider,
-            "model": e.model,
-            "mode": e.mode.rawValue,
-            "persona_override": e.personaOverride ?? NSNull(),
-            "created_at": e.createdAt,
-            "client_updated": e.updatedAt ?? e.createdAt
-        ]
-    }
-
-    /// Pull cloud employees, merge (last-write-wins on shared fields), then push local.
-    func syncEmployeesNow() async {
-        guard cloudSyncEnabled, supabaseBase != nil, !supabaseAnonKey.isEmpty else {
-            cloudSyncStatus = "クラウド同期がオフ、またはURL/キー未設定です"; return
-        }
-        if let rows = await fetchCloudEmployees() { mergeCloudEmployees(rows) }
-        await pushEmployees()
-        if !cloudSyncStatus.hasPrefix("取得") && !cloudSyncStatus.hasPrefix("push") {
-            cloudSyncStatus = "社員を同期しました（\(employees.count)名）"
-        }
-    }
-
-    private func fetchCloudEmployees() async -> [[String: Any]]? {
-        guard let base = supabaseBase else { return nil }
-        let ws = effectiveCloudWorkspace.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? effectiveCloudWorkspace
-        guard let url = URL(string: "\(base)/rest/v1/employees?workspace=eq.\(ws)&select=*") else { return nil }
-        var req = URLRequest(url: url); req.timeoutInterval = 15; cloudHeaders(&req)
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard (resp as? HTTPURLResponse)?.statusCode == 200,
-                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                cloudSyncStatus = "取得失敗: \(String(data: data, encoding: .utf8)?.prefix(120) ?? "")"
-                return nil
-            }
-            return arr
-        } catch { cloudSyncStatus = "取得エラー: \(error.localizedDescription)"; return nil }
-    }
-
-    private func mergeCloudEmployees(_ rows: [[String: Any]]) {
-        for row in rows {
-            guard let id = row["id"] as? String,
-                  let roleStr = row["role"] as? String, let role = EmployeeRole(rawValue: roleStr) else { continue }
-            let cloudUpdated = (row["client_updated"] as? Double) ?? (row["created_at"] as? Double) ?? 0
-            let name = row["name"] as? String ?? role.title
-            let provider = row["provider"] as? String ?? role.defaultProvider
-            let model = row["model"] as? String ?? role.defaultModel
-            let mode = AgentMode(rawValue: row["mode"] as? String ?? "") ?? role.defaultMode
-            let persona = row["persona_override"] as? String
-            if let idx = employees.firstIndex(where: { $0.id == id }) {
-                let localUpdated = employees[idx].updatedAt ?? employees[idx].createdAt
-                if cloudUpdated > localUpdated {
-                    employees[idx].name = name
-                    employees[idx].provider = provider
-                    employees[idx].model = model
-                    employees[idx].mode = mode
-                    employees[idx].personaOverride = persona
-                    employees[idx].updatedAt = cloudUpdated
-                }
-            } else {
-                var e = Employee(name: name, role: role, provider: provider, model: model, mode: mode)
-                e.id = id
-                e.personaOverride = persona
-                e.createdAt = (row["created_at"] as? Double) ?? Date().timeIntervalSince1970
-                e.updatedAt = cloudUpdated
-                employees.append(e)
-            }
-        }
-    }
-
-    // internal (not private): called from AppState+Teams.swift (assignEmployee) and other domain extensions.
-    func pushEmployees() async {
-        guard let base = supabaseBase, !employees.isEmpty,
-              let url = URL(string: "\(base)/rest/v1/employees?on_conflict=id") else { return }
-        let rows = employees.map { employeeRow($0) }
-        guard let body = try? JSONSerialization.data(withJSONObject: rows) else { return }
-        var req = URLRequest(url: url); req.httpMethod = "POST"; req.timeoutInterval = 15; cloudHeaders(&req)
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("resolution=merge-duplicates,return=minimal", forHTTPHeaderField: "Prefer")
-        req.httpBody = body
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if !(200...299).contains(code) {
-                cloudSyncStatus = "push失敗 HTTP \(code): \(String(data: data, encoding: .utf8)?.prefix(120) ?? "")"
-            }
-        } catch { cloudSyncStatus = "pushエラー: \(error.localizedDescription)" }
     }
 
     // Model health (model id → works?) from test pings; hides non-working models.
@@ -1067,18 +1069,6 @@ class AppState: ObservableObject {
     @Published var icloudStatus: String = ""
     @Published var isTestingICloud: Bool = false
 
-    /// Write+read+delete one probe record in CloudKit to verify entitlements + account.
-    func testICloud() async {
-        isTestingICloud = true
-        defer { isTestingICloud = false }
-        icloudStatus = "テスト中…"
-        do {
-            icloudStatus = try await CloudKitSync.smokeTest()
-        } catch {
-            icloudStatus = "失敗: \(error.localizedDescription)"
-        }
-    }
-
     // MARK: - iCloud roster sync (Stage 1: employees / teams / tasks)
 
     @Published var icloudSyncEnabled: Bool = UserDefaults.standard.bool(forKey: "icloudSyncEnabled") {
@@ -1096,183 +1086,9 @@ class AppState: ObservableObject {
         didSet { AppState.saveJSON(syncTombstones, "syncTombstones") }
     }
     /// Set while applying a remote pull so the array didSets don't echo a push back.
-    private var isApplyingRemote = false
-    private var icloudPushTask: Task<Void, Never>? = nil
-    private var lastPushedRosterSig: Int = 0
-
-    /// Record a delete so it wins over stale copies on other devices.
-    func tombstone(_ id: String) { syncTombstones[id] = Date().timeIntervalSince1970 }
-
-    /// True if `id` was deleted at/after the item's own last edit (so the delete wins).
-    private func tombstoneWins(_ id: String, _ itemUpdated: Double) -> Bool {
-        if let ts = syncTombstones[id], ts >= itemUpdated { return true }
-        return false
-    }
-
-    /// Drop tombstones older than 60 days so the record doesn't grow without bound.
-    private func prunedTombstones() -> [String: Double] {
-        let cutoff = Date().timeIntervalSince1970 - 60 * 24 * 3600
-        return syncTombstones.filter { $0.value >= cutoff }
-    }
-
-    /// Build the shared-fields payload from current local state (call after merge).
-    private func localRosterPayload() -> CloudKitSync.RosterPayload {
-        let emps = employees.map {
-            CloudKitSync.EmployeeShared(
-                id: $0.id, name: $0.name, role: $0.role.rawValue,
-                provider: $0.provider, model: $0.model, mode: $0.mode.rawValue,
-                personaOverride: $0.personaOverride, teamId: $0.teamId,
-                createdAt: $0.createdAt, updatedAt: $0.updatedAt ?? $0.createdAt)
-        }
-        // .file artifacts hold a device-local absolute path (like workspacePath, which
-        // is deliberately not synced) — they'd render as broken rows on other devices, so
-        // only sync the portable kinds (note/link). Their deletes still propagate via tombstones.
-        return CloudKitSync.RosterPayload(employees: emps, teams: teams,
-                                          tasks: workTasks,
-                                          artifacts: artifacts.filter { $0.kind != .file },
-                                          apps: apps, events: events,
-                                          tombstones: prunedTombstones())
-    }
-
-    /// Merge a fetched cloud roster into local state (item-level last-write-wins + tombstones).
-    private func mergeRoster(_ cloud: CloudKitSync.RosterPayload) {
-        isApplyingRemote = true
-        defer { isApplyingRemote = false }
-
-        // Union tombstones (keep the newest deletion time per id).
-        for (id, ts) in cloud.tombstones where (syncTombstones[id] ?? 0) < ts { syncTombstones[id] = ts }
-
-        // Employees — LWW on shared fields; keep device-local fields (avatar/cwd/session).
-        for ce in cloud.employees {
-            guard let role = EmployeeRole(rawValue: ce.role) else { continue }
-            if tombstoneWins(ce.id, ce.updatedAt) { continue }
-            if let idx = employees.firstIndex(where: { $0.id == ce.id }) {
-                let local = employees[idx].updatedAt ?? employees[idx].createdAt
-                if ce.updatedAt > local {
-                    employees[idx].name = ce.name
-                    employees[idx].provider = ce.provider
-                    employees[idx].model = ce.model
-                    employees[idx].mode = AgentMode(rawValue: ce.mode) ?? role.defaultMode
-                    employees[idx].personaOverride = ce.personaOverride
-                    employees[idx].teamId = ce.teamId
-                    employees[idx].updatedAt = ce.updatedAt
-                }
-            } else {
-                var e = Employee(name: ce.name, role: role, provider: ce.provider,
-                                 model: ce.model, mode: AgentMode(rawValue: ce.mode) ?? role.defaultMode)
-                e.id = ce.id
-                e.personaOverride = ce.personaOverride
-                e.teamId = ce.teamId
-                e.createdAt = ce.createdAt
-                e.updatedAt = ce.updatedAt
-                employees.append(e)
-            }
-        }
-        employees.removeAll { tombstoneWins($0.id, $0.updatedAt ?? $0.createdAt) }
-
-        // Teams
-        for ct in cloud.teams {
-            if tombstoneWins(ct.id, ct.updatedAt ?? 0) { continue }
-            if let idx = teams.firstIndex(where: { $0.id == ct.id }) {
-                if (ct.updatedAt ?? 0) > (teams[idx].updatedAt ?? 0) { teams[idx] = ct }
-            } else {
-                teams.append(ct)
-            }
-        }
-        teams.removeAll { tombstoneWins($0.id, $0.updatedAt ?? 0) }
-
-        // Tasks
-        for ck in cloud.tasks {
-            if tombstoneWins(ck.id, ck.updatedAt) { continue }
-            if let idx = workTasks.firstIndex(where: { $0.id == ck.id }) {
-                if ck.updatedAt > workTasks[idx].updatedAt { workTasks[idx] = ck }
-            } else {
-                workTasks.append(ck)
-            }
-        }
-        workTasks.removeAll { tombstoneWins($0.id, $0.updatedAt) }
-
-        // Artifacts (Phase E)
-        for ca in cloud.artifacts {
-            if tombstoneWins(ca.id, ca.updatedAt) { continue }
-            if let idx = artifacts.firstIndex(where: { $0.id == ca.id }) {
-                if ca.updatedAt > artifacts[idx].updatedAt { artifacts[idx] = ca }
-            } else {
-                artifacts.append(ca)
-            }
-        }
-        artifacts.removeAll { tombstoneWins($0.id, $0.updatedAt) }
-
-        // Apps (Phase F)
-        for ca in cloud.apps {
-            if tombstoneWins(ca.id, ca.updatedAt) { continue }
-            if let idx = apps.firstIndex(where: { $0.id == ca.id }) {
-                if ca.updatedAt > apps[idx].updatedAt { apps[idx] = ca }
-            } else {
-                apps.append(ca)
-            }
-        }
-        apps.removeAll { tombstoneWins($0.id, $0.updatedAt) }
-
-        // Events (Phase G)
-        for ce in cloud.events {
-            if tombstoneWins(ce.id, ce.updatedAt) { continue }
-            if let idx = events.firstIndex(where: { $0.id == ce.id }) {
-                if ce.updatedAt > events[idx].updatedAt { events[idx] = ce }
-            } else {
-                events.append(ce)
-            }
-        }
-        events.removeAll { tombstoneWins($0.id, $0.updatedAt) }
-    }
-
-    /// Full sync: pull cloud, merge, then push the merged result.
-    func syncRosterNow() async {
-        guard icloudUsable else { icloudStatus = "iCloud同期がオフです"; return }
-        isSyncingICloud = true
-        defer { isSyncingICloud = false }
-        icloudStatus = "iCloud同期中…"
-        let ws = effectiveCloudWorkspace
-        do {
-            if let cloud = try await CloudKitSync.fetchRoster(workspace: ws) { mergeRoster(cloud) }
-            let payload = localRosterPayload()
-            try await CloudKitSync.pushRoster(payload, workspace: ws)
-            lastPushedRosterSig = rosterSignature(payload)
-            icloudStatus = "iCloud同期完了（社員\(employees.count)・チーム\(teams.count)・タスク\(workTasks.count)）"
-        } catch {
-            icloudStatus = "iCloud同期 失敗: \(error.localizedDescription)"
-        }
-    }
-
-    /// Debounced push triggered by local edits (skips device-local-only churn).
-    func scheduleICloudPush() {
-        guard icloudUsable, !isApplyingRemote else { return }
-        icloudPushTask?.cancel()
-        icloudPushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            guard !Task.isCancelled, let self else { return }
-            await self.pushRosterOnly()
-        }
-    }
-
-    private func pushRosterOnly() async {
-        guard icloudUsable else { return }
-        let payload = localRosterPayload()
-        let sig = rosterSignature(payload)
-        guard sig != lastPushedRosterSig else { return }   // shared fields unchanged → skip
-        do {
-            try await CloudKitSync.pushRoster(payload, workspace: effectiveCloudWorkspace)
-            lastPushedRosterSig = sig
-        } catch {
-            icloudStatus = "iCloud push失敗: \(error.localizedDescription)"
-        }
-    }
-
-    private func rosterSignature(_ p: CloudKitSync.RosterPayload) -> Int {
-        (try? JSONEncoder().encode(p))?.hashValue ?? 0
-    }
-
-    // MARK: - iCloud message mirror (Stage 2: one-way; state.db is CLI-owned / read-only)
+    var isApplyingRemote = false
+    var icloudPushTask: Task<Void, Never>? = nil
+    var lastPushedRosterSig: Int = 0
 
     @Published var icloudMirrorMessages: Bool = UserDefaults.standard.bool(forKey: "icloudMirrorMessages") {
         didSet {
@@ -1282,134 +1098,15 @@ class AppState: ObservableObject {
     }
     @Published var isMirroringMessages: Bool = false
     /// sessionId → last message id already mirrored (so only changed sessions re-push).
-    private var mirroredSessionMsgId: [String: Int64] = AppState.loadJSON("mirroredSessionMsgId") ?? [:] {
+    var mirroredSessionMsgId: [String: Int64] = AppState.loadJSON("mirroredSessionMsgId") ?? [:] {
         didSet { AppState.saveJSON(mirroredSessionMsgId, "mirroredSessionMsgId") }
     }
-    private var mirrorPushTask: Task<Void, Never>? = nil
+    var mirrorPushTask: Task<Void, Never>? = nil
     /// At most this many session logs per run (bounds latency; rest picked up next pass).
-    private let mirrorLogsPerRun = 40
+    let mirrorLogsPerRun = 40
 
-    /// Cap one session's mirrored messages under CloudKit's ~1MB record limit: keep the
-    /// most recent, dropping oldest until the JSON fits.
-    private func capMessages(_ rows: [StateDB.MessageRow]) -> [CloudKitSync.MessageDTO] {
-        var dtos = rows.suffix(1000).map {
-            CloudKitSync.MessageDTO(id: $0.id, role: $0.role, content: $0.content,
-                                    timestamp: $0.timestamp, tokenCount: $0.tokenCount)
-        }
-        while dtos.count > 1, let data = try? JSONEncoder().encode(dtos), data.count > 950_000 {
-            dtos.removeFirst(max(1, dtos.count / 10))
-        }
-        return dtos
-    }
-
-    /// Mirror sessions + (changed) messages up to CloudKit. One-way — never written back.
-    func mirrorMessagesNow() async {
-        guard icloudUsable else { icloudStatus = "iCloud同期がオフです"; return }
-        isMirroringMessages = true
-        defer { isMirroringMessages = false }
-        icloudStatus = "メッセージをミラー中…"
-        let ws = effectiveCloudWorkspace
-        let sessions = StateDB.shared.sessions(limit: 500)
-        do {
-            var metas: [CloudKitSync.SessionMeta] = []
-            var pushed = 0, remaining = 0
-            for s in sessions {
-                metas.append(CloudKitSync.SessionMeta(
-                    id: s.id, title: s.title, preview: s.preview, source: s.source,
-                    archived: s.archived, messageCount: s.messageCount,
-                    lastMessageId: s.lastMessageId, updatedAt: s.updatedAt))
-                guard s.lastMessageId > (mirroredSessionMsgId[s.id] ?? -1) else { continue }
-                if pushed >= mirrorLogsPerRun { remaining += 1; continue }
-                let msgs = capMessages(StateDB.shared.messages(sessionId: s.id))
-                try await CloudKitSync.pushSessionLog(ws: ws, sessionId: s.id, messages: msgs)
-                mirroredSessionMsgId[s.id] = s.lastMessageId
-                pushed += 1
-            }
-            try await CloudKitSync.pushSessionIndex(ws: ws, sessions: metas)
-            icloudStatus = remaining > 0
-                ? "メッセージをミラー（セッション\(metas.count)・更新\(pushed)、残り\(remaining)件は次回）"
-                : "メッセージをミラーしました（セッション\(metas.count)・更新\(pushed)）"
-            if remaining > 0 {   // more changed sessions remain → continue shortly
-                mirrorPushTask?.cancel()
-                mirrorPushTask = Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    guard !Task.isCancelled, let self else { return }
-                    await self.mirrorMessagesNow()
-                }
-            }
-        } catch {
-            icloudStatus = "メッセージミラー失敗: \(error.localizedDescription)"
-        }
-    }
-
-    /// Debounced auto-mirror, triggered by store changes when the toggle is on.
-    func scheduleMessageMirror() {
-        guard icloudUsable, icloudMirrorMessages, !isMirroringMessages else { return }
-        mirrorPushTask?.cancel()
-        mirrorPushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            guard !Task.isCancelled, let self else { return }
-            await self.mirrorMessagesNow()
-        }
-    }
-
-    /// Read the mirror back from CloudKit to confirm the one-way round-trip works.
-    func verifyCloudHistory() async {
-        guard icloudUsable else { icloudStatus = "iCloud同期がオフです"; return }
-        icloudStatus = "クラウド履歴を確認中…"
-        do {
-            let ws = effectiveCloudWorkspace
-            let metas = try await CloudKitSync.fetchSessionIndex(ws: ws)
-            let total = metas.reduce(0) { $0 + $1.messageCount }
-            if let first = metas.first {
-                let log = try await CloudKitSync.fetchSessionLog(ws: ws, sessionId: first.id)
-                icloudStatus = "クラウド履歴: セッション\(metas.count)件・メタ合計\(total)msg（先頭「\(first.title)」のミラー\(log.count)msg）"
-            } else {
-                icloudStatus = "クラウド履歴: セッション0件（まだミラーされていません）"
-            }
-        } catch {
-            icloudStatus = "履歴確認失敗: \(error.localizedDescription)"
-        }
-    }
-
-    // MARK: - iCloud live sync (Stage 3: near-realtime via lightweight polling)
-    //
-    // The public DB can't use CKDatabaseSubscription (private/shared only), and
-    // CKQuerySubscription would need queryable indexes + a Push entitlement + an
-    // AppDelegate. Polling while the app is open gives ~realtime reflection of other
-    // devices' roster edits with zero extra setup. True APNs push is a later option.
-
-    private var livePollTask: Task<Void, Never>? = nil
-    private let livePollInterval: UInt64 = 20_000_000_000   // 20s
-
-    /// Pull + merge the roster without pushing (live poll / on focus). The
-    /// `isApplyingRemote` guard inside `mergeRoster` prevents an echo push.
-    private func pullRosterOnly() async {
-        guard icloudUsable else { return }
-        do {
-            if let cloud = try await CloudKitSync.fetchRoster(workspace: effectiveCloudWorkspace) {
-                mergeRoster(cloud)
-            }
-        } catch {
-            // transient (offline / throttled) — the next tick retries
-        }
-    }
-
-    /// Reflect other devices' roster changes in ~realtime while the app is open.
-    func startICloudLiveSync() {
-        livePollTask?.cancel()
-        guard icloudUsable else { livePollTask = nil; return }
-        let interval = livePollInterval
-        livePollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: interval)
-                guard let self, self.icloudUsable else { break }
-                await self.pullRosterOnly()
-            }
-        }
-    }
-
-    func stopICloudLiveSync() { livePollTask?.cancel(); livePollTask = nil }
+    var livePollTask: Task<Void, Never>? = nil
+    let livePollInterval: UInt64 = 20_000_000_000   // 20s
 
     /// Transient cwd override for "develop this app" — points the agent at the app folder
     /// for this thread WITHOUT permanently changing the employee's own workspace. Cleared
@@ -1465,7 +1162,7 @@ class AppState: ObservableObject {
         }
     }
     
-    // Automations (Cron) State
+    // MARK: - Automation
     @Published var cronJobs: [HermesCronJob] = []
     @Published var isFetchingCronJobs: Bool = false
     @Published var isCreatingCronJob: Bool = false
@@ -1548,10 +1245,13 @@ class AppState: ObservableObject {
             self.isMobileServerRunning = true
             startStoreSync()                              // reflect iPhone/iPad/cron changes
             let bridge = Task { await self.startLineBridge() }   // bridge.py on :8650 (keep LINE working)
+            self.startLineBridgeWatchdog()
 
             // 自動振り返り: 起動時に今日のブリーフがなければ生成 & 毎夜21:00に再生成
             await self.autoBriefIfStale()
+            await self.autoIntentionIfStale()
             self.startAutoBriefTimer()
+            self.startEmployeeProactiveScheduler()
 
             // Cloud sync (can take seconds) now overlaps the above instead of gating it.
             if cloudSyncEnabled { await syncEmployeesNow() }
@@ -1644,12 +1344,38 @@ class AppState: ObservableObject {
         guard let m = StateDB.shared.latestAssistantMessage(), m.id > previous else { return }
 
         // Notification filtering: when "automations only" is on, skip interactive
-        // (cli) chats and only push cron/slack/whatsapp-originated replies.
-        if pushOnlyAutomations {
+        // (cli) chats and only push cron/slack/whatsapp-originated replies — except
+        // proactive employee check-ins (flagged before streaming starts).
+        let isProactive = m.sessionId == proactivePushSessionId
+        if pushOnlyAutomations && !isProactive {
             let source = StateDB.shared.sessions().first { $0.id == m.sessionId }?.source ?? ""
             if source.isEmpty || source == "cli" { return }
         }
-        sendPushIfEnabled(title: "Hermes", body: String(m.content.prefix(140)), sessionId: m.sessionId)
+        if isProactive { proactivePushSessionId = nil }
+        sendPushIfEnabled(
+            title: pushNotificationTitle(sessionId: m.sessionId),
+            body: pushNotificationBody(rawContent: m.content, sessionId: m.sessionId),
+            sessionId: m.sessionId,
+            proactive: isProactive
+        )
+    }
+
+    /// One-line APNs body: parsed CLI output, no raw JSON/code fences.
+    func pushNotificationBody(rawContent: String, sessionId: String) -> String {
+        let parsed = parseResponseText(rawContent)
+        let sessionTitle = StateDB.shared.sessions().first { $0.id == sessionId }?.title
+        return PushPreviewFormatter.body(from: parsed, sessionTitle: sessionTitle)
+    }
+
+    func pushNotificationTitle(sessionId: String) -> String {
+        if let empId = sessionOwner[sessionId],
+           let emp = employees.first(where: { $0.id == empId }) {
+            return emp.name
+        }
+        let title = StateDB.shared.sessions().first { $0.id == sessionId }?.title
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !title.isEmpty, title != "(無題)" { return title }
+        return "Hermes"
     }
 
     // Device presence: token → (session it's currently viewing in foreground, last report).
@@ -1685,29 +1411,74 @@ class AppState: ObservableObject {
         return p.sessionId == sessionId && Date().timeIntervalSince(p.ts) < 30
     }
 
-    func sendPushIfEnabled(title: String, body: String, sessionId: String?) {
-        guard apnsEnabled, !apnsKeyId.isEmpty, !apnsKeyPath.isEmpty, !apnsTeamId.isEmpty, !pushDeviceTokens.isEmpty else { return }
+    func sendPushIfEnabled(title: String, body: String, sessionId: String?, proactive: Bool = false) {
+        guard apnsEnabled, !apnsKeyId.isEmpty, !apnsKeyPath.isEmpty, !apnsTeamId.isEmpty else { return }
         let cfg = APNsSender.Config(
             keyPath: apnsKeyPath, keyId: apnsKeyId, teamId: apnsTeamId,
             bundleId: apnsBundleId, useSandbox: apnsUseSandbox
         )
+        let preview = String(body.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
         // Skip devices that are already viewing this session in the foreground — they
         // see the message live via SSE, so a banner would be redundant/annoying.
         var tokens = pushDeviceTokens
         if let sid = sessionId {
             tokens = tokens.filter { !isForegroundedOn(token: $0, sessionId: sid) }
         }
-        guard !tokens.isEmpty else { return }
-        // Bump each receiving device's badge, and send its current count as aps.badge.
-        for t in tokens { deviceBadge[t, default: 0] += 1 }
-        let badges = deviceBadge.filter { tokens.contains($0.key) }
-        Task { [weak self] in
-            let invalid = await APNsSender.shared.send(to: tokens, title: title, body: body,
-                                                       sessionId: sessionId, badges: badges, config: cfg)
-            if !invalid.isEmpty {
-                await MainActor.run {
-                    self?.pushDeviceTokens.removeAll { invalid.contains($0) }
-                    invalid.forEach { self?.deviceBadge[$0] = nil }   // prune stale badge entries too
+        if !tokens.isEmpty {
+            // Bump each receiving device's badge, and send its current count as aps.badge.
+            for t in tokens { deviceBadge[t, default: 0] += 1 }
+            let badges = deviceBadge.filter { tokens.contains($0.key) }
+            Task { [weak self] in
+                let invalid = await APNsSender.shared.send(to: tokens, title: title, body: body,
+                                                           sessionId: sessionId, proactive: proactive,
+                                                           badges: badges, config: cfg)
+                if !invalid.isEmpty {
+                    await MainActor.run {
+                        self?.pushDeviceTokens.removeAll { invalid.contains($0) }
+                        invalid.forEach { self?.deviceBadge[$0] = nil }
+                    }
+                }
+            }
+        }
+        if proactive {
+            var emoji = "✨"
+            var name = title
+            if let sid = sessionId, let empId = sessionOwner[sid],
+               let emp = employees.first(where: { $0.id == empId }) {
+                emoji = emp.role.emoji
+                name = emp.name
+            }
+            if !liveActivityPushTokens.isEmpty {
+                let contentState: [String: Any] = [
+                    "employeeEmoji": emoji,
+                    "employeeName": name,
+                    "isStreaming": false,
+                    "preview": preview,
+                    "toolLabel": "チェックイン"
+                ]
+                let laTokens = liveActivityPushTokens
+                Task { [weak self] in
+                    let laInvalid = await APNsSender.shared.sendLiveActivityUpdate(
+                        to: laTokens, contentState: contentState, config: cfg
+                    )
+                    if !laInvalid.isEmpty {
+                        await MainActor.run {
+                            self?.liveActivityPushTokens.removeAll { laInvalid.contains($0) }
+                        }
+                    }
+                }
+            } else if !liveActivityStartTokens.isEmpty {
+                let startTokens = liveActivityStartTokens
+                Task { [weak self] in
+                    let invalid = await APNsSender.shared.sendLiveActivityStart(
+                        to: startTokens, employeeEmoji: emoji, employeeName: name,
+                        preview: preview, config: cfg
+                    )
+                    if !invalid.isEmpty {
+                        await MainActor.run {
+                            self?.liveActivityStartTokens.removeAll { invalid.contains($0) }
+                        }
+                    }
                 }
             }
         }
@@ -1719,6 +1490,24 @@ class AppState: ObservableObject {
         pushDeviceTokens.append(t)
         if pushDeviceTokens.count > 5 {
             pushDeviceTokens.removeFirst(pushDeviceTokens.count - 5)
+        }
+    }
+
+    func addLiveActivityPushToken(_ token: String) {
+        let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !liveActivityPushTokens.contains(t) else { return }
+        liveActivityPushTokens.append(t)
+        if liveActivityPushTokens.count > 5 {
+            liveActivityPushTokens.removeFirst(liveActivityPushTokens.count - 5)
+        }
+    }
+
+    func addLiveActivityStartToken(_ token: String) {
+        let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !liveActivityStartTokens.contains(t) else { return }
+        liveActivityStartTokens.append(t)
+        if liveActivityStartTokens.count > 3 {
+            liveActivityStartTokens.removeFirst(liveActivityStartTokens.count - 3)
         }
     }
 
@@ -1877,594 +1666,6 @@ class AppState: ObservableObject {
     func loadApiKey() async {
         self.apiKey = HermesCLI.shared.getApiKey(provider: provider)
     }
-    
-    // Actions
-    func handleNewChat() {
-        self.currentSessionId = nil
-        self.messages = []
-        self.inputValue = ""
-        self.cwdOverride = nil   // a fresh chat is not an app-develop thread
-        // A new chat for the active employee starts a fresh isolated thread.
-        if let empId = activeEmployeeId, let idx = employees.firstIndex(where: { $0.id == empId }) {
-            employees[idx].sessionId = nil
-        }
-        // Reset both the shared client and this employee's dedicated client.
-        ACPClient.shared.resetSession()
-        empACPClients[empKey()]?.resetSession()
-        empMessages.removeValue(forKey: empKey())  // clear any stale shadow for this employee
-    }
-
-    func handleSelectSession(_ session: Session) {
-        self.currentSessionId = session.id
-        self.cwdOverride = nil   // viewing an existing chat is not an app-develop thread
-        // Load the real conversation history from the store (was a placeholder before).
-        let stored = messagesFromStore(session.id)
-        self.messages = stored.isEmpty
-            ? [Message(role: .system, content: "Resumed session: \(session.title)")]
-            : stored
-        self.inputValue = ""
-        // Keep the active employee if this is one of THEIR chats (make it current);
-        // otherwise (browsing 全体 / an automation result) detach the employee.
-        if let empId = activeEmployeeId {
-            let belongsToActive = sessionOwner[session.id] == empId
-                || employees.first(where: { $0.id == empId })?.sessionId == session.id
-            if belongsToActive {
-                if let idx = employees.firstIndex(where: { $0.id == empId }) { employees[idx].sessionId = session.id }
-            } else {
-                activeEmployeeId = nil
-            }
-        }
-        // Drop any live ACP session so the next send resumes THIS session.
-        ACPClient.shared.resetSession()
-        empACPClients[empKey()]?.resetSession()
-    }
-    
-    // Overload for mobile API — select session by ID string
-    func handleSelectSession(sessionId: String) async {
-        if let session = sessions.first(where: { $0.id == sessionId }) {
-            handleSelectSession(session)
-        } else {
-            // Refresh and try again
-            await fetchSessions()
-            if let session = sessions.first(where: { $0.id == sessionId }) {
-                handleSelectSession(session)
-            }
-        }
-    }
-    
-    func handleDeleteSession(id: String) async {
-        // agy sessions live in the AgyStore, not the Hermes CLI's store.
-        if AgyStore.isAgySession(id) {
-            AgyStore.shared.delete(id)
-            if self.currentSessionId == id { handleNewChat() }
-            await fetchSessions()
-            return
-        }
-        let res = await HermesCLI.shared.exec(args: ["sessions", "delete", "--yes", id])
-        if res.success {
-            if self.currentSessionId == id {
-                handleNewChat()
-            }
-            await fetchSessions()
-        }
-    }
-    
-    // Parse a raw streaming chunk for the mobile API
-    func parseStreamChunk(_ raw: String) -> String {
-        return parseResponseText(raw)
-    }
-    
-    /// Send a tapped quick-reply choice as the next message (from the choice chips).
-    func sendQuickReply(_ text: String) {
-        guard !isStreaming, !text.isEmpty else { return }
-        inputValue = text
-        handleSendMessage()
-    }
-
-    // MARK: - 回答へのフィードバック（誤対応を指摘しやすく）
-
-    /// 回答に👍/👎を付ける。👎のときは note（何が違ったか）を受け取り、ログに残す。
-    /// 記録は ~/.hermes/feedback.jsonl に追記（後で改善の材料にできる）。
-    func giveMessageFeedback(_ id: UUID, positive: Bool, note: String = "") {
-        messageFeedback[id] = positive ? 1 : -1
-        logFeedback(messageId: id, positive: positive, note: note)
-        if positive { triggerToast(message: "フィードバックを記録しました 👍") }
-    }
-
-    private func logFeedback(messageId: UUID, positive: Bool, note: String) {
-        let entry: [String: Any] = [
-            "ts": Date().timeIntervalSince1970,
-            "employee": activeEmployee?.name ?? "全体",
-            "sessionId": currentSessionId ?? "",
-            "messageId": messageId.uuidString,
-            "rating": positive ? "up" : "down",
-            "note": note,
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: entry),
-              var line = String(data: data, encoding: .utf8) else { return }
-        line += "\n"
-        let dir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".hermes")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("feedback.jsonl")
-        if let fh = try? FileHandle(forWritingTo: url) {
-            defer { try? fh.close() }
-            fh.seekToEndOfFile()
-            if let d = line.data(using: .utf8) { fh.write(d) }
-        } else {
-            do { try line.data(using: .utf8)?.write(to: url) }
-            catch { Log.failure("app", "フィードバックログの書き込みに失敗 (\(url.path))", error) }
-        }
-    }
-
-    /// 👎のあと、直前の回答の訂正をエージェントに依頼する（フィードバックを実際の修正につなげる）。
-    func sendCorrectionForLastReply(note: String) {
-        guard !isStreaming else { triggerToast(message: "応答中です。完了までお待ちください。"); return }
-        let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        inputValue = n.isEmpty
-            ? "先ほどの回答が正しくありませんでした。誤りを見直して、正しく回答し直してください。"
-            : "先ほどの回答について修正をお願いします。誤っていた点: \(n)"
-        handleSendMessage()
-    }
-
-    func handleSendMessage() {
-        let text = inputValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let files = attachedFiles
-        let imgData = files.first(where: { $0.isImage })?.imageData
-        guard !text.isEmpty || !files.isEmpty else { return }
-        // Block only if THIS employee already has an in-flight turn (other employees can still send).
-        let curKey = empKey()
-        if streamingEmployeeIds.contains(curKey) {
-            triggerToast(message: "応答中です。完了までお待ちください。"); return
-        }
-
-        // App-managed task command: "…のタスクを追加" / "タスク追加: …" actually creates a
-        // WorkTask assigned to the active employee. The chat agent runs in a separate
-        // process and can't touch the app's task store, so without this it just hallucinates
-        // a "added it" reply (the bug). Handled locally → real task + deterministic confirm.
-        if !bypassCommandIntercept, files.isEmpty, let cmd = parseTaskAddCommand(text) {
-            messages.append(Message(role: .user, content: text))
-            let who = activeEmployee.map { "（\($0.name)）" } ?? ""
-            switch cmd {
-            case .single(let title):
-                let task = createTask(title: title, assigneeId: activeEmployeeId)
-                messages.append(Message(role: .system, content: "✅ タスクを追加しました\(who)：「\(task.title)」（未着手）"))
-                triggerToast(message: "タスクを追加：\(task.title)")
-            case .fromContext:
-                // 「これら」= 直前メッセージの箇条書きを1項目ずつタスク化。
-                let items = extractContextualTaskItems()
-                if items.isEmpty {
-                    messages.append(Message(role: .system, content: "直前のメッセージから箇条書きの項目を見つけられませんでした。追加したい内容を箇条書きで送ってください。"))
-                } else {
-                    // createTask は先頭に挿入するので、リスト順を保つため逆順で追加。
-                    for it in items.reversed() { _ = createTask(title: it, assigneeId: activeEmployeeId) }
-                    let list = items.map { "・\($0)" }.joined(separator: "\n")
-                    messages.append(Message(role: .system, content: "✅ \(items.count)件のタスクを追加しました\(who)（すべて未着手）：\n\(list)"))
-                    triggerToast(message: "タスクを\(items.count)件追加しました")
-                }
-            }
-            inputValue = ""
-            attachedFiles = []
-            return
-        }
-
-        // App-managed action command: "〇〇アプリで〜を作成/更新して" performs a REAL data
-        // operation inside the registered app — routed to the agent running in the app's folder
-        // (which uses the app's HTTP API or data files; see chatControllableRequirement).
-        if !bypassCommandIntercept, files.isEmpty, let action = parseAppActionCommand(text) {
-            inputValue = ""
-            attachedFiles = []
-            if action.destructive {
-                // Deletes/overwrites of real data → require an explicit confirmation tap.
-                let app = action.app
-                messages.append(Message(role: .user, content: text))
-                messages.append(Message(role: .system, content: "⚠️ これは「\(app.name)」の実データを変更・削除する操作です。問題なければ実行してください。"))
-                triggerToast(message: "データ変更を含む操作です", actionLabel: "実行する") { [weak self] in
-                    self?.runAppAction(app: app, command: text)
-                }
-            } else {
-                runAppAction(app: action.app, command: text)
-            }
-            return
-        }
-
-        // App-managed launch command: "〇〇アプリを開いて / 起動して" actually launches the
-        // registered app (starts its dev-server + opens the preview). Handled locally so the
-        // chat agent doesn't just describe it.
-        if !bypassCommandIntercept, files.isEmpty, let app = parseAppLaunchCommand(text) {
-            messages.append(Message(role: .user, content: text))
-            let running = isAppRunning(app.id)
-            messages.append(Message(role: .system, content: running
-                ? "🪟 「\(app.name)」を開きます（起動中）"
-                : "▶️ 「\(app.name)」を起動します…"))
-            inputValue = ""
-            attachedFiles = []
-            launchApp(app.id)
-            return
-        }
-
-        // App-managed send command: "LINEに〜を送って" actually delivers the message to the
-        // registered LINE channel via the bridge (the chat agent can't reach it). Handled
-        // locally → real send + deterministic confirmation. The user typed the instruction
-        // themselves, so acting on it is authorized.
-        if !bypassCommandIntercept, files.isEmpty, looksLikeLineSend(text) {
-            if let cmd = parseLineSendCommand(text) {
-                messages.append(Message(role: .user, content: text))
-                inputValue = ""
-                attachedFiles = []
-                let sendingId = UUID()
-                messages.append(Message(id: sendingId, role: .system, content: "📤 LINE（\(cmd.channel.name)）に送信中…「\(cmd.message)」"))
-                Task { @MainActor in
-                    let r = await self.sendToChannel(cmd.channel, text: cmd.message)
-                    if let idx = self.messages.firstIndex(where: { $0.id == sendingId }) {
-                        if r.ok {
-                            self.messages[idx].content = "✅ LINE（\(cmd.channel.name)）に送信しました：「\(cmd.message)」"
-                        } else {
-                            self.messages[idx].content = "⚠️ LINE送信に失敗しました：\(String(r.detail.prefix(120)))"
-                            self.messages[idx].isError = true
-                        }
-                    }
-                    self.triggerToast(message: r.ok ? "LINEに送信しました" : "LINE送信に失敗しました")
-                }
-                return
-            }
-            // Looks like a LINE-send request but no LINE channel is registered.
-            if !channels.contains(where: { $0.platform.lowercased() == "line" }) {
-                messages.append(Message(role: .user, content: text))
-                messages.append(Message(role: .system, content: "⚠️ 送信先のLINEチャンネルが登録されていません。設定 → チャンネル でLINEのIDを追加してください。"))
-                inputValue = ""; attachedFiles = []
-                return
-            }
-        }
-
-        let imagePath: String? = imgData.flatMap { writeTempImage($0) }
-        // Show the attached file names in the user bubble so the history reflects them.
-        let displayText: String = {
-            guard !files.isEmpty else { return text }
-            let names = files.map { "📎 \($0.name)" }.joined(separator: "  ")
-            return text.isEmpty ? names : "\(text)\n\(names)"
-        }()
-
-        self.messages.append(Message(role: .user, content: displayText, imageData: imgData))
-        self.inputValue = ""
-        self.attachedFiles = []
-        streamingEmployeeIds.insert(curKey)  // mark THIS employee as streaming
-        self.activeStatus = "thinking"
-        self.streamText = ""
-        empStreamTexts[curKey] = ""
-        let now = Date()
-        self.streamStartedAt = now
-        self.lastStreamActivityAt = now
-        self.streamedCharCount = 0
-
-        // Stable id for the streaming bubble — updated in place by chunk events.
-        let assistantId = UUID()
-        self.messages.append(Message(id: assistantId, role: .assistant, content: "", typewriter: true))
-        // Snapshot current messages into the shadow (background streaming keeps chunks here).
-        empMessages[curKey] = cappedShadow(messages)
-        // Mark this assistantId as the live turn for curKey (guards against late/superseded events).
-        streamingAssistantIds[curKey] = assistantId
-
-        // Reference attached files by their local path so the agent (which has file tools) can
-        // open them. Images beyond the first — and all non-image files — go here; the first
-        // image additionally rides --image for vision.
-        let fileRefs: String = {
-            let paths = files.map { $0.url.path }
-            guard !paths.isEmpty else { return "" }
-            let list = paths.map { "- \($0)" }.joined(separator: "\n")
-            return "\n\n【添付ファイル】以下のローカルファイルを読んで対応してください:\n\(list)"
-        }()
-        // 健康アドバイザー社員とのチャットには、最新の健康データ(HealthKit由来)を文脈として
-        // 前置する（表示メッセージには出さない）。「今日の歩数は？」等に答えられるように。
-        let healthContext: String = {
-            guard let emp = activeEmployee,
-                  emp.name.contains("健康") || emp.name.lowercased().contains("health"),
-                  let line = healthSummaryLine else { return "" }
-            return "【参考データ（連携中のHealthKit）】\(line)\n\n"
-        }()
-
-        var effectivePrompt = text
-        if effectivePrompt.isEmpty { effectivePrompt = imagePath != nil ? "添付した画像について説明してください。" : "添付したファイルを確認してください。" }
-        effectivePrompt += fileRefs
-        if !healthContext.isEmpty { effectivePrompt = healthContext + effectivePrompt }
-        let sentPrompt = wrapForSend(effectivePrompt)
-        let kind = BackendRouter.selectKind(provider: provider, useACP: useACPTransport)
-
-        var agyPrompt = ""
-        if kind == .antigravity {
-            if imagePath != nil && text.trimmingCharacters(in: .whitespaces).isEmpty {
-                finishSendError(assistantId, imagePath, "Antigravity CLI (agy) は画像入力に対応していません。テキストで指定してください。", owningKey: curKey)
-                return
-            }
-            var userText = text.isEmpty ? "添付したファイルを確認してください。" : text
-            userText += fileRefs
-            if imagePath != nil { userText += "\n\n（注: 添付画像は Antigravity CLI では無視されます）" }
-            if !healthContext.isEmpty { userText = healthContext + userText }
-            agyPrompt = antigravityPrompt(userText, employee: activeEmployee, mode: agentMode)
-        }
-
-        let req = AgentRequest(
-            prompt: sentPrompt, agyPrompt: agyPrompt,
-            imagePath: (kind == .antigravity ? nil : imagePath),
-            cwd: effectiveCwd, sessionId: currentSessionId, startFresh: currentSessionId == nil,
-            agyModel: modelForFixedProvider(activeEmployee))
-        let userText = text
-        let started = Date()
-        // Capture owning context at send time — survives any mid-stream switch.
-        let owningEmployeeId = activeEmployeeId
-        let owningSessionId = currentSessionId
-        let owningKey = curKey
-
-        Task { @MainActor in
-            if kind != .antigravity { await self.modelApplyTask?.value }
-            if kind == .antigravity, await AntigravityCLI.shared.resolveBinaryAsync() == nil {
-                self.finishSendError(assistantId, imagePath, AntigravityCLI.installHint, owningKey: owningKey)
-                return
-            }
-
-            // Dedicated ACP client per employee enables truly parallel ACP turns.
-            // HermesCLI/agy already spawn independent processes — no sharing needed.
-            let acp = kind == .acp ? self.getOrCreateACPClient(for: owningKey) : ACPClient.shared
-            let backend = BackendRouter.make(kind, acp: acp)
-
-            let result = await backend.send(
-                req,
-                onStart: { [weak self] proc in
-                    guard let proc = proc else { return }
-                    self?.empProcesses[owningKey] = proc
-                },
-                onEvent: { [weak self] event in
-                    guard let self = self else { return }
-                    DispatchQueue.main.async {
-                        // Drop events that arrive after this turn finalized, or after a newer turn
-                        // started for the same employee — otherwise a late chunk overwrites the
-                        // finalized bubble or re-creates a leaked empStreamTexts entry.
-                        guard self.streamingAssistantIds[owningKey] == assistantId else { return }
-                        let isActive = (self.activeEmployeeId == owningEmployeeId)
-                        // Heartbeat: a real event just arrived → the turn is progressing, not stuck.
-                        if isActive {
-                            self.lastStreamActivityAt = Date()
-                            if case .chunk(let t) = event { self.streamedCharCount += t.count }
-                            else if case .thought(let t) = event { self.streamedCharCount += t.count }
-                        }
-                        switch event {
-                        case .chunk(let t):
-                            self.empStreamTexts[owningKey, default: ""] += t
-                            let rawText = self.empStreamTexts[owningKey] ?? ""
-                            let parsed: String
-                            switch kind {
-                            case .hermesCLI:   parsed = self.parseResponseText(rawText)
-                            case .antigravity: parsed = AntigravityCLI.clean(rawText)
-                            case .acp:         parsed = rawText
-                            }
-                            // Always update the shadow (background streaming).
-                            if let idx = self.empMessages[owningKey]?.firstIndex(where: { $0.id == assistantId }) {
-                                self.empMessages[owningKey]![idx].content = parsed
-                            }
-                            // Update visible messages + streamText only when this is the active employee.
-                            if isActive {
-                                if let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                                    self.messages[idx].content = parsed
-                                }
-                                self.streamText = rawText
-                            }
-                        case .thought(let t):
-                            if let idx = self.empMessages[owningKey]?.firstIndex(where: { $0.id == assistantId }) {
-                                self.empMessages[owningKey]![idx].thinking += t
-                            }
-                            if isActive, let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                                self.messages[idx].thinking += t
-                            }
-                        case .toolActivity(let calls):
-                            if let idx = self.empMessages[owningKey]?.firstIndex(where: { $0.id == assistantId }) {
-                                self.empMessages[owningKey]![idx].toolCalls = calls
-                            }
-                            if isActive, let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                                self.messages[idx].toolCalls = calls
-                            }
-                        }
-                    }
-                })
-
-            // Clean up this employee's streaming state.
-            self.streamingEmployeeIds.remove(owningKey)
-            self.empProcesses.removeValue(forKey: owningKey)
-            let rawStream = self.empStreamTexts.removeValue(forKey: owningKey) ?? ""
-
-            let isActive = (self.activeEmployeeId == owningEmployeeId)
-            if isActive { self.streamText = ""; self.streamStartedAt = nil; self.lastStreamActivityAt = nil }
-            if self.streamingEmployeeIds.isEmpty { self.activeStatus = "online" }
-
-            let final: String
-            switch kind {
-            case .hermesCLI:   final = self.parseResponseText(rawStream)
-            case .antigravity: final = AntigravityCLI.clean(rawStream)
-            case .acp:         final = rawStream
-            }
-            // Backend health: a real reply = healthy; an empty turn = a failure signal.
-            self.recordBackendOutcome(ok: !final.isEmpty)
-
-            // Mark this employee as having an unread response if the user switched away.
-            if !isActive, !final.isEmpty, let empId = owningEmployeeId {
-                self.employeeUnreadIds.insert(empId)
-            }
-
-            // Finalize the bubble in the shadow array (always — needed if user switches back).
-            if let idx = self.empMessages[owningKey]?.firstIndex(where: { $0.id == assistantId }) {
-                self.empMessages[owningKey]![idx].elapsed = Date().timeIntervalSince(started)
-                if final.isEmpty {
-                    self.empMessages[owningKey]![idx].content = self.emptyTurnMessage(kind: kind, ok: result.ok, raw: rawStream)
-                    self.empMessages[owningKey]![idx].isError = true
-                    self.empMessages[owningKey]![idx].typewriter = false
-                } else {
-                    self.empMessages[owningKey]![idx].content = final
-                    if kind == .acp { self.empMessages[owningKey]![idx].tokens = result.tokens }
-                }
-            }
-            // Finalize visible messages only when still viewing this employee.
-            if isActive, let idx = self.messages.firstIndex(where: { $0.id == assistantId }) {
-                self.messages[idx].elapsed = Date().timeIntervalSince(started)
-                if final.isEmpty {
-                    self.messages[idx].content = self.emptyTurnMessage(kind: kind, ok: result.ok, raw: rawStream)
-                    self.messages[idx].isError = true
-                    self.messages[idx].typewriter = false
-                    if self.rawIndicatesNoToolSupport(rawStream) { self.modelHealth[self.defaultModel] = false }
-                } else {
-                    self.messages[idx].content = final
-                    if kind == .acp { self.messages[idx].tokens = result.tokens }
-                }
-            }
-            if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
-
-            // Session reconcile attributed to the owning employee.
-            let stillViewing = isActive
-            var turnSession: String? = owningSessionId
-            switch kind {
-            case .acp:
-                turnSession = acp.hermesSessionId ?? owningSessionId
-                if stillViewing, let s = turnSession { self.currentSessionId = s }
-                await self.fetchSessions()
-            case .antigravity:
-                if !final.isEmpty {
-                    let sid = AgyStore.shared.record(sessionId: owningSessionId, employeeId: owningEmployeeId,
-                                                     userText: userText, assistantText: final, timestamp: Date().timeIntervalSince1970)
-                    turnSession = sid
-                    if stillViewing { self.currentSessionId = sid }
-                    await self.fetchSessions()
-                }
-            case .hermesCLI:
-                await self.fetchSessions()
-                if turnSession == nil {
-                    if self.sessions.first == nil {
-                        try? await Task.sleep(nanoseconds: 1_000_000_000)
-                        await self.fetchSessions()
-                    }
-                    turnSession = self.sessions.first?.id
-                    if stillViewing, self.currentSessionId == nil { self.currentSessionId = turnSession }
-                }
-            }
-            self.bindSession(turnSession, toEmployee: owningEmployeeId)
-
-            // ライフログ: Hermes チャットセッションを Mac アクティビティとして記録
-            if !final.isEmpty {
-                let empName = self.employees.first { $0.id == owningEmployeeId }?.name ?? "Hermes"
-                let sessionTitle = self.sessions.first { $0.id == turnSession }?.title ?? ""
-                MacActivityLogger.shared.recordHermesSession(
-                    employeeName: empName,
-                    sessionTitle: sessionTitle,
-                    start: started,
-                    end: Date()
-                )
-            }
-
-            // Turn complete — the store is authoritative; clear the in-flight shadow. Clearing the
-            // live-turn marker makes any still-queued onEvent callbacks no-op. Only clear if it's
-            // still OURS (a newer turn for this key may have already claimed the slot).
-            self.empMessages.removeValue(forKey: owningKey)
-            if self.streamingAssistantIds[owningKey] == assistantId {
-                self.streamingAssistantIds.removeValue(forKey: owningKey)
-            }
-
-            // If the agent produced a PDF (e.g. an invoice), surface it — open the file so it
-            // "comes back" to the user. Only opens a real on-disk .pdf the reply names.
-            if !final.isEmpty, owningEmployeeId == self.activeEmployeeId {
-                self.openReferencedPDF(in: final)
-            }
-
-            // Auto-repair follow-through: this turn was an AI fix for a failed app launch —
-            // re-launch the app now that the fix is done (a brief pause lets files settle).
-            if let relaunchId = self.pendingRelaunchAppId {
-                self.pendingRelaunchAppId = nil
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    self.terminalOutput += "\n🔄 修復が完了しました。再起動します…\n"
-                    self.launchApp(relaunchId)
-                }
-            }
-        }
-    }
-
-    /// Finalize a send turn with an error bubble (agy image-only / not-installed pre-checks).
-    private func finishSendError(_ assistantId: UUID, _ imagePath: String?, _ msg: String, owningKey: String) {
-        if let idx = messages.firstIndex(where: { $0.id == assistantId }) {
-            messages[idx].content = msg
-            messages[idx].isError = true
-            messages[idx].typewriter = false
-        }
-        streamingEmployeeIds.remove(owningKey)
-        streamText = ""
-        empStreamTexts.removeValue(forKey: owningKey)
-        empMessages.removeValue(forKey: owningKey)
-        streamingAssistantIds.removeValue(forKey: owningKey)
-        if owningKey == empKey() { streamStartedAt = nil; lastStreamActivityAt = nil }
-        if streamingEmployeeIds.isEmpty { activeStatus = "online" }
-        if let imagePath = imagePath { try? FileManager.default.removeItem(atPath: imagePath) }
-    }
-
-    func cancelStreaming() {
-        let key = empKey()
-        empProcesses[key]?.terminate()
-        empProcesses.removeValue(forKey: key)
-        // Shut down and remove the dedicated ACP client (will be recreated on next send).
-        empACPClients[key]?.shutdown()
-        empACPClients.removeValue(forKey: key)
-        streamingEmployeeIds.remove(key)
-        streamText = ""
-        empStreamTexts.removeValue(forKey: key)
-        empMessages.removeValue(forKey: key)
-        streamingAssistantIds.removeValue(forKey: key)   // late onEvent callbacks now no-op
-        streamStartedAt = nil; lastStreamActivityAt = nil
-        if streamingEmployeeIds.isEmpty { activeStatus = "online" }
-    }
-
-    /// Re-send the most recent user message (after a failed/empty reply). Drops the
-    /// failed turn and re-runs it.
-    func retryLastUserMessage() {
-        guard !isStreaming else { return }
-        guard let userIdx = messages.lastIndex(where: { $0.role == .user }) else { return }
-        let text = messages[userIdx].content
-        let img = messages[userIdx].imageData
-        messages.removeSubrange(userIdx...)   // drop the failed user+assistant turn
-        inputValue = text
-        attachedFiles = []
-        if let img = img, let path = writeTempImage(img) {
-            attachedFiles = [AttachedFile(url: URL(fileURLWithPath: path), imageData: img)]
-        }
-        handleSendMessage()
-    }
-
-    /// Write attached image bytes to a temp file for the CLI's --image flag.
-    private func writeTempImage(_ data: Data) -> String? {
-        let path = NSTemporaryDirectory() + "hermes_compose_\(UUID().uuidString).jpg"
-        do {
-            try data.write(to: URL(fileURLWithPath: path))
-            return path
-        } catch {
-            return nil
-        }
-    }
-
-    // MARK: - Composer attachments
-
-    /// Stage a file (drop / picker) as a composer attachment. De-dupes by path; loads image
-    /// bytes for a preview when it's an image. Capped so the composer can't be flooded.
-    func attachFileURL(_ url: URL) {
-        guard attachedFiles.count < 10,
-              !attachedFiles.contains(where: { $0.url.path == url.path }) else { return }
-        var imgData: Data? = nil
-        if AttachedFile.isImagePath(url), let img = NSImage(contentsOf: url) {
-            imgData = img.jpegData() ?? (try? Data(contentsOf: url))
-        }
-        attachedFiles.append(AttachedFile(url: url, imageData: imgData))
-    }
-
-    /// Stage raw image bytes (dragged from a browser / pasted) → write a temp file so the
-    /// attachment has a local path the agent can read.
-    func attachImageData(_ data: Data) {
-        guard attachedFiles.count < 10, let path = writeTempImage(data) else { return }
-        attachedFiles.append(AttachedFile(url: URL(fileURLWithPath: path), imageData: data))
-    }
-
-    func removeAttachment(_ id: UUID) { attachedFiles.removeAll { $0.id == id } }
     
     // Quick model presets for the in-composer switcher.
     struct ModelPreset: Identifiable {
@@ -2650,6 +1851,18 @@ class AppState: ObservableObject {
         toastMessage = ""
         toastActionLabel = nil
         toastAction = nil
+    }
+
+    /// Open the settings modal, optionally jumping to a section by its display name.
+    func openSettings(section: String? = nil) {
+        if let section { pendingSettingsSection = section }
+        showSettings = true
+    }
+
+    /// Open settings on the automations pane (cron jobs).
+    func openAutomationsSettings() {
+        Task { await fetchCronJobs() }
+        openSettings(section: "オートメーション")
     }
 
     /// Run the toast's action (e.g. Undo) and dismiss it.
@@ -2917,41 +2130,6 @@ class AppState: ObservableObject {
     @Published var isFetchingSkills = false
     @Published var mcpRawOutput: String = ""
 
-    // MARK: - Automations (Cron) Management
-    
-    // MARK: - Automation suggestions
-
-    /// Always-available curated automation ideas (no LLM needed).
-    static let curatedAutomations: [AutomationSuggestion] = [
-        .init(title: "毎朝のニュース要約", schedule: "0 8 * * *",
-              prompt: "今日の主要なニュースを3つ、日本語で簡潔に要約して。",
-              deliver: "local", icon: "newspaper", rationale: "毎朝の情報収集を自動化"),
-        .init(title: "今日のTODO整理", schedule: "0 9 * * 1-5",
-              prompt: "未完了のタスクと今日の予定を整理し、優先順位をつけて提案して。",
-              deliver: "local", icon: "checklist", rationale: "平日の朝に1日の計画を準備"),
-        .init(title: "週次の振り返りレポート", schedule: "0 18 * * 5",
-              prompt: "今週の活動を振り返り、来週やるべきことを3点提案して。",
-              deliver: "local", icon: "chart.line.uptrend.xyaxis", rationale: "毎週金曜にレビュー"),
-        .init(title: "GitHub PRの確認", schedule: "0 10 * * 1-5",
-              prompt: "自分が関係するオープンなPRとレビュー待ちを gh で一覧にして。",
-              deliver: "local", icon: "chevron.left.forwardslash.chevron.right", rationale: "レビュー漏れを防ぐ"),
-        .init(title: "受信メールの要約", schedule: "0 7,19 * * *",
-              prompt: "新着の重要なメールを確認し、要点を箇条書きで要約して。",
-              deliver: "local", icon: "envelope", rationale: "朝晩にメールを把握"),
-    ]
-
-    /// Prefill the create form from a suggestion (the user reviews, then 作成).
-    func applyAutomationSuggestion(_ s: AutomationSuggestion) {
-        newCronName = s.title
-        newCronSchedule = s.schedule
-        newCronPrompt = s.prompt
-        newCronDeliver = s.deliver.isEmpty ? "local" : s.deliver
-        newCronScript = ""
-        newCronNoAgent = false
-        showCronCreateSheet = true   // 反映した内容を作成モーダルで開く
-    }
-
-    /// Ask the agent to propose automations (best-effort; parsed from pipe-delimited lines).
     // MARK: - Dashboard / daily brief
 
     /// Today's events (local day), earliest first.
@@ -2960,288 +2138,6 @@ class AppState: ObservableObject {
     var busyEmployees: [Employee] { employees.filter { isEmployeeBusy($0.id) } }
     /// Apps with a live dev-server.
     var runningApps: [AppProject] { apps.filter { runningAppIds.contains($0.id) } }
-
-    func generateAutomationSuggestions() async {
-        isGeneratingSuggestions = true
-        defer { isGeneratingSuggestions = false }
-        let prompt = """
-        役立つ定期自動実行タスク（cron）を3つ提案してください。各行を厳密に次の形式（パイプ区切り、余計な装飾なし）で3行だけ出力:
-        タイトル | cronスケジュール | エージェントへの指示
-        例: 毎朝のニュース要約 | 0 8 * * * | 今日の主要ニュースを3つ日本語で要約して
-        """
-        let res = await HermesCLI.shared.exec(args: ["chat", "-q", prompt])
-        let text = parseResponseText(res.stdout)
-        var parsed: [AutomationSuggestion] = []
-        for raw in text.split(separator: "\n") {
-            let parts = raw.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
-            guard parts.count >= 3, !parts[0].isEmpty, !parts[1].isEmpty, parts[1].contains(" ") || parts[1].contains("*") else { continue }
-            parsed.append(.init(title: parts[0], schedule: parts[1], prompt: parts[2],
-                                deliver: "local", icon: "sparkles", rationale: "AIの提案"))
-        }
-        if parsed.isEmpty {
-            triggerToast(message: "提案を生成できませんでした。もう一度お試しください。")
-        } else {
-            aiSuggestions = Array(parsed.prefix(3))
-        }
-    }
-
-    func fetchCronJobs() async {
-        self.isFetchingCronJobs = true
-        let res = await HermesCLI.shared.exec(args: ["cron", "list"])
-        self.isFetchingCronJobs = false
-        
-        guard res.success else { return }
-        
-        var jobs: [HermesCronJob] = []
-        let lines = res.stdout.components(separatedBy: CharacterSet.newlines)
-        
-        var currentId = ""
-        var currentStatus = ""
-        var currentName = ""
-        var currentSchedule = ""
-        var currentRepeat = ""
-        var currentNextRun = ""
-        var currentDeliver = ""
-        var currentScript: String? = nil
-        var currentMode: String? = nil
-        var currentLastRun: String? = nil
-        var currentLastError: String? = nil
-
-        func saveCurrentJob() {
-            if !currentId.isEmpty {
-                jobs.append(HermesCronJob(
-                    id: currentId,
-                    name: currentName.isEmpty ? "Unnamed Job" : currentName,
-                    schedule: currentSchedule,
-                    repeatCount: currentRepeat,
-                    nextRun: currentNextRun,
-                    deliver: currentDeliver,
-                    status: currentStatus,
-                    script: currentScript,
-                    mode: currentMode,
-                    lastRun: currentLastRun,
-                    lastError: currentLastError
-                ))
-            }
-        }
-        
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            let rawLine = line
-            
-            if rawLine.hasPrefix("  ") && !rawLine.hasPrefix("    ") {
-                let parts = trimmed.components(separatedBy: CharacterSet.whitespaces).filter { !$0.isEmpty }
-                if parts.count >= 2 {
-                    let id = parts[0]
-                    if id.count == 12 { // hash ID validation
-                        saveCurrentJob()
-                        currentId = id
-                        let statusPart = parts[1]
-                        currentStatus = statusPart.replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: "")
-                        currentName = ""
-                        currentSchedule = ""
-                        currentRepeat = ""
-                        currentNextRun = ""
-                        currentDeliver = ""
-                        currentScript = nil
-                        currentMode = nil
-                        currentLastRun = nil
-                        currentLastError = nil
-                    }
-                }
-            } else if !currentId.isEmpty && rawLine.hasPrefix("    ") {
-                if trimmed.hasPrefix("Name:") {
-                    currentName = trimmed.replacingOccurrences(of: "Name:", with: "").trimmingCharacters(in: .whitespaces)
-                } else if trimmed.hasPrefix("Schedule:") {
-                    currentSchedule = trimmed.replacingOccurrences(of: "Schedule:", with: "").trimmingCharacters(in: .whitespaces)
-                } else if trimmed.hasPrefix("Repeat:") {
-                    currentRepeat = trimmed.replacingOccurrences(of: "Repeat:", with: "").trimmingCharacters(in: .whitespaces)
-                } else if trimmed.hasPrefix("Next run:") {
-                    currentNextRun = trimmed.replacingOccurrences(of: "Next run:", with: "").trimmingCharacters(in: .whitespaces)
-                } else if trimmed.hasPrefix("Deliver:") {
-                    currentDeliver = trimmed.replacingOccurrences(of: "Deliver:", with: "").trimmingCharacters(in: .whitespaces)
-                } else if trimmed.hasPrefix("Script:") {
-                    currentScript = trimmed.replacingOccurrences(of: "Script:", with: "").trimmingCharacters(in: .whitespaces)
-                } else if trimmed.hasPrefix("Mode:") {
-                    currentMode = trimmed.replacingOccurrences(of: "Mode:", with: "").trimmingCharacters(in: .whitespaces)
-                } else if trimmed.hasPrefix("Last run:") {
-                    currentLastRun = trimmed.replacingOccurrences(of: "Last run:", with: "").trimmingCharacters(in: .whitespaces)
-                } else if trimmed.hasPrefix("⚠") || trimmed.lowercased().contains("delivery failed") {
-                    // 例: "⚠ Delivery failed: delivery error: LINE push 401: {...}"
-                    currentLastError = trimmed
-                        .replacingOccurrences(of: "⚠", with: "")
-                        .trimmingCharacters(in: .whitespaces)
-                }
-            }
-        }
-        saveCurrentJob()
-        
-        self.cronJobs = jobs
-    }
-    
-    func handleToggleCronJob(_ job: HermesCronJob) async {
-        let action = job.isActive ? "pause" : "resume"
-        triggerToast(message: "ジョブを\(job.isActive ? "一時停止" : "再開")中...")
-        let res = await HermesCLI.shared.exec(args: ["cron", action, job.id])
-        if res.success {
-            triggerToast(message: "ジョブを\(job.isActive ? "一時停止" : "開始")しました。")
-            await fetchCronJobs()
-        } else {
-            triggerToast(message: "操作に失敗しました。")
-        }
-    }
-    
-    func handleDeleteCronJob(_ job: HermesCronJob) async {
-        triggerToast(message: "ジョブを削除中...")
-        let res = await HermesCLI.shared.exec(args: ["cron", "delete", job.id])
-        if res.success {
-            triggerToast(message: "ジョブを削除しました。")
-            await fetchCronJobs()
-        } else {
-            triggerToast(message: "削除に失敗しました。")
-        }
-    }
-    
-    // MARK: - Cron ops for the mobile API (no UI side effects)
-
-    func cronJobsJSON() async -> [[String: Any]] {
-        await fetchCronJobs()
-        return cronJobs.map { j in
-            ["id": j.id, "name": j.name, "schedule": j.schedule, "deliver": j.deliver,
-             "status": j.status, "nextRun": j.nextRun, "script": j.script ?? "", "lastRun": j.lastRun ?? ""]
-        }
-    }
-
-    func cronCreate(schedule: String, prompt: String, name: String, deliver: String, script: String, noAgent: Bool) async -> Bool {
-        let s = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty else { return false }
-        var args = ["cron", "create", s]
-        let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !p.isEmpty { args.append(p) }
-        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !n.isEmpty { args.append(contentsOf: ["--name", n]) }
-        let d = deliver.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !d.isEmpty { args.append(contentsOf: ["--deliver", d]) }
-        let sc = script.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !sc.isEmpty { args.append(contentsOf: ["--script", sc]) }
-        if noAgent { args.append("--no-agent") }
-        let res = await HermesCLI.shared.exec(args: args)
-        if res.success { await fetchCronJobs() }
-        return res.success
-    }
-
-    func cronSetPaused(id: String, paused: Bool) async -> Bool {
-        let res = await HermesCLI.shared.exec(args: ["cron", paused ? "pause" : "resume", id])
-        if res.success { await fetchCronJobs() }
-        return res.success
-    }
-
-    func cronDelete(id: String) async -> Bool {
-        let res = await HermesCLI.shared.exec(args: ["cron", "delete", id])
-        if res.success { await fetchCronJobs() }
-        return res.success
-    }
-
-    /// テスト実行: ジョブを今すぐ実行キューに入れる(`hermes cron run`)。スケジューラ(Gateway)が
-    /// 稼働していれば次tickで発火し、設定された配信先(LINE等)へ結果が送られる。外部送信を伴うため
-    /// 呼び出し元(UI)で確認ダイアログを挟むこと。
-    func cronRunNow(id: String) async -> Bool {
-        let res = await HermesCLI.shared.exec(args: ["cron", "run", id])
-        if res.success {
-            triggerToast(message: "テスト実行をトリガーしました。まもなく配信先に届きます。")
-            await fetchCronJobs()
-            fetchAutomationResults()
-        } else {
-            triggerToast(message: "テスト実行に失敗: \(res.stderr)")
-        }
-        return res.success
-    }
-
-    /// 既存のスケジュールタスクを編集（`hermes cron edit`）。空でない項目だけ更新する。
-    func cronEdit(id: String, schedule: String, name: String, deliver: String) async -> Bool {
-        var args = ["cron", "edit", id]
-        let s = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !s.isEmpty { args.append(contentsOf: ["--schedule", s]) }
-        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !n.isEmpty { args.append(contentsOf: ["--name", n]) }
-        let d = deliver.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !d.isEmpty { args.append(contentsOf: ["--deliver", d]) }
-        guard args.count > 3 else { return false }   // 変更項目なし
-        let res = await HermesCLI.shared.exec(args: args)
-        if res.success {
-            triggerToast(message: "スケジュールタスクを更新しました。")
-            await fetchCronJobs()
-        } else {
-            triggerToast(message: "更新に失敗: \(res.stderr)")
-        }
-        return res.success
-    }
-
-    @discardableResult
-    func handleCreateCronJob() async -> Bool {
-        let name = newCronName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let schedule = newCronSchedule.trimmingCharacters(in: .whitespacesAndNewlines)
-        var prompt = newCronPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Phase D: run the scheduled task as the assigned employee (prepend its persona).
-        if let aid = newCronAssigneeId, let emp = employees.first(where: { $0.id == aid }), !prompt.isEmpty {
-            prompt = "あなたは「\(emp.name)」という名前の\(emp.role.title)です。\(emp.persona)\n\n\(prompt)"
-        }
-        let deliver = newCronDeliver.trimmingCharacters(in: .whitespacesAndNewlines)
-        let script = newCronScript.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !schedule.isEmpty else {
-            triggerToast(message: "スケジュールを入力してください。")
-            return false
-        }
-        
-        self.isCreatingCronJob = true
-        triggerToast(message: "スケジュールタスクを作成中...")
-        
-        var args = ["cron", "create", schedule]
-        if !prompt.isEmpty {
-            args.append(prompt)
-        }
-        if !name.isEmpty {
-            args.append(contentsOf: ["--name", name])
-        }
-        if !deliver.isEmpty {
-            args.append(contentsOf: ["--deliver", deliver])
-        }
-        if !script.isEmpty {
-            args.append(contentsOf: ["--script", script])
-        }
-        if newCronNoAgent {
-            args.append("--no-agent")
-        }
-        
-        let res = await HermesCLI.shared.exec(args: args)
-        if res.success {
-            triggerToast(message: "タスクを作成しました。")
-            newCronName = ""
-            newCronSchedule = ""
-            newCronPrompt = ""
-            newCronDeliver = "local"
-            newCronScript = ""
-            newCronAssigneeId = nil
-            newCronNoAgent = false
-            await fetchCronJobs()
-        } else {
-            triggerToast(message: "作成に失敗しました: \(res.stderr)")
-        }
-        self.isCreatingCronJob = false
-        return res.success
-    }
-
-    /// 作成フォームを初期状態へリセット（モーダルを「新規作成」で開く前に呼ぶ）。
-    func resetNewCronForm() {
-        newCronName = ""
-        newCronSchedule = ""
-        newCronPrompt = ""
-        newCronDeliver = "local"
-        newCronScript = ""
-        newCronAssigneeId = nil
-        newCronNoAgent = false
-    }
 
 }
 
