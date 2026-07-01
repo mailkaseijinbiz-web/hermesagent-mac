@@ -40,4 +40,44 @@ final class PrivateStoreTests: XCTestCase {
         let loaded: AppState.DailyTextSnapshot? = PrivateStore.load(AppState.DailyTextSnapshot.self, key: key)
         XCTAssertEqual(loaded, snap)
     }
+
+    func testMigrateLegacyUserDefaultsPersonalProfile() throws {
+        let key = "personalProfile"
+        defer {
+            UserDefaults.standard.removeObject(forKey: key)
+            PrivateStore.remove(key: key)
+        }
+        PrivateStore.remove(key: key)
+        let profile = AppState.PersonalProfile(likes: "サウナ", goals: "健康", values: "", notes: "")
+        let data = try JSONEncoder().encode(profile)
+        UserDefaults.standard.set(data, forKey: key)
+
+        PrivateStore.migrateLegacyUserDefaults()
+
+        XCTAssertNil(UserDefaults.standard.data(forKey: key))
+        XCTAssertTrue(PrivateStore.hasEncryptedFile(key: key))
+        let loaded: AppState.PersonalProfile? = PrivateStore.load(AppState.PersonalProfile.self, key: key)
+        XCTAssertEqual(loaded?.likes, "サウナ")
+        XCTAssertEqual(loaded?.goals, "健康")
+    }
+
+    func testMigrateLegacyUserDefaultsLocationPoints() throws {
+        let key = "locationPoints"
+        defer {
+            UserDefaults.standard.removeObject(forKey: key)
+            PrivateStore.remove(key: key)
+        }
+        PrivateStore.remove(key: key)
+        let points = [AppState.LocationPoint(name: "自宅", lat: 35.68, lon: 139.76)]
+        let data = try JSONEncoder().encode(points)
+        UserDefaults.standard.set(data, forKey: key)
+
+        PrivateStore.migrateLegacyUserDefaults()
+
+        XCTAssertNil(UserDefaults.standard.data(forKey: key))
+        XCTAssertTrue(PrivateStore.hasEncryptedFile(key: key))
+        let loaded: [AppState.LocationPoint]? = PrivateStore.load([AppState.LocationPoint].self, key: key)
+        XCTAssertEqual(loaded?.count, 1)
+        XCTAssertEqual(loaded?.first?.name, "自宅")
+    }
 }

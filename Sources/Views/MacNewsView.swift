@@ -163,7 +163,7 @@ struct MacNewsView: View {
                 Text("数日〜1週間のデータがたまると、気づきと来週への提案を生成できます")
                     .font(.system(size: 15)).foregroundStyle(.secondary)
             } else {
-                NewsProseView(text: appState.weeklyReview)
+                NewsProseView(text: appState.weeklyReview, context: .weeklyReview)
                 if appState.weeklyReviewAt > 0 {
                     Text(timestampLabel(appState.weeklyReviewAt))
                         .font(.system(size: 12))
