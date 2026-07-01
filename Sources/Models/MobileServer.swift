@@ -384,8 +384,12 @@ class MobileServer {
             handleTaskDelete(connection: connection, id: String(pathOnly.dropFirst("/api/tasks/".count)), corsHeaders: corsHeaders)
         case ("POST", "/api/health"):
             handleHealthUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/health/weight"):
+            handleWeightRecord(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/health"):
             handleHealthGet(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", "/api/health/weights"):
+            handleWeightHistory(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/artifacts"):
             handleArtifactsList(connection: connection, employeeId: query["employeeId"], corsHeaders: corsHeaders)
         case ("POST", "/api/artifacts"):
@@ -515,7 +519,7 @@ class MobileServer {
         let hermesItems = rows.map { r -> (dict: [String: Any], updatedAt: Double) in
             let title = r.title.isEmpty ? (r.preview.isEmpty ? "(無題)" : String(r.preview.prefix(40))) : r.title
             return ([
-                "id": r.id, "title": title, "preview": String(r.preview.prefix(80)),
+                "id": r.id, "title": title, "preview": String(r.preview.prefix(280)),
                 "lastActive": iso.string(from: Date(timeIntervalSince1970: r.updatedAt)),
                 "source": r.source, "messageCount": r.messageCount, "lastMessageId": r.lastMessageId
             ], r.updatedAt)
@@ -523,7 +527,7 @@ class MobileServer {
         let agyItems = agy.map { s -> (dict: [String: Any], updatedAt: Double) in
             let preview = s.messages.last?.content ?? ""
             return ([
-                "id": s.id, "title": s.title.isEmpty ? "(無題)" : s.title, "preview": String(preview.prefix(80)),
+                "id": s.id, "title": s.title.isEmpty ? "(無題)" : s.title, "preview": String(preview.prefix(280)),
                 "lastActive": iso.string(from: Date(timeIntervalSince1970: s.updatedAt)),
                 "source": "antigravity", "messageCount": s.messages.count, "lastMessageId": 0
             ], s.updatedAt)
@@ -686,7 +690,8 @@ class MobileServer {
                     "accent": e.role.accentHex,
                     "model": e.model,
                     "mode": e.mode.rawValue,
-                    "blurb": e.role.blurb
+                    "blurb": e.role.blurb,
+                    "proactiveEnabled": e.isProactiveEnabled
                 ]
             }
             let json: [String: Any] = ["employees": emps]
@@ -1099,8 +1104,9 @@ class MobileServer {
             b64 = b64.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
             let pad = b64.count % 4
             if pad > 0 { b64 += String(repeating: "=", count: 4 - pad) }
-            return Data(base64Encoded: b64)
-        }
+            guard let data = Data(base64Encoded: b64), data.count <= 2_000_000 else { return nil }
+            return data
+        }.prefix(3).map { $0 }
     }
 
     /// POST /api/memo — メモを追加。Body: {text, images?:[base64], source?}.
@@ -1171,7 +1177,11 @@ class MobileServer {
         case "image":
             if note.isEmpty && title.isEmpty { lines.append("📷 共有された写真") }
             if !title.isEmpty { lines.append(title) }
-            if !text.isEmpty { lines.append(String(text.prefix(2000))) }
+            if !text.isEmpty { lines.append(String(text.prefix(500))) }
+        case "video":
+            if !title.isEmpty { lines.append("🎬 \(title)") }
+            else { lines.append("🎬 ライフログ動画") }
+            if !text.isEmpty { lines.append(String(text.prefix(500))) }
         default: // text
             if !title.isEmpty { lines.append(title) }
             if !text.isEmpty { lines.append(String(text.prefix(4000))) }
@@ -1182,8 +1192,14 @@ class MobileServer {
             return
         }
         let source = kind == "url" ? "web" : "share"
+        let mediaKind = kind == "url" ? "url" : (kind == "video" ? "video" : (kind == "image" ? "image" : "text"))
+        let pageTitle = title.isEmpty ? nil : title
+        let link = kind == "url" && !url.isEmpty ? url : nil
         Task { @MainActor in
-            let memo = MacMemoStore.shared.addMemo(memoText, images: images, source: source)
+            let memo = MacMemoStore.shared.addMemo(
+                memoText, images: images, source: source,
+                link: link, pageTitle: pageTitle, mediaKind: mediaKind
+            )
             Log.event("app", "INFO", "ingested \(kind) → memo \(memo.id) (\(memo.imagePaths?.count ?? 0) img)")
             let resp: [String: Any] = ["status": "ok", "id": memo.id]
             if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
@@ -1558,6 +1574,40 @@ class MobileServer {
                 dict["updatedAt"] = h.updatedAt
             }
             self.sendJSON(connection: connection, dict, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/health/weight — メモ由来の体重を Mac ハブに記録（iOS → HealthKit 後の同期）。
+    private nonisolated func handleWeightRecord(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body),
+              let kg = (json["kg"] as? Double) ?? (json["kg"] as? Int).map(Double.init) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing kg\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let recordedAt = (json["recordedAt"] as? Double) ?? Date().timeIntervalSince1970
+        let memoId = json["memoId"] as? String
+        let source = (json["source"] as? String) ?? "ios-memo"
+        Task { @MainActor in
+            AppState.shared.recordWeightFromMemo(
+                kg: kg,
+                at: Date(timeIntervalSince1970: recordedAt),
+                memoId: memoId,
+                source: source
+            )
+            self.sendJSON(connection: connection, ["ok": true], corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/health/weights — 体重履歴（新しい順、最大120件）。
+    private nonisolated func handleWeightHistory(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let records = WeightRecordStore.all().sorted { $0.recordedAt > $1.recordedAt }.prefix(120)
+            let arr: [[String: Any]] = records.map { r in
+                var d: [String: Any] = ["id": r.id, "kg": r.kg, "recordedAt": r.recordedAt, "source": r.source]
+                if let m = r.memoId { d["memoId"] = m }
+                return d
+            }
+            self.sendJSON(connection: connection, ["weights": arr], corsHeaders: corsHeaders)
         }
     }
 
@@ -2107,24 +2157,20 @@ class MobileServer {
     }
 
     nonisolated func fetchSaunaNewsJSON() async -> String {
-        let query = "サウナ".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "sauna"
-        let urlStr = "https://news.google.com/rss/search?q=\(query)&hl=ja&gl=JP&ceid=JP:ja"
-        guard let url = URL(string: urlStr),
-              let (data, _) = try? await URLSession.shared.data(from: url),
-              let xml = String(data: data, encoding: .utf8) else { return "[]" }
-
-        // シンプルな正規表現なしの XML パース
-        var items: [[String: String]] = []
-        let parts = xml.components(separatedBy: "<item>")
-        for part in parts.dropFirst().prefix(5) {
-            let title = xmlText(part, tag: "title")
-            let link  = xmlText(part, tag: "link")
-            let date  = xmlText(part, tag: "pubDate")
-            if !title.isEmpty {
-                items.append(["title": title, "link": link, "date": date])
-            }
+        let topics = await MainActor.run {
+            NewsFeedParser.topics(from: AppState.shared.personalProfile.likes)
         }
-        guard let out = try? JSONSerialization.data(withJSONObject: items),
+        var groups: [[NewsFeedItem]] = []
+        for topic in topics {
+            let query = topic.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? topic
+            let urlStr = "https://news.google.com/rss/search?q=\(query)&hl=ja&gl=JP&ceid=JP:ja"
+            guard let url = URL(string: urlStr),
+                  let (data, _) = try? await URLSession.shared.data(from: url),
+                  let xml = String(data: data, encoding: .utf8) else { continue }
+            groups.append(NewsFeedParser.parseGoogleNewsRSS(xml, topic: topic, limit: 5))
+        }
+        let merged = NewsFeedParser.merge(groups, max: 10)
+        guard let out = try? JSONEncoder().encode(merged),
               let str = String(data: out, encoding: .utf8) else { return "[]" }
         return str
     }

@@ -98,6 +98,9 @@ extension AppState {
         let lifelog = lifelogContext()
         if !lifelog.isEmpty { lines.append("【今日の活動タイムライン】\n\(lifelog)") }
 
+        let memoCtx = MemoContext.format(MacMemoStore.shared.todayMemos, max: 6)
+        if !memoCtx.isEmpty { lines.append("【共有・備忘録】\n\(memoCtx)") }
+
         let timeline = timelineContextText()
         if !timeline.isEmpty { lines.append("【時系列グラフ】\n\(timeline)") }
 

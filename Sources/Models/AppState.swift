@@ -420,6 +420,8 @@ class AppState: ObservableObject {
     // The tool-permission request currently awaiting the user's decision (drives the dialog).
     @Published var pendingPermission: ACPPermission? = nil
     private var permissionCont: CheckedContinuation<String?, Never>? = nil
+    // Polls every 5 min for due proactive employee check-ins (see AppState+EmployeeProactive.swift).
+    var proactiveSchedulerTimer: Timer?
     // Registered iOS device tokens (from /api/push/register)
     @Published var pushDeviceTokens: [String] = UserDefaults.standard.stringArray(forKey: "pushDeviceTokens") ?? [] {
         didSet { UserDefaults.standard.set(pushDeviceTokens, forKey: "pushDeviceTokens") }
@@ -466,6 +468,8 @@ class AppState: ObservableObject {
     // When true, handleSendMessage skips local command interception (used by runAppAction to
     // forward an augmented prompt to the agent without re-matching its own command pattern).
     var bypassCommandIntercept = false
+    /// When set, handleSendMessage uses this as the agent prompt and shows a short user bubble.
+    var proactiveSendPrompt: String?
     @Published var pluginsList: [HermesPlugin] = []
     @Published var isFetchingPlugins: Bool = false
     @Published var pluginInstallInput: String = ""
@@ -528,7 +532,20 @@ class AppState: ObservableObject {
             if let v = snap.activeEnergyKcal { $0.activeEnergyKcal = Int(v) }
             if let v = snap.restingHeartRate { $0.restingHeartRate = v }
             if let v = snap.sleepHours { $0.sleepHours = v }
+            if let v = snap.bodyMassKg { $0.bodyMassKg = v }
         }
+        scheduleIntentionRefreshIfNeeded()
+    }
+
+    /// メモから体重を記録し、履歴・最新ヘルス・日次履歴を更新する。
+    func recordWeightFromMemo(kg: Double, at date: Date = Date(), memoId: String? = nil, source: String = "memo") {
+        guard let record = WeightRecordStore.append(kg: kg, at: date, memoId: memoId, source: source) else { return }
+        var snap = latestHealth ?? HealthSnapshot()
+        snap.bodyMassKg = record.kg
+        snap.updatedAt = Date().timeIntervalSince1970
+        if snap.date == nil { snap.date = dayKey(date) }
+        latestHealth = snap
+        upsertToday { $0.bodyMassKg = record.kg }
         scheduleIntentionRefreshIfNeeded()
     }
 
@@ -540,6 +557,7 @@ class AppState: ObservableObject {
         var activeEnergyKcal: Int? = nil
         var restingHeartRate: Int? = nil
         var sleepHours: Double? = nil
+        var bodyMassKg: Double? = nil
         var locations: String = ""
         var photos: String = ""
     }
@@ -587,6 +605,7 @@ class AppState: ObservableObject {
             if let v = r.activeEnergyKcal { p.append("\(v)kcal") }
             if let v = r.restingHeartRate { p.append("安静\(v)") }
             if let v = r.sleepHours { p.append(String(format: "睡眠%.1fh", v)) }
+            if let v = r.bodyMassKg { p.append(String(format: "体重%.1fkg", v)) }
             if !r.locations.isEmpty { p.append("場所[\(r.locations)]") }
             if !r.photos.isEmpty { p.append("写真[\(r.photos)]") }
             return p.joined(separator: " / ")
@@ -1212,7 +1231,8 @@ class AppState: ObservableObject {
                 id: $0.id, name: $0.name, role: $0.role.rawValue,
                 provider: $0.provider, model: $0.model, mode: $0.mode.rawValue,
                 personaOverride: $0.personaOverride, teamId: $0.teamId,
-                createdAt: $0.createdAt, updatedAt: $0.updatedAt ?? $0.createdAt)
+                createdAt: $0.createdAt, updatedAt: $0.updatedAt ?? $0.createdAt,
+                archived: $0.isArchived, proactiveEnabled: $0.isProactiveEnabled)
         }
         // .file artifacts hold a device-local absolute path (like workspacePath, which
         // is deliberately not synced) — they'd render as broken rows on other devices, so
@@ -1246,6 +1266,8 @@ class AppState: ObservableObject {
                     employees[idx].personaOverride = ce.personaOverride
                     employees[idx].teamId = ce.teamId
                     employees[idx].updatedAt = ce.updatedAt
+                    if let a = ce.archived { employees[idx].archived = a }
+                    if let p = ce.proactiveEnabled { employees[idx].proactiveEnabled = p }
                 }
             } else {
                 var e = Employee(name: ce.name, role: role, provider: ce.provider,
@@ -1255,6 +1277,8 @@ class AppState: ObservableObject {
                 e.teamId = ce.teamId
                 e.createdAt = ce.createdAt
                 e.updatedAt = ce.updatedAt
+                e.archived = ce.archived
+                e.proactiveEnabled = ce.proactiveEnabled
                 employees.append(e)
             }
         }
@@ -1643,6 +1667,7 @@ class AppState: ObservableObject {
             await self.autoBriefIfStale()
             await self.autoIntentionIfStale()
             self.startAutoBriefTimer()
+            self.startEmployeeProactiveScheduler()
 
             // Cloud sync (can take seconds) now overlaps the above instead of gating it.
             if cloudSyncEnabled { await syncEmployeesNow() }
@@ -1740,7 +1765,29 @@ class AppState: ObservableObject {
             let source = StateDB.shared.sessions().first { $0.id == m.sessionId }?.source ?? ""
             if source.isEmpty || source == "cli" { return }
         }
-        sendPushIfEnabled(title: "Hermes", body: String(m.content.prefix(140)), sessionId: m.sessionId)
+        sendPushIfEnabled(
+            title: pushNotificationTitle(sessionId: m.sessionId),
+            body: pushNotificationBody(rawContent: m.content, sessionId: m.sessionId),
+            sessionId: m.sessionId
+        )
+    }
+
+    /// One-line APNs body: parsed CLI output, no raw JSON/code fences.
+    func pushNotificationBody(rawContent: String, sessionId: String) -> String {
+        let parsed = parseResponseText(rawContent)
+        let sessionTitle = StateDB.shared.sessions().first { $0.id == sessionId }?.title
+        return PushPreviewFormatter.body(from: parsed, sessionTitle: sessionTitle)
+    }
+
+    func pushNotificationTitle(sessionId: String) -> String {
+        if let empId = sessionOwner[sessionId],
+           let emp = employees.first(where: { $0.id == empId }) {
+            return emp.name
+        }
+        let title = StateDB.shared.sessions().first { $0.id == sessionId }?.title
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !title.isEmpty, title != "(無題)" { return title }
+        return "Hermes"
     }
 
     // Device presence: token → (session it's currently viewing in foreground, last report).
@@ -2215,6 +2262,9 @@ class AppState: ObservableObject {
             return text.isEmpty ? names : "\(text)\n\(names)"
         }()
 
+        let proactivePrompt = proactiveSendPrompt
+        proactiveSendPrompt = nil
+
         self.messages.append(Message(role: .user, content: displayText, imageData: imgData))
         self.inputValue = ""
         self.attachedFiles = []
@@ -2247,13 +2297,12 @@ class AppState: ObservableObject {
         // 健康アドバイザー社員とのチャットには、最新の健康データ(HealthKit由来)を文脈として
         // 前置する（表示メッセージには出さない）。「今日の歩数は？」等に答えられるように。
         let healthContext: String = {
-            guard let emp = activeEmployee,
-                  emp.name.contains("健康") || emp.name.lowercased().contains("health"),
+            guard let emp = activeEmployee, emp.isHealthAdvisor,
                   let line = healthSummaryLine else { return "" }
             return "【参考データ（連携中のHealthKit）】\(line)\n\n"
         }()
 
-        var effectivePrompt = text
+        var effectivePrompt = proactivePrompt ?? text
         if effectivePrompt.isEmpty { effectivePrompt = imagePath != nil ? "添付した画像について説明してください。" : "添付したファイルを確認してください。" }
         effectivePrompt += fileRefs
         if !healthContext.isEmpty { effectivePrompt = healthContext + effectivePrompt }
