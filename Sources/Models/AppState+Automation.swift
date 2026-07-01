@@ -63,7 +63,10 @@ extension AppState {
 
     func fetchCronJobs() async {
         isFetchingCronJobs = true
-        let res = await HermesCLI.shared.exec(args: ["cron", "list"])
+        let res = await HermesCLI.shared.exec(
+            args: ["cron", "list"],
+            timeout: HermesExecPolicy.defaultListTimeout
+        )
         isFetchingCronJobs = false
 
         guard res.success else { return }
@@ -72,6 +75,7 @@ extension AppState {
         cronJobs = jobs
         updateLineDeliveryAuthError(from: jobs)
         FailedDeliveryStore.shared.record(from: jobs)
+        FailedDeliveryStore.shared.reconcile(with: jobs)
     }
 
     func handleToggleCronJob(_ job: HermesCronJob) async {
@@ -138,17 +142,27 @@ extension AppState {
         return res.success
     }
 
-    /// テスト実行: ジョブを今すぐ実行キューに入れる(`hermes cron run`)。
+    /// テスト実行: ジョブを今すぐ実行キューに入れる(`hermes cron run`)。timeout + 指数バックオフ付き。
     func cronRunNow(id: String) async -> Bool {
-        let res = await HermesCLI.shared.exec(args: ["cron", "run", id])
-        if res.success {
+        let outcome = await HermesCLI.shared.execWithRetry(args: ["cron", "run", id])
+        if outcome.success {
             triggerToast(message: "テスト実行をトリガーしました。まもなく配信先に届きます。")
             await fetchCronJobs()
             fetchAutomationResults()
         } else {
-            triggerToast(message: "テスト実行に失敗: \(res.stderr)")
+            let hint = outcome.timedOut ? "（タイムアウト）" : ""
+            triggerToast(message: "テスト実行に失敗\(hint): \(outcome.stderr)")
         }
-        return res.success
+        return outcome.success
+    }
+
+    /// デッドレターから手動再送 — `hermes cron run` をキューに入れる。
+    func retryFailedDelivery(_ record: FailedDeliveryRecord) async {
+        triggerToast(message: "「\(record.jobName)」を再試行しています…")
+        let ok = await cronRunNow(id: record.jobId)
+        if ok {
+            FailedDeliveryStore.shared.clear(recordId: record.id)
+        }
     }
 
     /// 既存のスケジュールタスクを編集（`hermes cron edit`）。

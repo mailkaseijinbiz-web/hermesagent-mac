@@ -9,6 +9,8 @@
 **`cursor/phase-0-hardening` ブランチ（Phase 0 追補）**
 - ✅ **MobileServer Tailscale ウォッチドッグ** — 90秒ごとに `tailscale ip -4` を再確認し、IP 出現/変更時にリスナー再バインド
 - ✅ **LINE 401 自己回復** — cron の LINE 401 検知時にブリッジをデバウンス再起動（既存 3 分ウォッチドッグ + `FailedDeliveryStore` と併用）
+- ✅ **デッドレター再試行 UI** — オートメーション「最近の配信失敗」から `hermes cron run` 再送
+- ✅ **HermesCLI ラッパー** — `exec` timeout + `execWithRetry`（指数バックオフ）を cron list/run に適用
 
 **`cursor/intention-cards` ブランチで完了（Phase H）**
 - ✅ **Collection**：Mac `CollectionStore` + Mobile API + UI、iOS 閲覧（`CollectionView`）
@@ -131,8 +133,8 @@
 | Sec | MobileServer の CORS を `*` からホワイトリスト化 | ✅ 完了（Origin 検証・deny 既定） |
 | Sec | バインドを loopback/Tailscale 限定に（iOS接続への影響を要設計） | ✅ loopback + Tailscale IPv4。90秒ウォッチドッグで IP 変化時に再バインド |
 | Sec | `UpdateManager` の `zsh -lc` を Process配列実行へ（シェル注入対策） | ✅ 完了（値を位置パラメータ化） |
-| Rel | LINE配信の自己回復（`/health`＋トークン失効検知＋再送デッドレターキュー） | 🟡 401 検知→トースト＋ブリッジ自動再起動、3分ウォッチドッグ、`FailedDeliveryStore` デッドレター。手動再送 UI は未 |
-| Rel | 外部スクリプト（stock/gmail）をラッパー化（timeout＋指数バックオフ＋結果記録） | ⬜ |
+| Rel | LINE配信の自己回復（`/health`＋トークン失効検知＋再送デッドレターキュー） | ✅ 401 検知→ブリッジ再起動、デッドレター UI から手動再試行、`hermes cron run` に timeout+バックオフ |
+| Rel | 外部スクリプト（stock/gmail）をラッパー化（timeout＋指数バックオフ＋結果記録） | 🟡 `HermesCLI.execWithRetry` + list timeout（cron 経由の script 実行に適用） |
 | QA | 開発者個人ID（APNs `576D2UUHH5`／bundle）を空デフォルト＋設定プロンプト化 | ✅ Team ID 空既定＋送信ガード追加（bundle は要検討） |
 | Prod | 撤去済みの News/Gmail/Schedule/OutputModeViews を削除（dead code整理） | 🟡 未配線分（構造化出力＋chatOutputMode）は削除済。News/Gmail/Schedule 本体は機能判断待ち |
 

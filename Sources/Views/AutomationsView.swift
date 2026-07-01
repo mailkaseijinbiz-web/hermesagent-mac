@@ -6,6 +6,7 @@ struct AutomationsView: View {
     @ObservedObject private var failedDeliveryStore = FailedDeliveryStore.shared
     @State private var showSuggestions = false   // おすすめ欄は既定で折りたたみ（縦の長さを抑える）
     @State private var showFailedDeliveries = true
+    @State private var retryingRecordId: String?
     /// Embedded inside the Settings panel: drop the outer ScrollView (settings scrolls) and
     /// the close-X (settings has its own close), and tighten padding.
     var embedded: Bool = false
@@ -245,6 +246,27 @@ struct AutomationsView: View {
                                 .font(.system(size: 11))
                                 .foregroundColor(.orange)
                                 .lineLimit(2)
+                            HStack(spacing: 8) {
+                                Button {
+                                    retryingRecordId = rec.id
+                                    Task {
+                                        await appState.retryFailedDelivery(rec)
+                                        retryingRecordId = nil
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        if retryingRecordId == rec.id {
+                                            ProgressView().controlSize(.small)
+                                        } else {
+                                            Image(systemName: "arrow.clockwise").font(.system(size: 10))
+                                        }
+                                        Text("再試行").font(.system(size: 11, weight: .medium))
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundColor(.accentColor)
+                                .disabled(retryingRecordId != nil)
+                            }
                         }
                         .padding(.vertical, 4)
                         .swipeActions(edge: .trailing) {
@@ -257,7 +279,7 @@ struct AutomationsView: View {
                     }
                 }
                 .listStyle(.plain)
-                .frame(minHeight: min(CGFloat(failedDeliveryStore.records.count) * 56, 220))
+                .frame(minHeight: min(CGFloat(failedDeliveryStore.records.count) * 72, 260))
                 .background(Color.orange.opacity(0.04))
                 .cornerRadius(10)
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.2), lineWidth: 0.5))

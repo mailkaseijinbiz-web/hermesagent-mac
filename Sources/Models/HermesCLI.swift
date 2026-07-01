@@ -310,36 +310,103 @@ class HermesCLI {
         return mergedEnvironment[envVarName] ?? ""
     }
     
-    // Execute a CLI command synchronously
-    func exec(args: [String]) async -> (success: Bool, stdout: String, stderr: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: hermesPath)
-        process.arguments = args
-        process.environment = mergedEnvironment
-        
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-        
-        do {
-            try process.run()
-            
-            return await withCheckedContinuation { continuation in
-                process.terminationHandler = { proc in
-                    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    
-                    let stdout = String(data: outData, encoding: .utf8) ?? ""
-                    let stderr = String(data: errData, encoding: .utf8) ?? ""
-                    let success = proc.terminationStatus == 0
-                    
-                    continuation.resume(returning: (success, stdout, stderr))
+    // Execute a CLI command synchronously (optional timeout; nil = no limit).
+    func exec(args: [String], timeout: TimeInterval? = nil) async -> (success: Bool, stdout: String, stderr: String) {
+        let outcome = await execOutcome(args: args, timeout: timeout, maxAttempts: 1)
+        return (outcome.success, outcome.stdout, outcome.stderr)
+    }
+
+    /// Run with timeout and exponential backoff on non-zero exit (for cron run / flaky scripts).
+    func execWithRetry(
+        args: [String],
+        timeout: TimeInterval = HermesExecPolicy.defaultRunTimeout,
+        maxAttempts: Int = HermesExecPolicy.maxRetryAttempts
+    ) async -> HermesExecOutcome {
+        await execOutcome(args: args, timeout: timeout, maxAttempts: max(1, maxAttempts))
+    }
+
+    private func execOutcome(
+        args: [String],
+        timeout: TimeInterval?,
+        maxAttempts: Int
+    ) async -> HermesExecOutcome {
+        var lastStdout = ""
+        var lastStderr = ""
+        var timedOut = false
+
+        for attempt in 0..<maxAttempts {
+            if attempt > 0 {
+                let delay = HermesExecPolicy.backoffDelay(attempt: attempt)
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 }
             }
-        } catch {
-            return (false, "", error.localizedDescription)
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: hermesPath)
+            process.arguments = args
+            process.environment = mergedEnvironment
+
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+
+            do {
+                try process.run()
+            } catch {
+                return HermesExecOutcome(success: false, stdout: "", stderr: error.localizedDescription, attempts: attempt + 1)
+            }
+
+            let waitResult: (status: Int32, timedOut: Bool) = await withCheckedContinuation { continuation in
+                var finished = false
+                let finish: (Int32, Bool) -> Void = { status, timedOut in
+                    guard !finished else { return }
+                    finished = true
+                    continuation.resume(returning: (status, timedOut))
+                }
+
+                var timer: DispatchSourceTimer?
+                if let timeout, timeout > 0 {
+                    let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+                    t.schedule(deadline: .now() + timeout)
+                    t.setEventHandler {
+                        if process.isRunning { process.terminate() }
+                        finish(-1, true)
+                    }
+                    t.resume()
+                    timer = t
+                }
+
+                process.terminationHandler = { proc in
+                    timer?.cancel()
+                    finish(proc.terminationStatus, false)
+                }
+            }
+
+            timedOut = waitResult.timedOut
+            lastStdout = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            lastStderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+            if waitResult.timedOut {
+                lastStderr = lastStderr.isEmpty ? "hermes exec timed out after \(Int(timeout ?? 0))s" : lastStderr
+                if attempt + 1 >= maxAttempts { break }
+                continue
+            }
+
+            if waitResult.status == 0 {
+                return HermesExecOutcome(
+                    success: true, stdout: lastStdout, stderr: lastStderr,
+                    timedOut: false, attempts: attempt + 1
+                )
+            }
+            if attempt + 1 >= maxAttempts { break }
         }
+
+        return HermesExecOutcome(
+            success: false, stdout: lastStdout, stderr: lastStderr,
+            timedOut: timedOut, attempts: maxAttempts
+        )
     }
     
     // Execute an arbitrary command (not the hermes binary) with the merged env.
