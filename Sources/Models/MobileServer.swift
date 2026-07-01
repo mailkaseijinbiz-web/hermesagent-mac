@@ -339,6 +339,8 @@ class MobileServer {
             handleReviewGet(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/review"):
             handleReviewRegenerate(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", "/api/lifelog/summary"):
+            handleLifelogSummaryGet(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/cron"):
             handleCronList(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/cron"):
@@ -1214,6 +1216,21 @@ class MobileServer {
     private nonisolated func handleReviewGet(connection: NWConnection, corsHeaders: String) {
         Task { @MainActor in
             let resp: [String: Any] = ["review": AppState.shared.weeklyReview, "reviewAt": AppState.shared.weeklyReviewAt]
+            if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// GET /api/lifelog/summary — today's AI lifelog summary {summary, summaryAt}.
+    private nonisolated func handleLifelogSummaryGet(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let resp: [String: Any] = [
+                "summary": AppState.shared.lifelogSummary,
+                "summaryAt": AppState.shared.lifelogSummaryAt
+            ]
             if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
                 self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
             } else {

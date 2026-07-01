@@ -573,7 +573,7 @@ class AppState: ObservableObject {
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
         return f.string(from: d)
     }
-    private func upsertToday(_ mutate: (inout DayRecord) -> Void) {
+    func upsertToday(_ mutate: (inout DayRecord) -> Void) {
         let key = dayKey()
         if let i = dailyHistory.firstIndex(where: { $0.date == key }) {
             mutate(&dailyHistory[i])
@@ -582,6 +582,8 @@ class AppState: ObservableObject {
         }
         if dailyHistory.count > 60 { dailyHistory.removeFirst(dailyHistory.count - 60) }
     }
+
+    // MARK: - Lifelog
 
     // Weekly metacognitive review (pattern detection over dailyHistory). Persisted.
     @Published var weeklyReview: String = UserDefaults.standard.string(forKey: "weeklyReview") ?? "" {
@@ -593,29 +595,17 @@ class AppState: ObservableObject {
     @Published var isGeneratingReview = false
 
     // Lifelog daily summary (AI-generated snapshot of today's Mac + iOS activity).
-    @Published var lifelogSummary: String = UserDefaults.standard.string(forKey: "lifelogSummary") ?? "" {
-        didSet { UserDefaults.standard.set(lifelogSummary, forKey: "lifelogSummary") }
+    @Published var lifelogSummary: String = AppState.loadDailyText(
+        storeKey: "lifelogDaily", legacyTextKey: "lifelogSummary", legacyAtKey: "lifelogSummaryAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: lifelogSummary, at: lifelogSummaryAt, storeKey: "lifelogDaily") }
     }
-    @Published var lifelogSummaryAt: Double = UserDefaults.standard.double(forKey: "lifelogSummaryAt") {
-        didSet { UserDefaults.standard.set(lifelogSummaryAt, forKey: "lifelogSummaryAt") }
+    @Published var lifelogSummaryAt: Double = AppState.loadDailyText(
+        storeKey: "lifelogDaily", legacyTextKey: "lifelogSummary", legacyAtKey: "lifelogSummaryAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: lifelogSummary, at: lifelogSummaryAt, storeKey: "lifelogDaily") }
     }
     @Published var isGeneratingLifelogSummary = false
-    /// 直近 `days` 日の日次データを1行/日のテキストに整形（履歴が無ければ空）。
-    func weeklyReviewContext(days: Int = 14) -> String {
-        let recent = dailyHistory.suffix(days)
-        guard !recent.isEmpty else { return "" }
-        return recent.map { r in
-            var p: [String] = [r.date]
-            if let v = r.steps { p.append("歩\(v)") }
-            if let v = r.activeEnergyKcal { p.append("\(v)kcal") }
-            if let v = r.restingHeartRate { p.append("安静\(v)") }
-            if let v = r.sleepHours { p.append(String(format: "睡眠%.1fh", v)) }
-            if let v = r.bodyMassKg { p.append(String(format: "体重%.1fkg", v)) }
-            if !r.locations.isEmpty { p.append("場所[\(r.locations)]") }
-            if !r.photos.isEmpty { p.append("写真[\(r.photos)]") }
-            return p.joined(separator: " / ")
-        }.joined(separator: "\n")
-    }
 
     // Location: a privacy-light daily "足あと" summary pushed from iOS (place names + times,
     // NOT raw coordinates). Injected into the brief/coaching context. Device-local.
@@ -635,19 +625,6 @@ class AppState: ObservableObject {
     ) {
         didSet { AppState.saveJSON(homeLocationKeyword, "homeLocationKeyword") }
     }
-    /// 自宅キーワードを反映した表示用サマリ。
-    func resolvedLocationSummary(_ raw: String) -> String {
-        let kw = homeLocationKeyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !kw.isEmpty else { return raw }
-        return raw.replacingOccurrences(of: kw, with: "自宅", options: .caseInsensitive)
-    }
-    func updateLocationSummary(_ s: String) {
-        locationSummary = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        locationSummaryAt = Date().timeIntervalSince1970
-        upsertToday { $0.locations = self.locationSummary }
-        scheduleIntentionRefreshIfNeeded()
-    }
-
     // Per-place coordinates for today's footprint map (sent from iOS, to this private hub).
     struct LocationPoint: Codable, Equatable, Identifiable {
         var name: String; var lat: Double; var lon: Double
@@ -656,17 +633,6 @@ class AppState: ObservableObject {
     @Published var locationPoints: [LocationPoint] = AppState.loadJSON("locationPoints") ?? [] {
         didSet { AppState.saveJSON(locationPoints, "locationPoints") }
     }
-    func updateLocation(summary: String, points: [LocationPoint]) {
-        updateLocationSummary(summary)
-        locationPoints = points.filter { $0.lat != 0 || $0.lon != 0 }
-    }
-    /// 今日の足あとを文脈に。古い（前日以前）サマリは使わない。自宅キーワードは「自宅」に置換。
-    var locationContext: String? {
-        guard !locationSummary.isEmpty, locationSummaryAt > 0 else { return nil }
-        guard Calendar.current.isDateInToday(Date(timeIntervalSince1970: locationSummaryAt)) else { return nil }
-        return "今日の行動(訪れた場所): \(resolvedLocationSummary(locationSummary))"
-    }
-
     // Photos: a privacy-light daily summary pushed from iOS (counts/places only — never the
     // photos themselves). Injected into the brief/coaching context. Device-local.
     @Published var photoSummary: String = AppState.loadDailyText(
@@ -679,18 +645,6 @@ class AppState: ObservableObject {
     ).updatedAt {
         didSet { AppState.saveDailyText(text: photoSummary, at: photoSummaryAt, storeKey: "photoDaily") }
     }
-    func updatePhotoSummary(_ s: String) {
-        photoSummary = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        photoSummaryAt = Date().timeIntervalSince1970
-        upsertToday { $0.photos = self.photoSummary }
-        scheduleIntentionRefreshIfNeeded()
-    }
-    var photoContext: String? {
-        guard !photoSummary.isEmpty, photoSummaryAt > 0 else { return nil }
-        guard Calendar.current.isDateInToday(Date(timeIntervalSince1970: photoSummaryAt)) else { return nil }
-        return "今日の写真: \(photoSummary)"
-    }
-
     /// 健康データの日本語1行サマリー（健康アドバイザーのチャットへ注入／表示用）。データ無しは nil。
     var healthSummaryLine: String? {
         guard let h = latestHealth else { return nil }
