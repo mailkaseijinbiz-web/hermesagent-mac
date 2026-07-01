@@ -67,7 +67,8 @@ private enum SummaryTypography {
 
     static var bodyLineSpacing: CGFloat {
         let font = NSFont.systemFont(ofSize: bodySize)
-        return max(0, bodySize * lineHeightMultiple - font.defaultLineHeight(for: .horizontal))
+        let natural = font.ascender - font.descender + font.leading
+        return max(0, bodySize * lineHeightMultiple - natural)
     }
 }
 
