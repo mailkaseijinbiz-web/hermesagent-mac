@@ -124,6 +124,8 @@ enum PrivateStoreKeys {
         "intentionDismissedKinds",
         "locationDaily",
         "photoDaily",
-        "homeLocationKeyword"
+        "homeLocationKeyword",
+        "weightRecords",
+        "hba1cRecords"
     ]
 }

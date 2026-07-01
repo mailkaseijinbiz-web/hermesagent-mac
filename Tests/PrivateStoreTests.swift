@@ -24,6 +24,7 @@ final class PrivateStoreTests: XCTestCase {
 
     func testEncryptedKeyListIncludesHealth() {
         XCTAssertTrue(PrivateStoreKeys.all.contains("latestHealth"))
+        XCTAssertTrue(PrivateStoreKeys.all.contains("weightRecords"))
         XCTAssertTrue(PrivateStoreKeys.all.contains("locationPoints"))
         XCTAssertTrue(PrivateStoreKeys.all.contains("locationDaily"))
         XCTAssertTrue(PrivateStoreKeys.all.contains("photoDaily"))
