@@ -307,6 +307,9 @@ class AppState: ObservableObject {
     // LINE bridge (bridge.py on :8650) — auto-started with the app so LINE always works.
     @Published var isLineBridgeRunning: Bool = false
     @Published var lineBridgeStatus: String = ""
+    @Published var lineDeliveryAuthError: String? = nil
+    var lineBridgeWatchdogTimer: Timer?
+    var previousLineAuthErrors: [String: String] = [:]
 
     /// Ensure the LINE bridge is running, then reflect its live state in the UI.
     func startLineBridge() async {
@@ -1664,6 +1667,7 @@ class AppState: ObservableObject {
             self.isMobileServerRunning = true
             startStoreSync()                              // reflect iPhone/iPad/cron changes
             let bridge = Task { await self.startLineBridge() }   // bridge.py on :8650 (keep LINE working)
+            self.startLineBridgeWatchdog()
 
             // 自動振り返り: 起動時に今日のブリーフがなければ生成 & 毎夜21:00に再生成
             await self.autoBriefIfStale()
@@ -3236,6 +3240,7 @@ class AppState: ObservableObject {
         saveCurrentJob()
         
         self.cronJobs = jobs
+        updateLineDeliveryAuthError(from: jobs)
     }
     
     func handleToggleCronJob(_ job: HermesCronJob) async {

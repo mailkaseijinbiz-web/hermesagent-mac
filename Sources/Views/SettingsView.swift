@@ -481,6 +481,26 @@ struct SettingsModal: View {
                 }.buttonStyle(.plain)
             }
         )) {
+            if let err = appState.lineDeliveryAuthError {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12)).foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(err)
+                            .font(.system(size: 11)).foregroundColor(.orange).lineLimit(nil)
+                        HStack(spacing: 12) {
+                            Link("LINE設定手順",
+                                 destination: URL(string: "https://developers.line.biz/ja/docs/messaging-api/getting-started/")!)
+                                .font(.system(size: 11))
+                            Button("ブリッジを再起動") { Task { await appState.restartLineBridge() } }
+                                .font(.system(size: 11)).buttonStyle(.bordered)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08))
+                .cornerRadius(8)
+            }
             HStack(spacing: 8) {
                 Circle().fill(appState.isLineBridgeRunning ? Color.green : Color.orange)
                     .frame(width: 7, height: 7)
