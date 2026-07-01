@@ -392,13 +392,16 @@ struct DashboardView: View {
         card(title: "足あと", icon: "mappin.and.ellipse") {
             let fresh = isToday(appState.locationSummaryAt)
             if fresh, !appState.locationPoints.isEmpty {
-                footprintMap(appState.locationPoints)
-                if !appState.locationSummary.isEmpty {
-                    Text(appState.locationSummary).font(.system(size: 10)).foregroundColor(.secondary).lineLimit(2)
-                }
+                LocationDayRouteView(
+                    summary: appState.resolvedLocationSummary(appState.locationSummary),
+                    points: appState.locationPoints,
+                    mapHeight: 120
+                )
             } else if fresh, !appState.locationSummary.isEmpty {
-                Text(appState.locationSummary).font(.system(size: 12)).foregroundColor(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
+                LocationRouteDiagramView(
+                    stops: LocationRouteParser.stops(from: appState.resolvedLocationSummary(appState.locationSummary)),
+                    maxHeight: 120
+                )
                 Spacer(minLength: 0)
             } else {
                 emptyLine("今日の記録なし")
@@ -407,21 +410,7 @@ struct DashboardView: View {
         }
     }
 
-    private func footprintMap(_ pts: [AppState.LocationPoint]) -> some View {
-        let coords = pts.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-        return Map(initialPosition: .automatic, interactionModes: []) {
-            if coords.count >= 2 {
-                MapPolyline(coordinates: coords).stroke(.blue, lineWidth: 3)
-            }
-            ForEach(Array(pts.enumerated()), id: \.offset) { i, p in
-                Marker("\(i + 1). \(p.name)", coordinate: CLLocationCoordinate2D(latitude: p.lat, longitude: p.lon))
-                    .tint(.blue)
-            }
-        }
-        .mapStyle(.standard(pointsOfInterest: .excludingAll))
-        .frame(maxWidth: .infinity, minHeight: 120, maxHeight: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
+    // MARK: アプリ / 社員 (compact)
 
     private var photosWidget: some View {
         card(title: "写真", icon: "photo.on.rectangle.angled") {
@@ -448,7 +437,7 @@ struct DashboardView: View {
     }
 
     private var employeesWidget: some View {
-        card(title: "社員", icon: "person.3.fill", more: "会社", onMore: { appState.view = "company" }) {
+        card(title: "社員", icon: "person.3.fill", more: "社員", onMore: { appState.view = "company" }) {
             Text("\(appState.employees.count)").font(.system(size: 26, weight: .bold))
             let busy = appState.busyEmployees
             Text(busy.isEmpty ? "全員待機中" : "対応中 \(busy.count)名")
@@ -505,7 +494,7 @@ struct DashboardView: View {
 
     private var lifelogWidget: some View {
         card(title: "今日の活動", icon: "clock.arrow.circlepath",
-             more: "ライフログ", onMore: { appState.view = "lifelog" }) {
+             more: "ホーム", onMore: { appState.view = "home" }) {
             let entries = MacActivityLogger.shared.todayEntries()
             if entries.isEmpty {
                 emptyLine("まだアクティビティがありません")
@@ -542,11 +531,13 @@ struct DashboardView: View {
             if generating {
                 ProgressView().controlSize(.small)
             } else {
-                HStack(spacing: 3) { Image(systemName: "arrow.clockwise"); Text("再生成") }
-                    .font(.system(size: 11)).foregroundColor(.secondary)
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
             }
         }
         .buttonStyle(.plain).disabled(generating)
+        .help("再生成")
     }
 
     // MARK: Helpers

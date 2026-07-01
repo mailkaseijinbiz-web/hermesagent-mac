@@ -59,6 +59,18 @@ enum MacLifeLogItem: Identifiable {
 
 // MARK: - Main view
 
+// MARK: - 要約カード typography
+
+private enum SummaryTypography {
+    static let bodySize: CGFloat = 15
+    static let lineHeightMultiple: CGFloat = 1.6
+
+    static var bodyLineSpacing: CGFloat {
+        let font = NSFont.systemFont(ofSize: bodySize)
+        return max(0, bodySize * lineHeightMultiple - font.defaultLineHeight(for: .horizontal))
+    }
+}
+
 struct MacLifeLogView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var memoStore = MacMemoStore.shared
@@ -70,10 +82,26 @@ struct MacLifeLogView: View {
     @State private var editMemoText       = ""
     @State private var showHomeEditor     = false
     @State private var homeKeywordDraft   = ""
+    @State private var showFullTimeline   = false
+    @State private var selectedDate       = LifeLogDay.startOfDay(Date())
     private let refreshTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
+    private var isViewingToday: Bool { LifeLogDay.isToday(selectedDate) }
+
     private var graphEvents: [DayTimelineEvent] {
-        appState.todayTimelineEvents()
+        appState.timelineEvents(for: selectedDate)
+    }
+
+    private var compactEvents: [DayTimelineEvent] {
+        DayTimelineGraph.compactForDisplay(graphEvents)
+    }
+
+    private var displayEvents: [DayTimelineEvent] {
+        showFullTimeline ? graphEvents : compactEvents
+    }
+
+    private var timelineIsCompacted: Bool {
+        !showFullTimeline && DayTimelineGraph.isCompacted(raw: graphEvents, display: compactEvents)
     }
 
     var body: some View {
@@ -85,26 +113,47 @@ struct MacLifeLogView: View {
                 summaryCard
                     .padding(.bottom, 16)
 
-                if !appState.locationSummary.isEmpty {
-                    locationBadge.padding(.bottom, 14)
+                if locationTextForSelectedDay != nil {
+                    locationRouteSection.padding(.bottom, 14)
                 }
 
                 if !graphEvents.isEmpty {
-                    Text("今日の流れ")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.bottom, 8)
+                    HStack(spacing: 8) {
+                        Text(isViewingToday ? "今日の流れ" : "その日の流れ")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        if timelineIsCompacted {
+                            Text("\(graphEvents.count)件 → \(compactEvents.count)件")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.05))
+                                .cornerRadius(4)
+                        }
+                        Spacer()
+                        if graphEvents.count > compactEvents.count || compactEvents.contains(where: { $0.sessionCount > 1 }) {
+                            Button(showFullTimeline ? "まとめて表示" : "すべて表示") {
+                                showFullTimeline.toggle()
+                            }
+                            .font(.system(size: 11))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    .padding(.bottom, 8)
                 }
 
                 if graphEvents.isEmpty {
                     emptyState
                 } else {
-                    ForEach(Array(graphEvents.enumerated()), id: \.element.id) { idx, ev in
+                    ForEach(Array(displayEvents.enumerated()), id: \.element.id) { idx, ev in
                         DayTimelineRowView(
                             event: ev,
-                            isLast: idx == graphEvents.count - 1,
+                            isLast: idx == displayEvents.count - 1,
                             onEditMemo: { id in
-                                if let m = memoStore.todayMemos.first(where: { $0.id == id }) {
+                                guard isViewingToday else { return }
+                                if let m = memoStore.memos(for: selectedDate).first(where: { $0.id == id }) {
                                     editingMemo = m
                                     editMemoText = m.text
                                 }
@@ -118,24 +167,74 @@ struct MacLifeLogView: View {
             .padding(.bottom, 80)
             .frame(maxWidth: 820)
             .frame(maxWidth: .infinity, alignment: .center)
+            .reportMainScrollOffset()
         }
+        .onMainScrollOffsetChange { appState.mainScrollOffset = $0 }
         .ignoresSafeArea(edges: .top)
-        .overlay(alignment: .bottomTrailing) { fab }
+        .overlay(alignment: .bottomTrailing) {
+            if isViewingToday { fab }
+        }
         .sheet(isPresented: $showMemoInput) { memoInputSheet }
         .sheet(item: $editingMemo) { m in memoEditSheet(m) }
         .sheet(isPresented: $showHomeEditor) { homeEditorSheet }
         .onAppear { refresh() }
         .onReceive(refreshTimer) { _ in refresh() }
-        .task { await appState.generateLifelogSummary() }
+        .onChange(of: selectedDate) { _, d in
+            selectedDate = LifeLogDay.startOfDay(d)
+            showFullTimeline = false
+            refresh()
+        }
+        .task(id: isViewingToday) {
+            if isViewingToday {
+                await appState.generateLifelogSummary()
+            }
+        }
+    }
+
+    private var locationTextForSelectedDay: String? {
+        if isViewingToday {
+            guard !appState.locationSummary.isEmpty else { return nil }
+            return appState.resolvedLocationSummary(appState.locationSummary)
+        }
+        guard let r = appState.dayRecord(for: selectedDate), !r.locations.isEmpty else { return nil }
+        return appState.resolvedLocationSummary(r.locations)
+    }
+
+    private var earliestSelectableDate: Date {
+        Calendar.current.date(byAdding: .day, value: -90, to: Date()) ?? selectedDate
     }
 
     private func refresh() {
-        entries = MacActivityLogger.shared.todayEntries()
+        memoStore.reloadTodayIfNeeded()
+        if isViewingToday {
+            entries = MacActivityLogger.shared.todayEntries()
+        } else {
+            entries = MacActivityLogger.loadEntries(for: selectedDate)
+        }
+    }
+
+    private func shiftDay(_ delta: Int) {
+        guard let next = Calendar.current.date(byAdding: .day, value: delta, to: selectedDate) else { return }
+        let clamped = min(LifeLogDay.startOfDay(next), LifeLogDay.startOfDay(Date()))
+        guard clamped >= LifeLogDay.startOfDay(earliestSelectableDate) else { return }
+        selectedDate = clamped
+    }
+
+    private var canGoForward: Bool { !isViewingToday }
+    private var canGoBack: Bool {
+        selectedDate > LifeLogDay.startOfDay(earliestSelectableDate)
     }
 
     // MARK: - Subviews
 
     private var summaryCard: some View {
+        Group {
+            if isViewingToday { todaySummaryCard }
+            else { pastDaySummaryCard }
+        }
+    }
+
+    private var todaySummaryCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: "sparkles")
@@ -173,31 +272,108 @@ struct MacLifeLogView: View {
                 .buttonStyle(.plain)
             } else {
                 Text(appState.lifelogSummary)
-                    .font(.system(size: 13))
+                    .font(.system(size: SummaryTypography.bodySize))
                     .foregroundStyle(.primary)
+                    .lineSpacing(SummaryTypography.bodyLineSpacing)
                     .fixedSize(horizontal: false, vertical: true)
                 if appState.lifelogSummaryAt > 0 {
                     let tf = DateFormatter(); let _ = { tf.dateFormat = "HH:mm" }()
                     Text(tf.string(from: Date(timeIntervalSince1970: appState.lifelogSummaryAt)) + " に生成")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
             }
         }
-        .padding(12)
+        .padding(.vertical, 14)
+        .padding(.horizontal, 22)
         .background(Color.purple.opacity(0.05))
         .cornerRadius(10)
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.purple.opacity(0.15), lineWidth: 1))
+    }
+
+    private var pastDaySummaryCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "calendar")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Text("その日の記録")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            if let text = pastDaySummaryText {
+                Text(text)
+                    .font(.system(size: SummaryTypography.bodySize))
+                    .foregroundStyle(.primary)
+                    .lineSpacing(SummaryTypography.bodyLineSpacing)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Mac作業ログまたは iOS からの健康・位置データがある日を表示します。")
+                    .font(.system(size: SummaryTypography.bodySize))
+                    .foregroundStyle(.tertiary)
+                    .lineSpacing(SummaryTypography.bodyLineSpacing)
+            }
+        }
+        .padding(.vertical, 14)
+        .padding(.horizontal, 22)
+        .background(Color.primary.opacity(0.03))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+    }
+
+    private var pastDaySummaryText: String? {
+        var parts: [String] = []
+        if let r = appState.dayRecord(for: selectedDate) {
+            if let s = r.steps { parts.append("歩数 \(s)歩") }
+            if let e = r.activeEnergyKcal { parts.append("\(e)kcal") }
+            if let sh = r.sleepHours { parts.append(String(format: "睡眠 %.1fh", sh)) }
+            if !r.locations.isEmpty { parts.append("場所: \(appState.resolvedLocationSummary(r.locations))") }
+            if !r.photos.isEmpty { parts.append("写真: \(r.photos)") }
+        }
+        let macCount = MacActivityLogger.loadEntries(for: selectedDate).count
+        if macCount > 0 { parts.append("Mac作業 \(macCount)件") }
+        let memoCount = memoStore.memos(for: selectedDate).count
+        if memoCount > 0 { parts.append("メモ \(memoCount)件") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private var dateHeader: some View {
         let df = DateFormatter()
         df.locale = Locale(identifier: "ja_JP")
         df.dateFormat = "M月d日(EEEE)"
-        return HStack {
-            Text(df.string(from: Date()))
-                .font(.system(size: 22, weight: .bold))
+        return HStack(spacing: 12) {
+            Button { shiftDay(-1) } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(canGoBack ? Color.primary : Color.secondary.opacity(0.35))
+            .disabled(!canGoBack)
+
+            HStack(spacing: 8) {
+                Text(df.string(from: selectedDate))
+                    .font(.system(size: 28, weight: .bold))
+                if isViewingToday {
+                    Text("今日")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.12))
+                        .cornerRadius(4)
+                }
+            }
+
+            Button { shiftDay(1) } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(canGoForward ? Color.primary : Color.secondary.opacity(0.35))
+            .disabled(!canGoForward)
+
             Spacer()
+
             Button { refresh() } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 13))
@@ -207,38 +383,40 @@ struct MacLifeLogView: View {
         }
     }
 
-    private var locationBadge: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "location.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.blue)
-                Text(appState.resolvedLocationSummary(appState.locationSummary))
-                    .font(.system(size: 12))
+    private var locationRouteSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("外出ルート", systemImage: "map")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(Color.blue.opacity(0.07))
-            .cornerRadius(8)
-
-            // 自宅登録ボタン
-            Button {
-                homeKeywordDraft = appState.homeLocationKeyword
-                showHomeEditor = true
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: appState.homeLocationKeyword.isEmpty ? "house" : "house.fill")
-                        .font(.system(size: 11))
-                    Text(appState.homeLocationKeyword.isEmpty ? "自宅を登録" : "自宅設定済み")
-                        .font(.system(size: 11))
+                Spacer()
+                if isViewingToday, appState.homeLocationKeyword.isEmpty {
+                    Button {
+                        homeKeywordDraft = appState.homeLocationKeyword
+                        showHomeEditor = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "house")
+                                .font(.system(size: 11))
+                            Text("自宅を登録")
+                                .font(.system(size: 11))
+                        }
+                        .foregroundStyle(Color.secondary)
+                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.05))
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .foregroundStyle(appState.homeLocationKeyword.isEmpty ? Color.secondary : Color.blue)
-                .padding(.horizontal, 8).padding(.vertical, 5)
-                .background(Color.primary.opacity(0.05))
-                .cornerRadius(8)
             }
-            .buttonStyle(.plain)
+
+            if let summary = locationTextForSelectedDay {
+                LocationDayRouteView(
+                    summary: summary,
+                    points: isViewingToday ? appState.locationPoints : [],
+                    mapHeight: 240
+                )
+            }
         }
     }
 
@@ -303,8 +481,15 @@ struct MacLifeLogView: View {
         VStack(spacing: 12) {
             Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 36)).foregroundStyle(.tertiary)
-            Text("まだアクティビティがありません")
+            Text(isViewingToday ? "まだアクティビティがありません" : "この日の記録はありません")
                 .font(.system(size: 14)).foregroundStyle(.secondary)
+            if !isViewingToday {
+                Text("Mac作業ログは日ごとに保存されます。iOS 連携データは dailyHistory に記録された日のみ表示されます。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
         }
         .frame(maxWidth: .infinity).padding(.top, 60)
     }
@@ -342,6 +527,9 @@ struct MacLifeLogView: View {
             }
             .padding()
             Divider()
+            Text("体重は「65.2kg」「体重 65.2」のように書くと Health / 履歴に記録されます")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .padding(.horizontal, 12).padding(.bottom, 4)
             TextEditor(text: $newMemoText)
                 .font(.system(size: 14))
                 .frame(minHeight: 120)

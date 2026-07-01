@@ -17,7 +17,13 @@ struct DayTimelineRowView: View {
         switch event.kind {
         case "hermes":   return "brain.head.profile"
         case "mac":      return "menubar.dock.rectangle"
-        case "memo":     return "note.text"
+        case "memo":
+            switch event.label {
+            case "共有リンク": return "link"
+            case "写真": return "photo.fill"
+            case "動画": return "video.fill"
+            default: return "note.text"
+            }
         case "health":   return "heart.fill"
         case "location": return "location.fill"
         case "photo":    return "photo.fill"
@@ -67,6 +73,11 @@ struct DayTimelineRowView: View {
                         .foregroundStyle(dotColor)
                     Text(event.label)
                         .font(.system(size: 13, weight: .medium))
+                    if event.sessionCount <= 1, let d = event.duration, d >= 60 {
+                        Text(DayTimelineGraph.formatDuration(d))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
                     if memoId != nil {
                         Spacer()
                         Button("編集") {
@@ -81,7 +92,7 @@ struct DayTimelineRowView: View {
                     Text(event.detail)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                        .lineLimit(3)
+                        .lineLimit(event.sessionCount > 1 ? 1 : 3)
                 }
             }
             .padding(.leading, 8)

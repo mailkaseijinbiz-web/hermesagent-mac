@@ -73,6 +73,27 @@ final class MacActivityLogger {
         try PrivateStore.saveData(data, key: activityStoreKey(for: date))
     }
 
+    /// Day keys (`yyyy-MM-dd`) with saved Mac activity (encrypted or legacy JSON).
+    static nonisolated func storedActivityDayKeys() -> [String] {
+        let home = NSHomeDirectory()
+        let prefix = "mac-activity-"
+        var keys = Set<String>()
+
+        let privateDir = URL(fileURLWithPath: home).appendingPathComponent(".hermes/private")
+        if let files = try? FileManager.default.contentsOfDirectory(atPath: privateDir.path) {
+            for name in files where name.hasPrefix(prefix) && name.hasSuffix(".enc") {
+                keys.insert(String(name.dropFirst(prefix.count).dropLast(4)))
+            }
+        }
+        let hermesDir = URL(fileURLWithPath: home).appendingPathComponent(".hermes")
+        if let files = try? FileManager.default.contentsOfDirectory(atPath: hermesDir.path) {
+            for name in files where name.hasPrefix(prefix) && name.hasSuffix(".json") {
+                keys.insert(String(name.dropFirst(prefix.count).dropLast(5)))
+            }
+        }
+        return Array(keys)
+    }
+
     func start() {
         loadToday()
         NSWorkspace.shared.notificationCenter.addObserver(
