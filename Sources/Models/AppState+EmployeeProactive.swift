@@ -88,6 +88,7 @@ extension AppState {
         let hour = Calendar.current.component(.hour, from: Date())
         let pending = workTasks.filter { $0.assigneeId == employeeId && $0.status != .done }
         proactiveSendPrompt = EmployeeProactivePrompt.checkIn(for: emp, pendingTasks: pending, hour: hour)
+        proactivePushSessionId = currentSessionId
         bypassCommandIntercept = true
         inputValue = "（能動チェックイン）"
         handleSendMessage()

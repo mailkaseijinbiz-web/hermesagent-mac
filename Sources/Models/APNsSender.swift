@@ -22,6 +22,7 @@ actor APNsSender {
     /// BadDeviceToken) so the caller can purge them.
     @discardableResult
     func send(to deviceTokens: [String], title: String, body: String, sessionId: String?,
+              proactive: Bool = false,
               badges: [String: Int] = [:], config: Config) async -> [String] {
         guard !deviceTokens.isEmpty,
               !config.keyId.isEmpty, !config.teamId.isEmpty,
@@ -40,6 +41,7 @@ actor APNsSender {
             if let badge = badges[token] { aps["badge"] = badge }
             var payload: [String: Any] = ["aps": aps]
             if let sid = sessionId { payload["sessionId"] = sid }
+            if proactive { payload["proactive"] = true }
             guard let bodyData = try? JSONSerialization.data(withJSONObject: payload) else { continue }
 
             guard let url = URL(string: "https://\(host)/3/device/\(token)") else { continue }

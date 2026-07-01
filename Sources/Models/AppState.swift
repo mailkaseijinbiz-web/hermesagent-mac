@@ -422,6 +422,8 @@ class AppState: ObservableObject {
     private var permissionCont: CheckedContinuation<String?, Never>? = nil
     // Polls every 5 min for due proactive employee check-ins (see AppState+EmployeeProactive.swift).
     var proactiveSchedulerTimer: Timer?
+    /// Session id for an in-flight proactive check-in — bypasses pushOnlyAutomations once.
+    var proactivePushSessionId: String?
     // Registered iOS device tokens (from /api/push/register)
     @Published var pushDeviceTokens: [String] = UserDefaults.standard.stringArray(forKey: "pushDeviceTokens") ?? [] {
         didSet { UserDefaults.standard.set(pushDeviceTokens, forKey: "pushDeviceTokens") }
@@ -1760,15 +1762,19 @@ class AppState: ObservableObject {
         guard let m = StateDB.shared.latestAssistantMessage(), m.id > previous else { return }
 
         // Notification filtering: when "automations only" is on, skip interactive
-        // (cli) chats and only push cron/slack/whatsapp-originated replies.
-        if pushOnlyAutomations {
+        // (cli) chats and only push cron/slack/whatsapp-originated replies — except
+        // proactive employee check-ins (flagged before streaming starts).
+        let isProactive = m.sessionId == proactivePushSessionId
+        if pushOnlyAutomations && !isProactive {
             let source = StateDB.shared.sessions().first { $0.id == m.sessionId }?.source ?? ""
             if source.isEmpty || source == "cli" { return }
         }
+        if isProactive { proactivePushSessionId = nil }
         sendPushIfEnabled(
             title: pushNotificationTitle(sessionId: m.sessionId),
             body: pushNotificationBody(rawContent: m.content, sessionId: m.sessionId),
-            sessionId: m.sessionId
+            sessionId: m.sessionId,
+            proactive: isProactive
         )
     }
 
@@ -1823,7 +1829,7 @@ class AppState: ObservableObject {
         return p.sessionId == sessionId && Date().timeIntervalSince(p.ts) < 30
     }
 
-    func sendPushIfEnabled(title: String, body: String, sessionId: String?) {
+    func sendPushIfEnabled(title: String, body: String, sessionId: String?, proactive: Bool = false) {
         guard apnsEnabled, !apnsKeyId.isEmpty, !apnsKeyPath.isEmpty, !apnsTeamId.isEmpty, !pushDeviceTokens.isEmpty else { return }
         let cfg = APNsSender.Config(
             keyPath: apnsKeyPath, keyId: apnsKeyId, teamId: apnsTeamId,
@@ -1841,7 +1847,8 @@ class AppState: ObservableObject {
         let badges = deviceBadge.filter { tokens.contains($0.key) }
         Task { [weak self] in
             let invalid = await APNsSender.shared.send(to: tokens, title: title, body: body,
-                                                       sessionId: sessionId, badges: badges, config: cfg)
+                                                       sessionId: sessionId, proactive: proactive,
+                                                       badges: badges, config: cfg)
             if !invalid.isEmpty {
                 await MainActor.run {
                     self?.pushDeviceTokens.removeAll { invalid.contains($0) }
