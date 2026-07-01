@@ -125,6 +125,8 @@ enum PrivateStoreKeys {
         "locationDaily",
         "photoDaily",
         "lifelogDaily",
+        "briefDaily",
+        "weeklyReviewDaily",
         "homeLocationKeyword",
         "weightRecords",
         "hba1cRecords"

@@ -4,6 +4,18 @@
 
 ---
 
+## 📅 2026-07-01 更新ログ
+
+**`cursor/intention-cards` ブランチで完了**
+- ✅ **B3/B4**：意図カード（Intention）Mac/iOS パリティ＋ウィジェット連携
+- ✅ **C**：高機微 PII の PrivateStore 暗号化（`locationDaily` / `photoDaily` / `lifelogDaily` 等）
+- ✅ **D1**：`dailyBrief` / `weeklyReview` を `briefDaily` / `weeklyReviewDaily` へ暗号化移行（UserDefaults → PrivateStore、起動時マイグレーション）
+- ✅ **D2**：cron `lastError` を Mobile API JSON に追加、iOS オートメーション行にオレンジ表示
+- ✅ **D3**：iOS `HermesAgentLogicTests` ターゲット＋CI `xcodebuild test`（JSON デコード回帰）
+- Mac テスト 107 funcs（+4）、iOS テスト 4 funcs 新設、両リポ CI green
+
+---
+
 ## 📅 2026-06-30 更新ログ（夕方・第2回）
 
 **前回（本日午前の記載）から進んだこと**

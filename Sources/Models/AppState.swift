@@ -586,11 +586,15 @@ class AppState: ObservableObject {
     // MARK: - Lifelog
 
     // Weekly metacognitive review (pattern detection over dailyHistory). Persisted.
-    @Published var weeklyReview: String = UserDefaults.standard.string(forKey: "weeklyReview") ?? "" {
-        didSet { UserDefaults.standard.set(weeklyReview, forKey: "weeklyReview") }
+    @Published var weeklyReview: String = AppState.loadDailyText(
+        storeKey: "weeklyReviewDaily", legacyTextKey: "weeklyReview", legacyAtKey: "weeklyReviewAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: weeklyReview, at: weeklyReviewAt, storeKey: "weeklyReviewDaily") }
     }
-    @Published var weeklyReviewAt: Double = UserDefaults.standard.double(forKey: "weeklyReviewAt") {
-        didSet { UserDefaults.standard.set(weeklyReviewAt, forKey: "weeklyReviewAt") }
+    @Published var weeklyReviewAt: Double = AppState.loadDailyText(
+        storeKey: "weeklyReviewDaily", legacyTextKey: "weeklyReview", legacyAtKey: "weeklyReviewAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: weeklyReview, at: weeklyReviewAt, storeKey: "weeklyReviewDaily") }
     }
     @Published var isGeneratingReview = false
 
@@ -752,11 +756,15 @@ class AppState: ObservableObject {
 
     // Dashboard daily brief: an AI-written narrative summary of today, persisted with its
     // timestamp so the dashboard can show "as of HH:mm" and auto-refresh when stale.
-    @Published var dailyBrief: String = UserDefaults.standard.string(forKey: "dailyBrief") ?? "" {
-        didSet { UserDefaults.standard.set(dailyBrief, forKey: "dailyBrief") }
+    @Published var dailyBrief: String = AppState.loadDailyText(
+        storeKey: "briefDaily", legacyTextKey: "dailyBrief", legacyAtKey: "dailyBriefAt"
+    ).text {
+        didSet { AppState.saveDailyText(text: dailyBrief, at: dailyBriefAt, storeKey: "briefDaily") }
     }
-    @Published var dailyBriefAt: Double = UserDefaults.standard.double(forKey: "dailyBriefAt") {
-        didSet { UserDefaults.standard.set(dailyBriefAt, forKey: "dailyBriefAt") }
+    @Published var dailyBriefAt: Double = AppState.loadDailyText(
+        storeKey: "briefDaily", legacyTextKey: "dailyBrief", legacyAtKey: "dailyBriefAt"
+    ).updatedAt {
+        didSet { AppState.saveDailyText(text: dailyBrief, at: dailyBriefAt, storeKey: "briefDaily") }
     }
     @Published var isGeneratingBrief: Bool = false
 
@@ -3226,7 +3234,8 @@ class AppState: ObservableObject {
         await fetchCronJobs()
         return cronJobs.map { j in
             ["id": j.id, "name": j.name, "schedule": j.schedule, "deliver": j.deliver,
-             "status": j.status, "nextRun": j.nextRun, "script": j.script ?? "", "lastRun": j.lastRun ?? ""]
+             "status": j.status, "nextRun": j.nextRun, "script": j.script ?? "", "lastRun": j.lastRun ?? "",
+             "lastError": j.lastError ?? ""]
         }
     }
 
