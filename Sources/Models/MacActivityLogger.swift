@@ -25,6 +25,31 @@ struct MacActivityEntry: Codable, Identifiable {
 final class MacActivityLogger {
     static let shared = MacActivityLogger()
 
+    private static let enabledKey = "macActivityLoggingEnabled"
+
+    /// User-toggle for Mac activity logging (default true for backward compatibility).
+    static nonisolated var isEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: enabledKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: enabledKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
+    }
+
+    /// Whether this process has Accessibility permission (needed for browser URL logging).
+    static nonisolated var isAccessibilityTrusted: Bool {
+        AXIsProcessTrusted()
+    }
+
+    /// Prompt for Accessibility permission and open System Settings → Privacy → Accessibility.
+    static nonisolated func requestAccessibilityPermission() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     private let minDuration: TimeInterval = 30
     private let browserBundles: Set<String> = [
         "com.google.Chrome",
@@ -42,6 +67,8 @@ final class MacActivityLogger {
     private var currentWindowTitle:  String = ""
     private var currentURL:          String = ""
     private var pollTimer:           Timer? = nil
+    private var workspaceObserver:   NSObjectProtocol? = nil
+    private var isRunning = false
 
     static nonisolated func activityStoreKey(for date: Date = Date()) -> String {
         let f = DateFormatter()
@@ -95,8 +122,11 @@ final class MacActivityLogger {
     }
 
     func start() {
+        guard Self.isEnabled else { return }
+        guard !isRunning else { return }
+        isRunning = true
         loadToday()
-        NSWorkspace.shared.notificationCenter.addObserver(
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
         ) { [weak self] note in
@@ -113,9 +143,23 @@ final class MacActivityLogger {
         }
     }
 
+    /// Stop monitoring, flush the in-progress session, and tear down observers.
+    func stop() {
+        guard isRunning else { return }
+        flushCurrentSession()
+        pollTimer?.invalidate()
+        pollTimer = nil
+        if let obs = workspaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(obs)
+            workspaceObserver = nil
+        }
+        isRunning = false
+    }
+
     /// Hermes チャットが完了（返答が来た）したときに呼ぶ。
     func recordHermesSession(employeeName: String, sessionTitle: String,
                              start: Date, end: Date) {
+        guard Self.isEnabled else { return }
         let dur = end.timeIntervalSince(start)
         guard dur >= minDuration else { return }
         var entry = MacActivityEntry()
@@ -172,6 +216,7 @@ final class MacActivityLogger {
     // MARK: - アプリ切り替え
 
     private func onActivate(_ app: NSRunningApplication) {
+        guard Self.isEnabled else { return }
         guard app.activationPolicy == .regular else { return }
         let bundle = app.bundleIdentifier ?? ""
         let name   = app.localizedName ?? bundle.components(separatedBy: ".").last ?? "不明"
@@ -214,6 +259,7 @@ final class MacActivityLogger {
     // MARK: - ポーリング（ブラウザのタブ切り替え検知）
 
     private func pollCurrentSession() {
+        guard Self.isEnabled else { return }
         guard currentStart != nil, !currentApp.isEmpty else { return }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == currentPID else { return }
         let pid = currentPID
@@ -332,6 +378,38 @@ final class MacActivityLogger {
     /// 今日のキャッシュファイルをディスクから直接読む（ブリーフ文脈用途）。
     nonisolated func todayEntriesFromDisk() -> [MacActivityEntry] {
         Self.loadEntries()
+    }
+
+    /// Close and persist the in-progress app session (if long enough).
+    private func flushCurrentSession() {
+        guard let start = currentStart, !currentApp.isEmpty else {
+            currentApp = ""
+            currentBundle = ""
+            currentPID = 0
+            currentStart = nil
+            currentWindowTitle = ""
+            currentURL = ""
+            return
+        }
+        let dur = Date().timeIntervalSince(start)
+        if dur >= minDuration {
+            var entry = MacActivityEntry()
+            entry.appName     = currentApp
+            entry.bundleId    = currentBundle.isEmpty ? nil : currentBundle
+            entry.windowTitle = currentWindowTitle.isEmpty ? nil : currentWindowTitle
+            entry.url         = currentURL.isEmpty ? nil : currentURL
+            entry.label       = Self.buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
+            entry.startTime   = start.timeIntervalSince1970
+            entry.endTime     = Date().timeIntervalSince1970
+            mergeOrAppend(entry)
+            saveToday()
+        }
+        currentApp = ""
+        currentBundle = ""
+        currentPID = 0
+        currentStart = nil
+        currentWindowTitle = ""
+        currentURL = ""
     }
 
     // MARK: - 永続化（日次）

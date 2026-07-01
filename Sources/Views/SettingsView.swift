@@ -423,6 +423,50 @@ struct SettingsModal: View {
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 18) {
             updateCard
+            macActivityLoggingCard
+        }
+    }
+
+    @AppStorage("macActivityLoggingEnabled") private var macActivityLoggingEnabled = true
+
+    private var macActivityLoggingCard: some View {
+        card(title: "プライバシーとライフログ") {
+            Toggle(isOn: $macActivityLoggingEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Mac作業ログを記録").font(.system(size: 13, weight: .medium))
+                    Text("使用中のアプリ名とブラウザのURLを日次で記録し、ライフログに表示します。")
+                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
+                }
+            }
+            .toggleStyle(.switch)
+            .onChange(of: macActivityLoggingEnabled) { _, enabled in
+                MacActivityLogger.isEnabled = enabled
+                if enabled {
+                    MacActivityLogger.shared.start()
+                } else {
+                    MacActivityLogger.shared.stop()
+                }
+            }
+
+            if macActivityLoggingEnabled && !MacActivityLogger.isAccessibilityTrusted {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.system(size: 12))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("アクセシビリティの許可が必要です")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("ブラウザのURLを記録するには、システム設定で Hermes にアクセシビリティを許可してください。")
+                            .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(nil)
+                        Button("アクセシビリティ設定を開く") {
+                            MacActivityLogger.requestAccessibilityPermission()
+                        }
+                        .font(.system(size: 11))
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .padding(.top, 4)
+            }
         }
     }
 

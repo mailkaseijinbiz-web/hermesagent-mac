@@ -23,8 +23,10 @@ struct HermesCustomApp: App {
                 .frame(minWidth: 1000, minHeight: 650)
                 .background(VisualEffectView(material: .sidebar, blendingMode: .withinWindow))
                 .task {
-                    // Mac アプリ使用記録を開始（NSWorkspace アクティビティ監視）
-                    MacActivityLogger.shared.start()
+                    // Mac アプリ使用記録を開始（設定で無効化可能）
+                    if MacActivityLogger.isEnabled {
+                        MacActivityLogger.shared.start()
+                    }
 
                     // Auto version-up: check the git remote on launch (+ every 6h). When a
                     // new version exists, the auto-update toggle applies it, else we notify.

@@ -2,6 +2,31 @@ import XCTest
 @testable import HermesCustom
 
 final class MacActivityLoggerTests: XCTestCase {
+    func testIsEnabledDefaultsToTrueWhenUnset() {
+        let key = "macActivityLoggingEnabled"
+        let prior = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let prior { UserDefaults.standard.set(prior, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        UserDefaults.standard.removeObject(forKey: key)
+        XCTAssertTrue(MacActivityLogger.isEnabled)
+    }
+
+    func testIsEnabledPersistsToUserDefaults() {
+        let key = "macActivityLoggingEnabled"
+        let prior = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let prior { UserDefaults.standard.set(prior, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        MacActivityLogger.isEnabled = false
+        XCTAssertFalse(UserDefaults.standard.bool(forKey: key))
+        XCTAssertFalse(MacActivityLogger.isEnabled)
+        MacActivityLogger.isEnabled = true
+        XCTAssertTrue(MacActivityLogger.isEnabled)
+    }
+
     func testBuildLabelUsesAppNameWhenTitleIsEmpty() {
         XCTAssertEqual(MacActivityLogger.buildLabel(appName: "Safari", windowTitle: ""), "Safari")
     }
