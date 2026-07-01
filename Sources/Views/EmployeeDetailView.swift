@@ -75,7 +75,7 @@ struct EmployeeDetailView: View {
             // Employee gone (e.g. fired) — bounce back to the roster.
             VStack(spacing: 12) {
                 Text("社員が見つかりません").font(.system(size: 14, weight: .medium)).foregroundColor(.secondary)
-                Button("会社に戻る") { appState.view = "company" }.buttonStyle(.plain).foregroundColor(.blue)
+                Button("社員に戻る") { appState.view = "company" }.buttonStyle(.plain).foregroundColor(.blue)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -1048,7 +1048,7 @@ struct EmployeeSidePanel: View {
                 .font(.system(size: 11)).foregroundColor(.secondary.opacity(0.8))
                 .multilineTextAlignment(.center).frame(maxWidth: 220)
             Button { appState.view = "company" } label: {
-                Text("会社（AI社員）を開く").font(.system(size: 11, weight: .semibold)).foregroundColor(.blue)
+                Text("社員を開く").font(.system(size: 11, weight: .semibold)).foregroundColor(.blue)
             }.buttonStyle(.plain)
             Spacer()
         }

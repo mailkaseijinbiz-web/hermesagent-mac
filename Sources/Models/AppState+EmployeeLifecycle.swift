@@ -77,6 +77,34 @@ extension AppState {
         }
     }
 
+    /// Soft-archive: hide from roster/sidebar; data and assignments are kept.
+    func archiveEmployee(_ id: String) {
+        guard let idx = employees.firstIndex(where: { $0.id == id }), !employees[idx].isArchived else { return }
+        let name = employees[idx].name
+        employees[idx].archived = true
+        employees[idx].proactiveEnabled = false
+        employees[idx].updatedAt = Date().timeIntervalSince1970
+        if activeEmployeeId == id { switchEmployee(nil) }
+        triggerToast(message: "「\(name)」をアーカイブしました")
+    }
+
+    func unarchiveEmployee(_ id: String) {
+        guard let idx = employees.firstIndex(where: { $0.id == id }), employees[idx].isArchived else { return }
+        let name = employees[idx].name
+        employees[idx].archived = false
+        employees[idx].updatedAt = Date().timeIntervalSince1970
+        triggerToast(message: "「\(name)」のアーカイブを解除しました")
+    }
+
+    func toggleProactiveEmployee(_ id: String) {
+        guard let idx = employees.firstIndex(where: { $0.id == id }),
+              !employees[idx].isArchived else { return }
+        employees[idx].proactiveEnabled = !employees[idx].isProactiveEnabled
+        employees[idx].updatedAt = Date().timeIntervalSince1970
+        let on = employees[idx].isProactiveEnabled
+        triggerToast(message: on ? "「\(employees[idx].name)」が能動的に話しかけます" : "能動連絡をオフにしました")
+    }
+
     private func deleteCloudEmployee(_ id: String) async {
         guard let base = supabaseBase,
               let url = URL(string: "\(base)/rest/v1/employees?id=eq.\(id)") else { return }

@@ -170,7 +170,8 @@ extension AppState {
     /// Sidebar order: pinned employees float to the top, preserving the stored (drag-drop)
     /// order within each group.
     var sidebarEmployees: [Employee] {
-        employees.filter { $0.isPinned } + employees.filter { !$0.isPinned }
+        let active = employees.filter { !$0.isArchived }
+        return active.filter { $0.isPinned } + active.filter { !$0.isPinned }
     }
 
     /// Toggle an employee's sidebar pin (kebab menu → ピン留め).
