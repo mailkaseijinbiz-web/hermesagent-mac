@@ -24,10 +24,10 @@ enum WeightRecordStore {
 
     @discardableResult
     static func append(kg: Double, at date: Date = Date(), memoId: String? = nil, source: String = "memo") -> WeightRecord? {
-        guard let normalized = normalize(kg) else { return nil }
+        guard normalize(kg) != nil else { return nil }
         if let memoId, all().contains(where: { $0.memoId == memoId }) { return nil }
         var records = all()
-        let record = WeightRecord(kg: kg, recordedAt: date.timeIntervalSince1970, memoId: memoId, source: source)
+        let record = WeightRecord(kg: (kg * 10).rounded() / 10, recordedAt: date.timeIntervalSince1970, memoId: memoId, source: source)
         records.append(record)
         if records.count > maxRecords {
             records.removeFirst(records.count - maxRecords)

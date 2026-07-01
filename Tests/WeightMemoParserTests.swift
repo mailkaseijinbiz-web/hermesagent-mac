@@ -3,6 +3,11 @@ import XCTest
 
 final class WeightMemoParserTests: XCTestCase {
 
+    override func tearDown() {
+        PrivateStore.remove(key: "weightRecords")
+        super.tearDown()
+    }
+
     func testParseWeightWithKgSuffix() {
         XCTAssertEqual(WeightMemoParser.parse("65.2kg"), 65.2)
         XCTAssertEqual(WeightMemoParser.parse("今日 68kg"), 68.0)
@@ -20,7 +25,7 @@ final class WeightMemoParserTests: XCTestCase {
 
     @MainActor
     func testAppendToStoreAndDedupeMemoId() {
-        let memoId = "memo-test-1"
+        let memoId = "memo-test-\(UUID().uuidString)"
         XCTAssertNotNil(WeightRecordStore.append(kg: 65.4, memoId: memoId))
         XCTAssertNil(WeightRecordStore.append(kg: 66.0, memoId: memoId))
         XCTAssertEqual(WeightRecordStore.latest()?.kg, 65.4)
