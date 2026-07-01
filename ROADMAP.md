@@ -15,7 +15,7 @@
 - ✅ **E1**：`AppState+Automation` へ cron 管理ロジック分離、`HermesCronJobParser` 抽出＋テスト
 - ✅ **E2**：配信失敗デッドレターキュー（`FailedDeliveryStore`・暗号化永続化・オートメーション UI）
 - ✅ **E3**：`MacLifeLogView` にライフログ記録インジケータ（記録中 / 記録オフ）
-- Mac テスト 107 funcs（+4）、iOS テスト 4 funcs 新設、両リポ CI green
+- Mac テスト 115 funcs（+8）、iOS テスト 4 funcs 新設、両リポ CI green
 
 ---
 
