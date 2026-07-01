@@ -129,6 +129,7 @@ enum PrivateStoreKeys {
         "weeklyReviewDaily",
         "homeLocationKeyword",
         "weightRecords",
-        "hba1cRecords"
+        "hba1cRecords",
+        "failedDeliveries"
     ]
 }

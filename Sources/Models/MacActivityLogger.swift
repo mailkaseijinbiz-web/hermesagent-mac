@@ -68,7 +68,10 @@ final class MacActivityLogger {
     private var currentURL:          String = ""
     private var pollTimer:           Timer? = nil
     private var workspaceObserver:   NSObjectProtocol? = nil
-    private var isRunning = false
+    private(set) var isRunning = false
+
+    /// Whether the logger is actively monitoring app switches / polling browser tabs.
+    var isActivelyRecording: Bool { isRunning }
 
     static nonisolated func activityStoreKey(for date: Date = Date()) -> String {
         let f = DateFormatter()

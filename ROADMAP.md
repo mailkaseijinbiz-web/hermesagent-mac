@@ -12,6 +12,9 @@
 - ✅ **D1**：`dailyBrief` / `weeklyReview` を `briefDaily` / `weeklyReviewDaily` へ暗号化移行（UserDefaults → PrivateStore、起動時マイグレーション）
 - ✅ **D2**：cron `lastError` を Mobile API JSON に追加、iOS オートメーション行にオレンジ表示
 - ✅ **D3**：iOS `HermesAgentLogicTests` ターゲット＋CI `xcodebuild test`（JSON デコード回帰）
+- ✅ **E1**：`AppState+Automation` へ cron 管理ロジック分離、`HermesCronJobParser` 抽出＋テスト
+- ✅ **E2**：配信失敗デッドレターキュー（`FailedDeliveryStore`・暗号化永続化・オートメーション UI）
+- ✅ **E3**：`MacLifeLogView` にライフログ記録インジケータ（記録中 / 記録オフ）
 - Mac テスト 107 funcs（+4）、iOS テスト 4 funcs 新設、両リポ CI green
 
 ---

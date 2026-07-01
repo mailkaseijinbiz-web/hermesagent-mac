@@ -29,6 +29,7 @@ final class PrivateStoreTests: XCTestCase {
         XCTAssertTrue(PrivateStoreKeys.all.contains("locationDaily"))
         XCTAssertTrue(PrivateStoreKeys.all.contains("photoDaily"))
         XCTAssertTrue(PrivateStoreKeys.all.contains("lifelogDaily"))
+        XCTAssertTrue(PrivateStoreKeys.all.contains("failedDeliveries"))
     }
 
     func testDailyTextSnapshotRoundTrip() throws {

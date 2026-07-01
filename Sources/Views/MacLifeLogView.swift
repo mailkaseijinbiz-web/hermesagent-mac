@@ -363,6 +363,7 @@ struct MacLifeLogView: View {
                         .background(Color.accentColor.opacity(0.12))
                         .cornerRadius(4)
                 }
+                lifelogRecordingIndicator
             }
 
             Button { shiftDay(1) } label: {
@@ -381,6 +382,37 @@ struct MacLifeLogView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+        }
+    }
+
+    @ViewBuilder
+    private var lifelogRecordingIndicator: some View {
+        if isViewingToday {
+            if MacActivityLogger.isEnabled && MacActivityLogger.shared.isActivelyRecording {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 6, height: 6)
+                    Text("記録中")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Color.green.opacity(0.1))
+                .clipShape(Capsule())
+            } else if !MacActivityLogger.isEnabled {
+                Button { appState.openSettings(section: "一般") } label: {
+                    Text("記録オフ")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary.opacity(0.7))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color.primary.opacity(0.05))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
