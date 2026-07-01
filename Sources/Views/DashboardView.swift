@@ -478,8 +478,7 @@ struct DashboardView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(appState.weeklyReview).font(.system(size: 13)).foregroundColor(.primary)
-                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        NewsProseView(text: appState.weeklyReview, context: .weeklyReview)
                         if appState.weeklyReviewAt > 0 {
                             Text(Self.stampFmt.string(from: Date(timeIntervalSince1970: appState.weeklyReviewAt)))
                                 .font(.system(size: 10)).foregroundColor(.secondary)

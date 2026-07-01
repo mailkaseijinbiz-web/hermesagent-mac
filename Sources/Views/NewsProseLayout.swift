@@ -6,6 +6,14 @@ enum NewsProseBlock: Equatable {
     case heading(String)
     case bullet(String)
     case spacer
+    case serendipityHeading(String)
+    case serendipityCard(String)
+}
+
+/// Parsing context — weekly reviews enable serendipity section detection.
+enum NewsProseContext: Equatable {
+    case brief
+    case weeklyReview
 }
 
 /// Parses plain-text daily briefs and weekly reviews into structured blocks.
@@ -15,14 +23,17 @@ enum NewsProseParser {
         "今日の提案", "気づき", "来週への提案", "振り返り", "つながり", "まとめ", "提案", "所感", "来週", "今週"
     ]
 
-    static func parse(_ text: String) -> [NewsProseBlock] {
+    static func parse(_ text: String, context: NewsProseContext = .brief) -> [NewsProseBlock] {
         var blocks: [NewsProseBlock] = []
         var paragraphLines: [String] = []
+        var inSerendipity = false
 
         func flushParagraph() {
             let joined = paragraphLines.joined(separator: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !joined.isEmpty { blocks.append(.paragraph(joined)) }
+            if !joined.isEmpty {
+                blocks.append(inSerendipity ? .serendipityCard(joined) : .paragraph(joined))
+            }
             paragraphLines = []
         }
 
@@ -36,13 +47,20 @@ enum NewsProseParser {
 
             if let bullet = bulletText(line) {
                 flushParagraph()
-                blocks.append(.bullet(bullet))
+                blocks.append(inSerendipity ? .serendipityCard(bullet) : .bullet(bullet))
                 continue
             }
 
             if isHeading(line) {
                 flushParagraph()
-                blocks.append(.heading(cleanHeading(line)))
+                let title = cleanHeading(line)
+                if isSerendipityHeading(title, context: context) {
+                    inSerendipity = true
+                    blocks.append(.serendipityHeading(title))
+                } else {
+                    inSerendipity = false
+                    blocks.append(.heading(title))
+                }
                 continue
             }
 
@@ -50,6 +68,13 @@ enum NewsProseParser {
         }
         flushParagraph()
         return blocks
+    }
+
+    static func isSerendipityHeading(_ title: String, context: NewsProseContext) -> Bool {
+        guard context == .weeklyReview else { return false }
+        if title.contains("意外なつながり") { return true }
+        if title.contains("つながり") { return true }
+        return false
     }
 
     private static func bulletText(_ line: String) -> String? {
@@ -100,8 +125,9 @@ enum NewsProseParser {
 /// Renders structured brief/review text with headings, bullets, and spacing.
 struct NewsProseView: View {
     let text: String
+    var context: NewsProseContext = .brief
 
-    private var blocks: [NewsProseBlock] { NewsProseParser.parse(text) }
+    private var blocks: [NewsProseBlock] { NewsProseParser.parse(text, context: context) }
 
     var body: some View {
         if blocks.isEmpty {
@@ -155,9 +181,65 @@ struct NewsProseView: View {
             }
             .padding(.bottom, nextIsBullet(at: index) ? 6 : 10)
 
+        case .serendipityHeading(let title):
+            serendipitySectionHeader(title, index: index)
+
+        case .serendipityCard(let body):
+            serendipityCardBody(body, index: index)
+
         case .spacer:
             Spacer().frame(height: 10)
         }
+    }
+
+    private func serendipitySectionHeader(_ title: String, index: Int) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.orange)
+            Text(title)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(Color.orange.opacity(0.9))
+        }
+        .padding(.top, index == 0 ? 0 : 20)
+        .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private func serendipityCardBody(_ body: String, index: Int) -> some View {
+        let isFirstCard = index == 0 || !isSerendipityCard(blocks[index - 1])
+        let isLastCard = index + 1 >= blocks.count || !isSerendipityCard(blocks[index + 1])
+
+        HStack(alignment: .top, spacing: 8) {
+            Text("✦")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.orange.opacity(0.75))
+                .frame(width: 14, alignment: .leading)
+                .padding(.top, 3)
+            Text(body)
+                .font(.system(size: 16))
+                .foregroundStyle(.primary)
+                .lineSpacing(6)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.orange.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.orange.opacity(0.22), lineWidth: 0.5)
+        )
+        .padding(.top, isFirstCard ? 0 : 6)
+        .padding(.bottom, isLastCard ? 14 : 0)
+    }
+
+    private func isSerendipityCard(_ block: NewsProseBlock) -> Bool {
+        if case .serendipityCard = block { return true }
+        return false
     }
 
     private func nextIsBullet(at index: Int) -> Bool {
@@ -169,7 +251,7 @@ struct NewsProseView: View {
     private func bottomPadding(after block: NewsProseBlock, at index: Int) -> CGFloat {
         guard index + 1 < blocks.count else { return 0 }
         switch blocks[index + 1] {
-        case .heading, .bullet: return 12
+        case .heading, .bullet, .serendipityHeading, .serendipityCard: return 12
         case .spacer: return 0
         case .paragraph: return 10
         }

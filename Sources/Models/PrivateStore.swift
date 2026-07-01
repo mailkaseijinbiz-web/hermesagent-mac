@@ -58,6 +58,26 @@ enum PrivateStore {
         try? FileManager.default.removeItem(at: fileURL(key))
     }
 
+    /// Whether an encrypted payload file exists for `key` (independent of decrypt success).
+    static func hasEncryptedFile(key: String) -> Bool {
+        FileManager.default.fileExists(atPath: fileURL(key).path)
+    }
+
+    /// Eagerly move legacy UserDefaults JSON blobs into encrypted files for all private keys.
+    /// Skips keys already on disk; leaves UD data in place when encryption fails.
+    static func migrateLegacyUserDefaults() {
+        for key in PrivateStoreKeys.all {
+            guard !hasEncryptedFile(key: key) else { continue }
+            guard let data = UserDefaults.standard.data(forKey: key) else { continue }
+            do {
+                try saveData(data, key: key)
+                UserDefaults.standard.removeObject(forKey: key)
+            } catch {
+                Log.failure("private-store", "UserDefaults→暗号化の移行に失敗 (\(key))", error)
+            }
+        }
+    }
+
     // MARK: - Keychain
 
     private static func symmetricKey() throws -> SymmetricKey {
