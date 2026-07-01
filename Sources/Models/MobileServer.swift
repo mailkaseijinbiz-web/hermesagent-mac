@@ -318,6 +318,8 @@ class MobileServer {
             handlePushRegister(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/push/live-activity-token"):
             handleLiveActivityPushToken(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/push/live-activity-start-token"):
+            handleLiveActivityStartToken(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/presence"):
             handlePresence(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/badge/clear"):
@@ -909,6 +911,19 @@ class MobileServer {
         }
         Task { @MainActor in
             AppState.shared.addLiveActivityPushToken(token)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleLiveActivityStartToken(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["token"] as? String, !token.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing token\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.addLiveActivityStartToken(token)
             self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
         }
     }

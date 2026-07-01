@@ -225,13 +225,53 @@ struct SettingsModal: View {
     /// ポップオーバーで開いていたが、設定内に集約した。MobileSyncView を再利用。
     private var mobileSection: some View {
         card(title: "モバイルと同期") {
-            HStack {
-                Spacer()
-                MobileSyncView()
-                    .environmentObject(appState)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer()
+            VStack(alignment: .leading, spacing: 12) {
+                connectivitySection
+                Divider()
+                HStack {
+                    Spacer()
+                    MobileSyncView()
+                        .environmentObject(appState)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
             }
+        }
+    }
+
+    @State private var tailscaleIPv4: String?
+
+    /// Local / Tailscale URLs for pairing the iOS client with this Mac hub.
+    private var connectivitySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("接続")
+                .font(.system(size: 12, weight: .semibold))
+            HStack(spacing: 8) {
+                Text("ローカル")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .frame(width: 72, alignment: .leading)
+                Text("http://127.0.0.1:\(AppConfig.mobilePort)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            HStack(spacing: 8) {
+                Text("Tailscale")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .frame(width: 72, alignment: .leading)
+                Text(tailscaleIPv4.map { "http://\($0):\(AppConfig.mobilePort)" } ?? "—")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(tailscaleIPv4 == nil ? .secondary : .primary)
+                    .textSelection(.enabled)
+            }
+            Text("※ 公衆IPからの接続は拒否されます（NetworkPeerPolicy）。")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary.opacity(0.85))
+                .lineLimit(nil)
+        }
+        .task {
+            tailscaleIPv4 = await Task.detached(priority: .utility) { TailscaleIPv4.lookup() }.value
         }
     }
 

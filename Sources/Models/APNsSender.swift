@@ -113,6 +113,54 @@ actor APNsSender {
         return invalidTokens
     }
 
+    /// Push-to-start: remotely start a Live Activity when no update token is registered yet.
+    @discardableResult
+    func sendLiveActivityStart(
+        to tokens: [String],
+        employeeEmoji: String,
+        employeeName: String,
+        preview: String,
+        config: Config
+    ) async -> [String] {
+        guard !tokens.isEmpty,
+              !config.keyId.isEmpty, !config.teamId.isEmpty,
+              let jwt = providerJWT(config: config) else { return [] }
+
+        var invalidTokens: [String] = []
+        let host = config.useSandbox ? "api.sandbox.push.apple.com" : "api.push.apple.com"
+        let topic = "\(config.bundleId).push-type.liveactivity"
+        let payload = LiveActivityPushPayload.start(
+            employeeEmoji: employeeEmoji,
+            employeeName: employeeName,
+            preview: preview
+        )
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: payload) else { return [] }
+
+        for token in tokens {
+            guard let url = URL(string: "https://\(host)/3/device/\(token)") else { continue }
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("bearer \(jwt)", forHTTPHeaderField: "authorization")
+            req.setValue(topic, forHTTPHeaderField: "apns-topic")
+            req.setValue("liveactivity", forHTTPHeaderField: "apns-push-type")
+            req.setValue("10", forHTTPHeaderField: "apns-priority")
+            req.httpBody = bodyData
+            do {
+                let (data, response) = try await URLSession.shared.data(for: req)
+                if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                    let msg = String(data: data, encoding: .utf8) ?? ""
+                    print("[APNs] liveactivity start \(http.statusCode) for token \(token.prefix(8))…: \(msg)")
+                    if http.statusCode == 410 || msg.contains("Unregistered") || msg.contains("BadDeviceToken") {
+                        invalidTokens.append(token)
+                    }
+                }
+            } catch {
+                print("[APNs] liveactivity start send error: \(error)")
+            }
+        }
+        return invalidTokens
+    }
+
     // MARK: - Provider JWT (reusable up to ~1h; cache for 50min)
 
     private func providerJWT(config: Config) -> String? {
