@@ -292,7 +292,12 @@ extension AppState {
                 subtitle: String(hint.line.prefix(40)),
                 icon: "sparkles",
                 kind: "explore",
-                action: IntentionAction(type: "none", taskTitle: nil, taskId: nil, employeeRole: nil, chatPrompt: nil),
+                action: IntentionAction(
+                    type: "chat", taskTitle: nil, taskId: nil,
+                    employeeRole: "assistant",
+                    chatPrompt: SerendipityEngine.deepDivePrompt(for: hint),
+                    collectionItemId: hint.itemId
+                ),
                 rationale: hint.rationale
             ))
         } else if likes.contains("サウナ") || likes.lowercased().contains("sauna"),
@@ -341,37 +346,97 @@ extension AppState {
         }
         intentionSelectedId = id
         var result: [String: Any] = ["ok": true, "cardId": id, "kind": card.kind]
+        result.merge(applyIntentionAction(card)) { _, new in new }
+        triggerToast(message: "「\(card.title)」を選びました")
+        return result
+    }
 
-        switch card.action.type {
+    /// Execute the tap action for an intention card (task, chat, collection, serendipity resolve).
+    func applyIntentionAction(_ card: IntentionCard) -> [String: Any] {
+        var result: [String: Any] = [:]
+        var action = card.action
+
+        if action.type == "none", card.id.hasPrefix("serendipity-"),
+           let hint = SerendipityEngine.hint(
+               matchingCardId: card.id,
+               from: CollectionStore.shared.items,
+               likes: personalProfile.likes,
+               goals: personalProfile.goals,
+               locationSummary: resolvedLocationSummary(locationSummary)
+           ) {
+            action = IntentionAction(
+                type: "chat", taskTitle: nil, taskId: nil,
+                employeeRole: "assistant",
+                chatPrompt: SerendipityEngine.deepDivePrompt(for: hint),
+                collectionItemId: hint.itemId
+            )
+            result["resolvedAction"] = "chat"
+        }
+
+        switch action.type {
         case "task":
-            let title = (card.action.taskTitle ?? card.subtitle).trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = (action.taskTitle ?? card.subtitle).trimmingCharacters(in: .whitespacesAndNewlines)
             if !title.isEmpty {
-                let empId = employeeId(forRole: card.action.employeeRole)
+                let empId = employeeId(forRole: action.employeeRole)
                 let t = createTask(title: title, assigneeId: empId)
                 setTaskStatus(t.id, .doing)
                 result["taskId"] = t.id
             }
         case "markTask":
-            if let tid = card.action.taskId {
+            if let tid = action.taskId {
                 setTaskStatus(tid, .doing)
                 result["taskId"] = tid
             }
-        case "chat":
-            let role = card.action.employeeRole ?? "assistant"
-            if let empId = employeeId(forRole: role) {
-                switchEmployee(empId)
-                if let prompt = card.action.chatPrompt, !prompt.isEmpty {
-                    inputValue = prompt
-                }
-                result["employeeId"] = empId
-            } else {
-                view = "chat"
-                if let prompt = card.action.chatPrompt { inputValue = prompt }
+        case "collection":
+            if let cid = action.collectionItemId,
+               CollectionStore.shared.items.contains(where: { $0.id == cid }) {
+                view = "collection"
+                highlightedCollectionItemId = cid
+                result["collectionItemId"] = cid
+            } else if let hint = SerendipityEngine.hint(
+                matchingCardId: card.id,
+                from: CollectionStore.shared.items,
+                likes: personalProfile.likes,
+                goals: personalProfile.goals,
+                locationSummary: resolvedLocationSummary(locationSummary)
+            ) {
+                view = "collection"
+                highlightedCollectionItemId = hint.itemId
+                result["collectionItemId"] = hint.itemId
+            } else if let prompt = action.chatPrompt, !prompt.isEmpty {
+                result.merge(applyChatIntentionAction(role: action.employeeRole ?? "assistant", prompt: prompt)) { _, n in n }
             }
+        case "chat":
+            result.merge(applyChatIntentionAction(role: action.employeeRole ?? "assistant", prompt: action.chatPrompt)) { _, n in n }
         default:
-            break
+            if card.kind == "explore", card.id.hasPrefix("serendipity-"),
+               let hint = SerendipityEngine.hint(
+                   matchingCardId: card.id,
+                   from: CollectionStore.shared.items,
+                   likes: personalProfile.likes,
+                   goals: personalProfile.goals,
+                   locationSummary: resolvedLocationSummary(locationSummary)
+               ) {
+                result.merge(applyChatIntentionAction(
+                    role: "assistant",
+                    prompt: SerendipityEngine.deepDivePrompt(for: hint)
+                )) { _, n in n }
+                result["resolvedAction"] = "chat"
+            }
         }
-        triggerToast(message: "「\(card.title)」を選びました")
+        return result
+    }
+
+    private func applyChatIntentionAction(role: String, prompt: String?) -> [String: Any] {
+        var result: [String: Any] = [:]
+        if let empId = employeeId(forRole: role) {
+            switchEmployee(empId)
+            if let prompt, !prompt.isEmpty { inputValue = prompt }
+            result["employeeId"] = empId
+        } else {
+            view = "chat"
+            if let prompt, !prompt.isEmpty { inputValue = prompt }
+        }
         return result
     }
 

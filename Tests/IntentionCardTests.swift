@@ -99,6 +99,34 @@ final class IntentionCardTests: XCTestCase {
     }
 
     @MainActor
+    func testConfirmSerendipityCardOpensChat() {
+        let state = AppState.shared
+        let hint = SerendipityHint(
+            line: "昨日に保存「サウナ」× 目標「健康」",
+            rationale: "🎯 目標「健康」× 昨日の保存",
+            relatedNorthStar: "健康",
+            itemLabel: "サウナ",
+            itemId: "col-test"
+        )
+        let card = IntentionCard(
+            id: "serendipity-\(hint.relatedNorthStar.hashValue)",
+            title: "意外なつながり", subtitle: hint.line, icon: "sparkles", kind: "explore",
+            action: IntentionAction(
+                type: "chat", taskTitle: nil, taskId: nil,
+                employeeRole: "assistant",
+                chatPrompt: SerendipityEngine.deepDivePrompt(for: hint),
+                collectionItemId: hint.itemId
+            )
+        )
+        state.intentionCards = [card]
+        state.inputValue = ""
+        let result = state.confirmIntentionCard(card.id)
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertFalse(state.inputValue.isEmpty)
+        XCTAssertTrue(state.inputValue.contains("深掘り"))
+    }
+
+    @MainActor
     func testIntentionContextIncludesDismissedKinds() {
         let state = AppState.shared
         state.intentionDismissedKinds = ["recover"]

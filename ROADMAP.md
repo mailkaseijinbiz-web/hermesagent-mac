@@ -6,6 +6,14 @@
 
 ## 📅 2026-07-01 更新ログ
 
+**`cursor/intention-cards` ブランチで完了（Phase H）**
+- ✅ **Collection**：Mac `CollectionStore` + Mobile API + UI、iOS 閲覧（`CollectionView`）
+- ✅ **Home カレンダースコープ**：iOS `HomeView` に 日/週/月/年 切替（`HomeDateHelpers`）
+- ✅ **Mac アクティビティ要約**：iOS タイムラインに `MacActivitySummarizer` 集約表示
+- ✅ **CONCEPT**：creativity + serendipity ピラーを `CONCEPT.md` に追記
+- ✅ **Serendipity**：`SerendipityEngine` + `IntentionCard.rationale` + 週次レビュー serendipity セクション
+- ✅ **Home UI**：iOS タイムラインを `DisclosureGroup` で折りたたみ
+
 **`cursor/intention-cards` ブランチで完了（Phase G）**
 - ✅ **G1**：`AppState+ChatSend.swift` — 送信・セッション選択・添付・フィードバック（`handleSendMessage` 等）を本体から分離。`@Published` は本体 `// MARK: - Chat` に残置
 - ✅ **G2**：`AppState+CloudSync.swift` — Supabase / iCloud roster・メッセージミラー・ライブ同期を分離。`@Published` は本体 `// MARK: - Cloud sync` に残置

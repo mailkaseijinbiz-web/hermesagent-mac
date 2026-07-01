@@ -2,37 +2,50 @@ import SwiftUI
 
 struct MacCollectionView: View {
     @ObservedObject private var store = CollectionStore.shared
+    @ObservedObject private var appState = AppState.shared
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("コレクション")
-                    .font(.system(size: 28, weight: .bold))
-                    .padding(.bottom, 4)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("コレクション")
+                        .font(.system(size: 28, weight: .bold))
+                        .padding(.bottom, 4)
 
-                if store.items.isEmpty {
-                    emptyState
-                } else {
-                    LazyVStack(spacing: 8) {
-                        ForEach(store.items) { item in
-                            collectionRow(item)
-                                .contextMenu {
-                                    Button(role: .destructive) {
-                                        store.delete(id: item.id)
-                                    } label: {
-                                        Label("削除", systemImage: "trash")
+                    if store.items.isEmpty {
+                        emptyState
+                    } else {
+                        LazyVStack(spacing: 8) {
+                            ForEach(store.items) { item in
+                                collectionRow(item)
+                                    .id(item.id)
+                                    .contextMenu {
+                                        Button(role: .destructive) {
+                                            store.delete(id: item.id)
+                                        } label: {
+                                            Label("削除", systemImage: "trash")
+                                        }
                                     }
-                                }
+                            }
                         }
                     }
                 }
+                .padding(.horizontal, 32)
+                .padding(.top, 52)
+                .padding(.bottom, 32)
+                .frame(maxWidth: 720)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .reportMainScrollOffset()
             }
-            .padding(.horizontal, 32)
-            .padding(.top, 52)
-            .padding(.bottom, 32)
-            .frame(maxWidth: 720)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .reportMainScrollOffset()
+            .onChange(of: appState.highlightedCollectionItemId) { _, id in
+                guard let id else { return }
+                withAnimation { proxy.scrollTo(id, anchor: .center) }
+            }
+            .onAppear {
+                if let id = appState.highlightedCollectionItemId {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            }
         }
         .onMainScrollOffsetChange { AppState.shared.mainScrollOffset = $0 }
         .ignoresSafeArea(edges: .top)
@@ -114,9 +127,20 @@ struct MacCollectionView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(Color.primary.opacity(0.04))
+        .background(
+            appState.highlightedCollectionItemId == item.id
+                ? Color.accentColor.opacity(0.12)
+                : Color.primary.opacity(0.04)
+        )
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07), lineWidth: 0.5))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12).stroke(
+                appState.highlightedCollectionItemId == item.id
+                    ? Color.accentColor.opacity(0.45)
+                    : Color.primary.opacity(0.07),
+                lineWidth: appState.highlightedCollectionItemId == item.id ? 1.5 : 0.5
+            )
+        )
     }
 
     private func displayTitle(_ item: CollectionItem) -> String {

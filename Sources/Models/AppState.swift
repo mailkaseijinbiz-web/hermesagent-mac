@@ -216,6 +216,8 @@ class AppState: ObservableObject {
     static let shared = AppState()
     
     @Published var view: String = "home" // landing on lifelog home; "chat" | "company" | …
+    /// Collection row to scroll/highlight after an intention card tap.
+    @Published var highlightedCollectionItemId: String? = nil
     /// Vertical scroll depth of the active main pane (drives header fade in `MainView`).
     @Published var mainScrollOffset: CGFloat = 0
     @Published var showCommandPalette = false   // ⌘K quick-jump overlay

@@ -26,4 +26,21 @@ final class MobileServerPeerTests: XCTestCase {
         XCTAssertFalse(NetworkPeerPolicy.isTrustedPeerIP("8.8.8.8"))
         XCTAssertTrue(NetworkPeerPolicy.isPublicIPv4Peer("8.8.8.8"))
     }
+
+    func testListenBindAddressesLoopbackOnly() {
+        XCTAssertEqual(NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: nil), ["127.0.0.1"])
+        XCTAssertEqual(NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: ""), ["127.0.0.1"])
+        XCTAssertEqual(NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: "   "), ["127.0.0.1"])
+    }
+
+    func testListenBindAddressesIncludesTailscale() {
+        XCTAssertEqual(
+            NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: "100.64.0.1"),
+            ["127.0.0.1", "100.64.0.1"]
+        )
+        XCTAssertEqual(
+            NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: "  100.127.255.1  "),
+            ["127.0.0.1", "100.127.255.1"]
+        )
+    }
 }

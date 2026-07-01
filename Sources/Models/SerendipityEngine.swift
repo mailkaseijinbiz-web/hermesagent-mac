@@ -5,6 +5,8 @@ struct SerendipityHint: Equatable {
     var line: String
     var rationale: String
     var relatedNorthStar: String
+    var itemLabel: String
+    var itemId: String
 }
 
 /// コレクション × 北極星 × 位置からセレンディピティ候補を抽出（feed ではなく本人文脈内）。
@@ -37,7 +39,13 @@ enum SerendipityEngine {
                 let line = "\(age)に保存「\(label)」× \(star.label)「\(star.keyword)」"
                 let rationale = "🎯 \(star.label)「\(star.keyword)」× \(age)の保存"
                 let recency = max(0, 1 - item.createdAt.timeIntervalSince(cutoff) / maxAge)
-                scored.append((SerendipityHint(line: line, rationale: rationale, relatedNorthStar: star.keyword), recency + 1))
+                scored.append((
+                    SerendipityHint(
+                        line: line, rationale: rationale, relatedNorthStar: star.keyword,
+                        itemLabel: label, itemId: item.id
+                    ),
+                    recency + 1
+                ))
             }
         }
 
@@ -49,7 +57,13 @@ enum SerendipityEngine {
                     if label.localizedCaseInsensitiveContains(place) || searchableText(for: item).localizedCaseInsensitiveContains(place) {
                         let age = agePhrase(since: item.createdAt, now: now)
                         let line = "\(age)の保存「\(label)」× 今日の足あと「\(place)」"
-                        scored.append((SerendipityHint(line: line, rationale: "📍 \(place) × 保存した \(label)", relatedNorthStar: place), 0.8))
+                        scored.append((
+                            SerendipityHint(
+                                line: line, rationale: "📍 \(place) × 保存した \(label)",
+                                relatedNorthStar: place, itemLabel: label, itemId: item.id
+                            ),
+                            0.8
+                        ))
                     }
                 }
             }
@@ -66,6 +80,26 @@ enum SerendipityEngine {
             if out.count >= maxHints { break }
         }
         return out
+    }
+
+    /// Match a `serendipity-{hash}` intention card id back to its hint.
+    static func hint(
+        matchingCardId id: String,
+        from items: [CollectionItem],
+        likes: String,
+        goals: String,
+        locationSummary: String = "",
+        now: Date = Date()
+    ) -> SerendipityHint? {
+        guard id.hasPrefix("serendipity-") else { return nil }
+        let suffix = String(id.dropFirst("serendipity-".count))
+        guard let hash = Int(suffix) else { return nil }
+        return hints(from: items, likes: likes, goals: goals, locationSummary: locationSummary, now: now)
+            .first { $0.relatedNorthStar.hashValue == hash }
+    }
+
+    static func deepDivePrompt(for hint: SerendipityHint) -> String {
+        "保存した「\(hint.itemLabel)」と目標「\(hint.relatedNorthStar)」のつながりを深掘りしたい"
     }
 
     // MARK: - Helpers

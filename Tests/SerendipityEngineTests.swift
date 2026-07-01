@@ -33,4 +33,28 @@ final class SerendipityEngineTests: XCTestCase {
         let hints = SerendipityEngine.hints(from: items, likes: "", goals: "健康", now: now, maxHints: 2)
         XCTAssertEqual(hints.count, 2)
     }
+
+    func testHintMatchingCardId() {
+        var item = CollectionItem(kind: "text", text: "健康についてのメモ", source: "share")
+        item.createdAt = now.addingTimeInterval(-2 * 86400)
+        let hints = SerendipityEngine.hints(from: [item], likes: "", goals: "健康", now: now)
+        guard let first = hints.first else { return XCTFail("expected hint") }
+        let cardId = "serendipity-\(first.relatedNorthStar.hashValue)"
+        let matched = SerendipityEngine.hint(
+            matchingCardId: cardId, from: [item], likes: "", goals: "健康", now: now
+        )
+        XCTAssertEqual(matched?.itemId, item.id)
+        XCTAssertEqual(matched?.itemLabel, "健康についてのメモ")
+    }
+
+    func testDeepDivePrompt() {
+        let hint = SerendipityHint(
+            line: "x", rationale: "y", relatedNorthStar: "健康",
+            itemLabel: "サウナ記事", itemId: "a"
+        )
+        XCTAssertEqual(
+            SerendipityEngine.deepDivePrompt(for: hint),
+            "保存した「サウナ記事」と目標「健康」のつながりを深掘りしたい"
+        )
+    }
 }

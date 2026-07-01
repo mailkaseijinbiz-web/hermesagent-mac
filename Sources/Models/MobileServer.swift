@@ -12,6 +12,14 @@ enum NetworkPeerPolicy {
     static func isTrustedPeerIP(_ raw: String) -> Bool {
         !isPublicIPv4Peer(raw)
     }
+
+    /// Bind targets: loopback plus optional Tailscale IPv4 (unit-testable).
+    nonisolated static func listenBindAddresses(tailscaleIPv4: String?) -> [String] {
+        var addrs = ["127.0.0.1"]
+        let ts = tailscaleIPv4?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !ts.isEmpty, ts.contains(".") { addrs.append(ts) }
+        return addrs
+    }
 }
 
 /// Lightweight HTTP server for iOS mobile app connectivity.
@@ -20,7 +28,7 @@ enum NetworkPeerPolicy {
 class MobileServer {
     static let shared = MobileServer()
     
-    private var listener: NWListener?
+    private var listeners: [NWListener] = []
     private(set) var isRunning = false
     private(set) var port: UInt16 = AppConfig.mobilePort
     
@@ -33,46 +41,73 @@ class MobileServer {
     private var eventTimer: Task<Void, Never>? = nil
 
     private init() {}
-    
+
     func start(port: UInt16 = AppConfig.mobilePort) {
         self.port = port
-        
-        do {
-            let params = NWParameters.tcp
-            params.allowLocalEndpointReuse = true
-            listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
-        } catch {
-            print("[MobileServer] Failed to create listener: \(error)")
-            return
+        stop()
+
+        let tailscaleIP = TailscaleIPv4.lookup()
+        let bindAddresses = NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: tailscaleIP)
+        if tailscaleIP == nil {
+            print("[MobileServer] Tailscale IPv4 unavailable; binding loopback only")
+        } else {
+            print("[MobileServer] Binding to \(bindAddresses.joined(separator: ", "))")
         }
-        
-        listener?.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready:
-                print("[MobileServer] Server ready on port \(port)")
-                Task { @MainActor in
-                    self?.isRunning = true
+
+        let nwPort = NWEndpoint.Port(rawValue: port)!
+        var started: [NWListener] = []
+
+        for addr in bindAddresses {
+            do {
+                let params = NWParameters.tcp
+                params.allowLocalEndpointReuse = true
+                params.requiredLocalEndpoint = NWEndpoint.hostPort(
+                    host: NWEndpoint.Host(addr),
+                    port: nwPort
+                )
+                let listener = try NWListener(using: params)
+
+                listener.stateUpdateHandler = { [weak self] state in
+                    switch state {
+                    case .ready:
+                        print("[MobileServer] Listening on \(addr):\(port)")
+                        Task { @MainActor in
+                            self?.isRunning = true
+                        }
+                    case .failed(let error):
+                        print("[MobileServer] Listener on \(addr) failed: \(error)")
+                        if addr == "127.0.0.1" {
+                            Task { @MainActor in
+                                self?.isRunning = false
+                            }
+                        }
+                    default:
+                        break
+                    }
                 }
-            case .failed(let error):
-                print("[MobileServer] Server failed: \(error)")
-                Task { @MainActor in
-                    self?.isRunning = false
+
+                listener.newConnectionHandler = { [weak self] connection in
+                    self?.handleConnection(connection)
                 }
-            default:
-                break
+
+                listener.start(queue: .global(qos: .userInitiated))
+                started.append(listener)
+            } catch {
+                print("[MobileServer] Failed to create listener on \(addr): \(error)")
             }
         }
-        
-        listener?.newConnectionHandler = { [weak self] connection in
-            self?.handleConnection(connection)
+
+        listeners = started
+        if started.isEmpty {
+            print("[MobileServer] No listeners started")
         }
-        
-        listener?.start(queue: .global(qos: .userInitiated))
     }
-    
+
     func stop() {
-        listener?.cancel()
-        listener = nil
+        for listener in listeners {
+            listener.cancel()
+        }
+        listeners.removeAll()
         isRunning = false
 
         for conn in activeStreamConnections {
@@ -91,12 +126,11 @@ class MobileServer {
     // MARK: - Connection Handling
     
     private nonisolated func handleConnection(_ connection: NWConnection) {
-        // Defense-in-depth: the listener binds all interfaces (0.0.0.0), so on a public/guest
-        // network the API could be probed from the internet. Drop connections from clearly-public
-        // IPv4 peers before doing any work — legitimate clients reach the hub over loopback,
-        // Tailscale (100.64/10 or IPv6 ULA), or the private LAN. The Google/local-key auth gate
-        // still applies to everything that passes. Conservative on purpose: anything we can't
-        // classify as routable-public IPv4 (incl. all IPv6) is allowed so we never break a real client.
+        // Defense-in-depth: listeners bind loopback + Tailscale only, but drop clearly-public
+        // IPv4 peers before doing any work anyway. Legitimate clients reach the hub over loopback
+        // or Tailscale (100.64/10 or IPv6 ULA). The Google/local-key auth gate still applies.
+        // Conservative on purpose: anything we can't classify as routable-public IPv4 (incl. all
+        // IPv6) is allowed so we never break a real client.
         if isPublicPeer(connection) {
             Log.server.notice("rejected connection from public peer: \(self.peerIP(connection) ?? "?", privacy: .public)")
             connection.cancel()

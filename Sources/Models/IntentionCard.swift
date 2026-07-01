@@ -4,7 +4,7 @@ import Foundation
 
 /// What happens when the user taps an intention card.
 struct IntentionAction: Codable, Equatable {
-    /// task | markTask | chat | none
+    /// task | markTask | chat | collection | none
     var type: String
     var taskTitle: String?
     var taskId: String?
@@ -12,6 +12,8 @@ struct IntentionAction: Codable, Equatable {
     var employeeRole: String?
     /// Prefilled chat message when opening a conversation.
     var chatPrompt: String?
+    /// Collection item to open when type is collection.
+    var collectionItemId: String? = nil
 }
 
 /// A single intention hypothesis surfaced to the user.
@@ -74,7 +76,8 @@ enum IntentionJSON {
                 taskTitle: act["taskTitle"] as? String,
                 taskId: act["taskId"] as? String,
                 employeeRole: act["employeeRole"] as? String,
-                chatPrompt: act["chatPrompt"] as? String
+                chatPrompt: act["chatPrompt"] as? String,
+                collectionItemId: act["collectionItemId"] as? String
             )
             let rationale = (item["rationale"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             cards.append(IntentionCard(
