@@ -111,7 +111,39 @@ extension AppState {
             lines.append("ユーザーはすでに1つの意図を選んでいる。残りは控えめに。")
         }
 
+        let serendipity = serendipityContextBlock()
+        if !serendipity.isEmpty { lines.append(serendipity) }
+
         return lines.joined(separator: "\n")
+    }
+
+    /// コレクション × 北極星 × 位置からセレンディピティ候補を LLM 向けに整形。
+    func serendipityContextBlock() -> String {
+        let hints = SerendipityEngine.hints(
+            from: CollectionStore.shared.items,
+            likes: personalProfile.likes,
+            goals: personalProfile.goals,
+            locationSummary: resolvedLocationSummary(locationSummary)
+        )
+        guard !hints.isEmpty else { return "" }
+        let lines = hints.map { "- \($0.line)（rationale例: \($0.rationale)）" }
+        return """
+        【セレンディピティ候補（vitalityMode が steady/peak のとき explore に活かす。無理なら使わない）】
+        \(lines.joined(separator: "\n"))
+        """
+    }
+
+    /// 週次レビュー用の意外なつながりブロック。
+    func serendipityReviewBlock() -> String {
+        let hints = SerendipityEngine.hints(
+            from: CollectionStore.shared.items,
+            likes: personalProfile.likes,
+            goals: personalProfile.goals,
+            locationSummary: resolvedLocationSummary(locationSummary),
+            maxHints: 3
+        )
+        guard !hints.isEmpty else { return "" }
+        return "【コレクション×北極星の意外なつながり候補】\n" + hints.map(\.line).joined(separator: "\n")
     }
 
     // MARK: - Generation
@@ -147,8 +179,10 @@ extension AppState {
         ルール:
         - 挨拶・説明文は書かない。JSONのみ。
         - 各カードは短いタイトル(≤12字) + 具体的サブタイトル(≤40字)。
+        - 各カードに rationale（≤30字、「なぜ今これ？」の一行根拠）を付ける。根拠があるなら必ず。
         - ユーザーの目標・好きなものに無理なく沿う。押し付けない。
         - 必ず「休む/軽くする」選択肢を1つ含める（kind=rest または recover）。
+        - vitalityMode が steady または peak のとき、セレンディピティ候補から explore カードを1つ検討する。
         - 却下された方向(kind)と同系統の提案は避ける。
         - icon は SF Symbols 名 (leaf, figure.walk, checklist, moon, flame, heart, sparkles 等)。
         - kind は recover | focus | rest | explore | task のいずれか。
@@ -156,7 +190,7 @@ extension AppState {
 
         出力形式:
         {"vitalHint":"1行の身体状態","vitalityMode":"recovering|steady|peak|depleted","cards":[
-          {"id":"c1","title":"…","subtitle":"…","icon":"…","kind":"…","action":{"type":"task","taskTitle":"…"}},
+          {"id":"c1","title":"…","subtitle":"…","icon":"…","kind":"…","rationale":"…","action":{"type":"task","taskTitle":"…"}},
           …
         ]}
 
@@ -243,13 +277,32 @@ extension AppState {
             ))
         }
 
-        if likes.contains("サウナ") || likes.lowercased().contains("sauna"),
+        let serendipity = SerendipityEngine.hints(
+            from: CollectionStore.shared.items,
+            likes: likes,
+            goals: goals,
+            locationSummary: resolvedLocationSummary(locationSummary)
+        )
+        if (mode == "steady" || mode == "peak"),
+           !intentionDismissedKinds.contains("explore"),
+           let hint = serendipity.first {
+            cards.append(IntentionCard(
+                id: "serendipity-\(hint.relatedNorthStar.hashValue)",
+                title: "意外なつながり",
+                subtitle: String(hint.line.prefix(40)),
+                icon: "sparkles",
+                kind: "explore",
+                action: IntentionAction(type: "none", taskTitle: nil, taskId: nil, employeeRole: nil, chatPrompt: nil),
+                rationale: hint.rationale
+            ))
+        } else if likes.contains("サウナ") || likes.lowercased().contains("sauna"),
            !intentionDismissedKinds.contains("explore") {
             let sub = hour < 17 ? "午後に整える" : "いま行けるなら"
             cards.append(IntentionCard(
                 id: "sauna", title: "サウナで整える", subtitle: sub,
                 icon: "flame.fill", kind: "explore",
-                action: IntentionAction(type: "none", taskTitle: nil, taskId: nil, employeeRole: nil, chatPrompt: nil)
+                action: IntentionAction(type: "none", taskTitle: nil, taskId: nil, employeeRole: nil, chatPrompt: nil),
+                rationale: "好き「サウナ」× いまの時間帯"
             ))
         } else if goals.contains("健康") || goals.contains("運動"),
                   !intentionDismissedKinds.contains("explore"), hour < 20 {

@@ -83,6 +83,12 @@ private struct IntentionCardRow: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                if let rationale = card.rationale, !rationale.isEmpty {
+                    Text(rationale)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 4)
             Button(action: onDismiss) {

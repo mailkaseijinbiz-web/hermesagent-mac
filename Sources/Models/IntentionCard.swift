@@ -23,6 +23,8 @@ struct IntentionCard: Codable, Identifiable, Equatable {
     /// recover | focus | rest | explore | task
     var kind: String
     var action: IntentionAction
+    /// 「なぜ今これ？」— 北極星や保存とのつながり（≤30字目安）。
+    var rationale: String? = nil
 }
 
 /// Today's intention set returned by `/api/intention/today`.
@@ -74,7 +76,11 @@ enum IntentionJSON {
                 employeeRole: act["employeeRole"] as? String,
                 chatPrompt: act["chatPrompt"] as? String
             )
-            cards.append(IntentionCard(id: id, title: title, subtitle: subtitle, icon: icon, kind: kind, action: action))
+            let rationale = (item["rationale"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            cards.append(IntentionCard(
+                id: id, title: title, subtitle: subtitle, icon: icon, kind: kind, action: action,
+                rationale: rationale?.isEmpty == false ? rationale : nil
+            ))
         }
         guard !cards.isEmpty else { return nil }
         return (vitalHint, vitalityMode, cards)

@@ -35,6 +35,17 @@ final class IntentionCardTests: XCTestCase {
         XCTAssertEqual(parsed?.cards.count, 3)
     }
 
+    func testParseRationaleField() {
+        let raw = """
+        {"vitalHint":"","vitalityMode":"steady","cards":[
+          {"id":"a","title":"意外","subtitle":"保存と目標","icon":"sparkles","kind":"explore",
+           "rationale":"🎯 目標「健康」× 保存","action":{"type":"none"}}
+        ]}
+        """
+        let parsed = IntentionJSON.parse(raw)
+        XCTAssertEqual(parsed?.cards.first?.rationale, "🎯 目標「健康」× 保存")
+    }
+
     @MainActor
     func testComputedIntentionIncludesRest() {
         let state = AppState.shared
