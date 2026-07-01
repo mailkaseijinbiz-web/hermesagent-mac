@@ -6,6 +6,10 @@
 
 ## 📅 2026-07-01 更新ログ
 
+**`cursor/phase-0-hardening` ブランチ（Phase 0 追補）**
+- ✅ **MobileServer Tailscale ウォッチドッグ** — 90秒ごとに `tailscale ip -4` を再確認し、IP 出現/変更時にリスナー再バインド
+- ✅ **LINE 401 自己回復** — cron の LINE 401 検知時にブリッジをデバウンス再起動（既存 3 分ウォッチドッグ + `FailedDeliveryStore` と併用）
+
 **`cursor/intention-cards` ブランチで完了（Phase H）**
 - ✅ **Collection**：Mac `CollectionStore` + Mobile API + UI、iOS 閲覧（`CollectionView`）
 - ✅ **Home カレンダースコープ**：iOS `HomeView` に 日/週/月/年 切替（`HomeDateHelpers`）
@@ -123,11 +127,11 @@
 |---|---|---|
 | Test | ローカル `swift test` を通す（`run_tests.sh`：フルXcode + xattrクリア） | ✅ 完了 |
 | Sec | `~/.hermes/.env` を 0600 に / `.gitignore` で秘密ファイルを防御的除外 | ✅ 確認・強化 |
-| Sec | ローカルAPIキー・Google client secret を Keychain へ（後述の注意あり） | 🟡 Google トークンは 0600 ファイルへ。client secret は要対応 |
+| Sec | ローカルAPIキー・Google client secret を Keychain へ（後述の注意あり） | ✅ Google client secret は Keychain（起動時 UD マイグレーション）。API キーは `.env` 方針維持 |
 | Sec | MobileServer の CORS を `*` からホワイトリスト化 | ✅ 完了（Origin 検証・deny 既定） |
-| Sec | バインドを loopback/Tailscale 限定に（iOS接続への影響を要設計） | ⬜ |
+| Sec | バインドを loopback/Tailscale 限定に（iOS接続への影響を要設計） | ✅ loopback + Tailscale IPv4。90秒ウォッチドッグで IP 変化時に再バインド |
 | Sec | `UpdateManager` の `zsh -lc` を Process配列実行へ（シェル注入対策） | ✅ 完了（値を位置パラメータ化） |
-| Rel | LINE配信の自己回復（`/health`＋トークン失効検知＋再送デッドレターキュー） | ⬜ |
+| Rel | LINE配信の自己回復（`/health`＋トークン失効検知＋再送デッドレターキュー） | 🟡 401 検知→トースト＋ブリッジ自動再起動、3分ウォッチドッグ、`FailedDeliveryStore` デッドレター。手動再送 UI は未 |
 | Rel | 外部スクリプト（stock/gmail）をラッパー化（timeout＋指数バックオフ＋結果記録） | ⬜ |
 | QA | 開発者個人ID（APNs `576D2UUHH5`／bundle）を空デフォルト＋設定プロンプト化 | ✅ Team ID 空既定＋送信ガード追加（bundle は要検討） |
 | Prod | 撤去済みの News/Gmail/Schedule/OutputModeViews を削除（dead code整理） | 🟡 未配線分（構造化出力＋chatOutputMode）は削除済。News/Gmail/Schedule 本体は機能判断待ち |
