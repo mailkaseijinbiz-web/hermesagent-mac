@@ -148,10 +148,10 @@ struct MacLifeLogView: View {
                 if graphEvents.isEmpty {
                     emptyState
                 } else {
-                    ForEach(Array(displayEvents.enumerated()), id: \.element.id) { idx, ev in
+                    ForEach(Array(displayEvents.enumerated()), id: \.element.id) { entry in
                         DayTimelineRowView(
-                            event: ev,
-                            isLast: idx == displayEvents.count - 1,
+                            event: entry.element,
+                            isLast: entry.offset == displayEvents.count - 1,
                             onEditMemo: { id in
                                 guard isViewingToday else { return }
                                 if let m = memoStore.memos(for: selectedDate).first(where: { $0.id == id }) {
@@ -178,11 +178,14 @@ struct MacLifeLogView: View {
         .sheet(isPresented: $showMemoInput) { memoInputSheet }
         .sheet(item: $editingMemo) { m in memoEditSheet(m) }
         .sheet(isPresented: $showHomeEditor) { homeEditorSheet }
-        .onAppear { refresh() }
+        .onAppear {
+            refresh()
+            if isViewingToday { showFullTimeline = true }
+        }
         .onReceive(refreshTimer) { _ in refresh() }
         .onChange(of: selectedDate) { _, d in
             selectedDate = LifeLogDay.startOfDay(d)
-            showFullTimeline = false
+            showFullTimeline = LifeLogDay.isToday(d)
             refresh()
         }
         .task(id: isViewingToday) {
@@ -326,7 +329,6 @@ struct MacLifeLogView: View {
         var parts: [String] = []
         if let r = appState.dayRecord(for: selectedDate) {
             if let s = r.steps { parts.append("歩数 \(s)歩") }
-            if let e = r.activeEnergyKcal { parts.append("\(e)kcal") }
             if let sh = r.sleepHours { parts.append(String(format: "睡眠 %.1fh", sh)) }
             if !r.locations.isEmpty { parts.append("場所: \(appState.resolvedLocationSummary(r.locations))") }
             if !r.photos.isEmpty { parts.append("写真: \(r.photos)") }
@@ -703,27 +705,21 @@ struct MacTimelineRow: View {
                     Image(systemName: a.kind == "hermes" ? "brain.head.profile" : "menubar.dock.rectangle")
                         .font(.system(size: 11))
                         .foregroundStyle(a.kind == "hermes" ? Color.purple : .secondary)
-                    Text(a.appName)
+                    Text(MacWorkFocus.workTitle(for: a))
                         .font(.system(size: 13, weight: .medium))
+                        .lineLimit(2)
                     Text(durationLabel(a.duration))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
-                // ページタイトル（ブラウザ名サフィックスを除去して表示）
-                let pageTitle: String? = {
-                    guard let wt = a.windowTitle, !wt.isEmpty else {
-                        return (!a.label.isEmpty && a.label != a.appName) ? a.label : nil
-                    }
-                    return stripBrowserSuffix(wt)
-                }()
-                if let pt = pageTitle {
-                    Text(pt)
+                if let subtitle = MacWorkFocus.subtitle(for: a) {
+                    Text(subtitle)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                // URL のホスト部分（ブラウザエントリのみ）
-                if let urlStr = a.url, let host = URL(string: urlStr)?.host, !host.isEmpty {
+                if let urlStr = a.url, let host = URL(string: urlStr)?.host, !host.isEmpty,
+                   MacWorkFocus.workTitle(for: a) != host {
                     Text(host)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.tertiary)
@@ -814,7 +810,6 @@ struct MacTimelineRow: View {
     private func healthChips(_ h: HealthSnapshot) -> some View {
         let chips: [(String, String)] = [
             h.steps.map { ("figure.walk", "\($0)歩") },
-            h.activeEnergyKcal.map { ("flame.fill", "\(Int($0))kcal") },
             h.heartRate.map { ("heart.fill", "\($0)bpm") },
             h.restingHeartRate.map { ("heart", "安静\($0)bpm") },
             h.sleepHours.map { ("moon.fill", String(format: "睡眠%.1fh", $0)) },
@@ -840,12 +835,4 @@ struct MacTimelineRow: View {
         return rem == 0 ? "\(h)時間" : "\(h)h\(rem)m"
     }
 
-    private func stripBrowserSuffix(_ title: String) -> String {
-        let suffixes = [" - Google Chrome", " - Mozilla Firefox", " — Safari",
-                        " - Arc", " - Microsoft Edge"]
-        for s in suffixes where title.hasSuffix(s) {
-            return String(title.dropLast(s.count))
-        }
-        return title
-    }
 }

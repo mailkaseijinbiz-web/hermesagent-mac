@@ -11,6 +11,8 @@ struct DayTimelineEvent: Codable, Identifiable, Equatable {
     var duration: Double? = nil
     /// How many raw sessions this row represents after merging.
     var sessionCount: Int = 1
+    /// Memo attachment filenames (`MacMemoStore.imageDir` 配下).
+    var imageNames: [String]? = nil
 }
 
 /// Merges Mac activity, memos, and iOS-derived snapshots into a sorted timeline.
@@ -36,21 +38,22 @@ enum DayTimelineGraph {
                 id: "mac-\(e.id)",
                 time: e.startTime,
                 kind: e.kind == "hermes" ? "hermes" : "mac",
-                label: e.appName,
-                detail: e.label,
+                label: MacWorkFocus.workTitle(for: e),
+                detail: macEventDetail(for: e),
                 duration: e.duration,
                 sessionCount: 1
             ))
         }
 
-        for m in memos where Calendar.current.isDate(m.time, inSameDayAs: day) {
+        for m in memos {
             let (label, detail) = memoLabelAndDetail(m)
             events.append(DayTimelineEvent(
                 id: "memo-\(m.id)",
                 time: m.time.timeIntervalSince1970,
                 kind: "memo",
                 label: label,
-                detail: detail
+                detail: detail,
+                imageNames: m.imagePaths
             ))
         }
 
@@ -96,7 +99,14 @@ enum DayTimelineGraph {
         return (label, detail)
     }
 
-    /// UI向け: 近接する同一アプリを束ね、アプリ単位に要約し、上位のみ表示する。
+    private static func macEventDetail(for entry: MacActivityEntry) -> String {
+        if let subtitle = MacWorkFocus.subtitle(for: entry) {
+            return subtitle
+        }
+        return DayTimelineGraph.formatDuration(entry.duration)
+    }
+
+    /// UI向け: 近接する同一作業を束ね、作業単位に要約し、上位のみ表示する。
     static func compactForDisplay(_ events: [DayTimelineEvent], maxMacApps: Int = 6) -> [DayTimelineEvent] {
         guard !events.isEmpty else { return [] }
         let merged = mergeAdjacentMac(events)
@@ -238,13 +248,45 @@ enum DayTimelineGraph {
     }
 
     /// Compact HH:mm lines for LLM context.
-    static func formatForContext(_ events: [DayTimelineEvent], max: Int = 12) -> String {
+    static func formatForContext(_ events: [DayTimelineEvent], max: Int = 16) -> String {
         guard !events.isEmpty else { return "" }
         let tf = DateFormatter()
         tf.locale = Locale(identifier: "ja_JP")
         tf.dateFormat = "HH:mm"
         return events.suffix(max).map { e in
             let t = tf.string(from: Date(timeIntervalSince1970: e.time))
+            let d = e.detail.isEmpty ? e.label : e.detail
+            return "\(t) \(e.label): \(d)"
+        }.joined(separator: "\n")
+    }
+
+    /// 要約用: Mac 作業は合計5分以上のみ、ウィンドウタイトルは渡さない。
+    static func eventsForSummaryContext(
+        _ events: [DayTimelineEvent],
+        minMacDuration: TimeInterval = 300
+    ) -> [DayTimelineEvent] {
+        let compact = compactForDisplay(events)
+        return compact.filter { e in
+            if isMacLike(e.kind) {
+                return (e.duration ?? 0) >= minMacDuration
+            }
+            return true
+        }
+    }
+
+    /// ライフログ要約向け: アプリ名と利用時間のみ（プロジェクト名・タブ名は除外）。
+    static func formatForSummaryContext(_ events: [DayTimelineEvent], max: Int = 12) -> String {
+        let filtered = eventsForSummaryContext(events)
+        guard !filtered.isEmpty else { return "" }
+        let tf = DateFormatter()
+        tf.locale = Locale(identifier: "ja_JP")
+        tf.dateFormat = "HH:mm"
+        return filtered.suffix(max).map { e in
+            let t = tf.string(from: Date(timeIntervalSince1970: e.time))
+            if isMacLike(e.kind) {
+                let dur = formatDuration(e.duration ?? 0)
+                return "\(t) \(e.label)（\(dur)）"
+            }
             let d = e.detail.isEmpty ? e.label : e.detail
             return "\(t) \(e.label): \(d)"
         }.joined(separator: "\n")
@@ -294,7 +336,7 @@ extension AppState {
     func todayTimelineEvents() -> [DayTimelineEvent] {
         let h = latestHealth
         return DayTimelineGraph.build(
-            macEntries: MacActivityLogger.shared.todayEntriesFromDisk(),
+            macEntries: MacActivityLogger.shared.todayEntries(),
             memos: MacMemoStore.shared.memos(for: Date()),
             healthUpdatedAt: h?.updatedAt,
             healthLine: healthSummaryLine,
@@ -310,5 +352,10 @@ extension AppState {
         let raw = todayTimelineEvents()
         let compact = DayTimelineGraph.compactForDisplay(raw)
         return DayTimelineGraph.formatForContext(compact)
+    }
+
+    func timelineSummaryContextText() -> String {
+        let raw = todayTimelineEvents()
+        return DayTimelineGraph.formatForSummaryContext(raw)
     }
 }

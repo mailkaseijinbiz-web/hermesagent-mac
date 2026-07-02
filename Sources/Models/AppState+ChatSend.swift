@@ -266,9 +266,14 @@ extension AppState {
         self.lastStreamActivityAt = now
         self.streamedCharCount = 0
 
+        let trendChartPrefix: String = {
+            guard let emp = activeEmployee, emp.isHealthAdvisor else { return "" }
+            return HealthTrendQuery.chartBlock(for: text).map { $0 + "\n\n" } ?? ""
+        }()
+
         // Stable id for the streaming bubble — updated in place by chunk events.
         let assistantId = UUID()
-        self.messages.append(Message(id: assistantId, role: .assistant, content: "", typewriter: true))
+        self.messages.append(Message(id: assistantId, role: .assistant, content: trendChartPrefix, typewriter: true))
         // Snapshot current messages into the shadow (background streaming keeps chunks here).
         empMessages[curKey] = cappedShadow(messages)
         touchEmpMessageShadow(forKey: curKey)

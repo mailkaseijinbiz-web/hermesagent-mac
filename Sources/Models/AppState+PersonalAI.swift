@@ -43,7 +43,8 @@ extension AppState {
             let top = macEntries.sorted { $0.duration > $1.duration }.prefix(6)
             let macSummary = top.map { e -> String in
                 let m = Int(e.duration / 60)
-                return m >= 60 ? "\(e.appName)(\(m/60)h\(m%60>0 ? "\(m%60)m":""))" : "\(e.appName)(\(m)m)"
+                let dur = m >= 60 ? "\(m/60)h\(m%60>0 ? "\(m%60)m":"")" : "\(m)m"
+                return "\(MacWorkFocus.workTitle(for: e))(\(dur))"
             }.joined(separator: " / ")
             lines.append("今日のMac作業: \(macSummary)")
         }
@@ -217,27 +218,44 @@ extension AppState {
 
     // MARK: - ライフログ要約
 
+    private static let lifelogSummaryContextHashKey = "lifelogSummaryContextHash"
+
     /// 今日の Mac + iOS アクティビティを要約する（2〜4文）。
     /// 30分以内に生成済みなら skip（forceRefresh=true で強制再生成）。
     func generateLifelogSummary(forceRefresh: Bool = false) async {
         guard !isGeneratingLifelogSummary else { return }
+        if !Calendar.current.isDateInToday(Date(timeIntervalSince1970: lifelogSummaryAt)) {
+            lifelogSummary = ""
+            lifelogSummaryAt = 0
+        }
+
+        let ctx = lifelogContext()
+        let ctxHash = ctx.hashValue
+        let storedHash = UserDefaults.standard.integer(forKey: Self.lifelogSummaryContextHashKey)
+        if ctx.isEmpty {
+            if !lifelogSummary.isEmpty {
+                lifelogSummary = ""
+                lifelogSummaryAt = 0
+            }
+            return
+        }
         if !forceRefresh {
             let age = Date().timeIntervalSince1970 - lifelogSummaryAt
             let isToday = Calendar.current.isDateInToday(Date(timeIntervalSince1970: lifelogSummaryAt))
-            if isToday && age < 1800 && !lifelogSummary.isEmpty { return }
+            let contextChanged = ctxHash != storedHash
+            if isToday && age < 1800 && !lifelogSummary.isEmpty && !contextChanged { return }
         }
         isGeneratingLifelogSummary = true
         defer { isGeneratingLifelogSummary = false }
-
-        let ctx = lifelogContext()
-        guard !ctx.isEmpty else { return }
 
         let prompt = """
         あなたはユーザーの一日の活動を把握しているアシスタントです。以下のデータをもとに、今日の活動を日本語で簡潔に要約してください。
         ルール:
         - 挨拶・前置き不要。事実ベースで。
         - 2〜4文に収める。
-        - Mac作業・外出・健康・メモの中で目立つものだけ取り上げる。
+        - 【時系列】に載っている出来事だけを書く。Mac作業・外出・健康・メモ・写真のうち、データに明確に現れているものだけ。
+        - 5分未満の短いアプリ切り替え、ウィンドウタイトル、プロジェクト名、開発中アプリ名は要約に含めない。
+        - データにない内容は推測しない。昨日や最近の作業を推測で書かない。
         - 「〜でした」「〜しました」調で、ひとことコメントを添えても良い。
 
         【今日のデータ】
@@ -247,61 +265,22 @@ extension AppState {
         if !text.isEmpty && !looksLikeErrorResponse(text) {
             lifelogSummary = text
             lifelogSummaryAt = Date().timeIntervalSince1970
+            UserDefaults.standard.set(ctxHash, forKey: Self.lifelogSummaryContextHashKey)
         }
     }
 
-    /// ライフログ要約用のコンテキスト文字列を組み立てる。
+    /// ライフログ要約用のコンテキスト（タイムライン UI と同じ DayTimelineGraph 由来）。
     func lifelogContext() -> String {
-        var lines: [String] = []
-
-        // Mac アクティビティ（ディスクから）
-        let macEntries = MacActivityLogger.shared.todayEntriesFromDisk()
-        if !macEntries.isEmpty {
-            let appGroups = Dictionary(grouping: macEntries.filter { $0.kind == "app" }, by: \.appName)
-            let sorted = appGroups.map { (name: $0.key, dur: $0.value.reduce(0) { $0 + $1.duration }) }
-                                  .sorted { $0.dur > $1.dur }.prefix(8)
-            let macLine = sorted.map { item -> String in
-                let m = Int(item.dur / 60)
-                return m >= 60 ? "\(item.name)(\(m/60)h\(m%60>0 ? "\(m%60)m":""))" : "\(item.name)(\(m)m)"
-            }.joined(separator: " / ")
-            if !macLine.isEmpty { lines.append("Mac作業: \(macLine)") }
-
-            let hermesEntries = macEntries.filter { $0.kind == "hermes" }
-            if !hermesEntries.isEmpty {
-                lines.append("Hermesチャット: \(hermesEntries.map { $0.appName }.joined(separator: ", "))")
-            }
+        var parts: [String] = []
+        let timeline = timelineSummaryContextText()
+        if !timeline.isEmpty {
+            parts.append("【時系列】\n\(timeline)")
         }
-
-        // iOS ヘルス
-        if let h = latestHealth,
-           Calendar.current.isDateInToday(Date(timeIntervalSince1970: h.updatedAt)) {
-            var hp: [String] = []
-            if let v = h.steps              { hp.append("歩数\(v)歩") }
-            if let v = h.activeEnergyKcal   { hp.append("\(Int(v))kcal") }
-            if let v = h.heartRate          { hp.append("心拍\(v)bpm") }
-            if let v = h.restingHeartRate   { hp.append("安静心拍\(v)bpm") }
-            if let v = h.sleepHours         { hp.append(String(format: "睡眠%.1fh", v)) }
-            if let v = h.distanceKm         { hp.append(String(format: "%.1fkm", v)) }
-            if !hp.isEmpty { lines.append("健康: \(hp.joined(separator: " / "))") }
+        let memoCtx = MemoContext.format(MacMemoStore.shared.todayMemos, max: 8, maxChars: 160)
+        if !memoCtx.isEmpty {
+            parts.append("【メモ・共有（詳細）】\n\(memoCtx)")
         }
-
-        // iOS 位置
-        if !locationSummary.isEmpty,
-           Calendar.current.isDateInToday(Date(timeIntervalSince1970: locationSummaryAt)) {
-            lines.append("外出: \(resolvedLocationSummary(locationSummary))")
-        }
-
-        // iOS 写真
-        if !photoSummary.isEmpty,
-           Calendar.current.isDateInToday(Date(timeIntervalSince1970: photoSummaryAt)) {
-            lines.append("写真: \(photoSummary)")
-        }
-
-        // メモ（共有・Web・写真）
-        let memoCtx = MemoContext.format(MacMemoStore.shared.todayMemos)
-        if !memoCtx.isEmpty { lines.append("共有・備忘録:\n\(memoCtx)") }
-
-        return lines.joined(separator: "\n")
+        return parts.joined(separator: "\n\n")
     }
 
     // MARK: - 起動時・定期実行
@@ -329,7 +308,115 @@ extension AppState {
         }
     }
 
+    /// 夜の振り返り v2 — 選んだ記録と感情から「今日のひとこと」+ AI振り返り文を生成。
+    func generateEveningReflection(
+        pickedLabel: String,
+        pickedDetail: String,
+        feelingText: String
+    ) async -> EveningReflectionAIResult? {
+        let label = pickedLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = pickedDetail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let feeling = feelingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !feeling.isEmpty else { return nil }
+
+        var record = label
+        if !detail.isEmpty, detail != label {
+            record += " — \(detail)"
+        }
+
+        var contextLines: [String] = []
+        let timeline = timelineContextText()
+        if !timeline.isEmpty { contextLines.append("【今日の流れ】\n\(timeline)") }
+        if !lifelogSummary.isEmpty,
+           Calendar.current.isDateInToday(Date(timeIntervalSince1970: lifelogSummaryAt)) {
+            contextLines.append("【活動要約】\n\(lifelogSummary)")
+        }
+        let context = contextLines.joined(separator: "\n")
+
+        let prompt = """
+        あなたはユーザーの一日の振り返りを手伝うアシスタントです。ユーザーが選んだ記録と気持ちをもとに、JSONだけを返してください。
+        形式: {"oneLiner":"...", "aiReflection":"..."}
+
+        oneLiner: 今日のひとこと。日本語1文、30〜60字。選んだ記録と感情が自然に伝わること。
+        aiReflection: Hermesからの振り返り。2〜3文、120〜200字。今日の流れと選んだ記録をつなげ、含蓄のある所感。一般論・お決まりの励ましは避ける。データにない推測はしない。
+
+        【選んだ記録】\(record)
+        【そのときの気持ち】\(feeling)
+        \(context.isEmpty ? "" : "\n\(context)")
+        """
+        let text = await runBriefPrompt(prompt)
+        if !text.isEmpty, !looksLikeErrorResponse(text), let parsed = EveningReflectionAIParser.parse(text) {
+            return parsed
+        }
+        let oneLiner = await generateEveningReflectionOneLiner(
+            pickedLabel: pickedLabel,
+            pickedDetail: pickedDetail,
+            feelingText: feelingText
+        )
+        guard !oneLiner.isEmpty else { return nil }
+        return EveningReflectionAIResult(oneLiner: oneLiner, aiReflection: "")
+    }
+
+    /// 夜の振り返り v0 — 選んだ記録と感情から「今日のひとこと」を1文生成。
+    func generateEveningReflectionOneLiner(
+        pickedLabel: String,
+        pickedDetail: String,
+        feelingText: String
+    ) async -> String {
+        let label = pickedLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = pickedDetail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let feeling = feelingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !feeling.isEmpty else { return "" }
+
+        var record = label
+        if !detail.isEmpty, detail != label {
+            record += " — \(detail)"
+        }
+
+        let prompt = """
+        あなたはユーザーの一日の振り返りを手伝うアシスタントです。ユーザーが選んだ記録と、そのときの気持ちをもとに「今日のひとこと」を日本語で1文だけ書いてください。
+        ルール:
+        - 挨拶・前置き不要。1文のみ。
+        - 選んだ記録の内容と感情の両方が自然に伝わること。
+        - 30〜60字程度。です・ます調でもよい。
+        - データにない内容は推測しない。
+
+        【選んだ記録】\(record)
+        【そのときの気持ち】\(feeling)
+        """
+        let text = await runBriefPrompt(prompt)
+        if !text.isEmpty && !looksLikeErrorResponse(text) {
+            return text
+        }
+        return ""
+    }
+
     // MARK: - 内部ヘルパー
+
+    /// Vision caption for a lifelog photo (JPEG on disk). Deletes the temp file when done.
+    func describePhoto(at imagePath: String) async -> String {
+        let prompt = """
+        この写真に写っている内容を日本語で1〜2文で説明してください。
+        ルール: 挨拶不要。見えている事実だけ。人物・食べ物・場所・活動があれば具体的に。
+        """
+        let text = await runVisionPrompt(prompt, imagePath: imagePath)
+        try? FileManager.default.removeItem(atPath: imagePath)
+        guard !text.isEmpty, !looksLikeErrorResponse(text) else { return "" }
+        return text
+    }
+
+    /// Run a brief prompt with an attached image through the agent CLI.
+    func runVisionPrompt(_ prompt: String, imagePath: String) async -> String {
+        let args = ["chat", "-q", prompt, "--image", imagePath]
+        let stdout: String? = await withTaskGroup(of: String?.self) { group in
+            group.addTask { await HermesCLI.shared.exec(args: args, timeout: 45).stdout }
+            group.addTask { try? await Task.sleep(nanoseconds: 45_000_000_000); return nil }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        return stdout.map { parseResponseText($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+    }
 
     /// Run a brief prompt through the agent, racing a 40s timeout (the model may hang).
     /// Returns cleaned reply text, or "" on timeout/failure. Shared by generate + revise.
@@ -367,7 +454,7 @@ extension AppState {
             let macEntries = MacActivityLogger.shared.todayEntriesFromDisk()
             if !macEntries.isEmpty {
                 let top = macEntries.sorted { $0.duration > $1.duration }.prefix(3)
-                let apps = top.map { $0.appName }.joined(separator: "、")
+                let apps = top.map { MacWorkFocus.workTitle(for: $0) }.joined(separator: "、")
                 reflection.append("Mac作業の中心は\(apps)でした。")
             }
         }

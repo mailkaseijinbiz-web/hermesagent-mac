@@ -174,6 +174,14 @@ extension AppState {
         isGeneratingIntention = true
         defer { isGeneratingIntention = false }
 
+        let mode = vitalityMode()
+        var snapshotProps: [String: String] = ["mode": mode]
+        if let h = latestHealth {
+            if let s = h.sleepHours { snapshotProps["sleep_h"] = String(format: "%.1f", s) }
+            if let r = h.restingHeartRate { snapshotProps["resting_hr"] = String(r) }
+        }
+        trackProductMetric(name: "vitality.mode_snapshot", props: snapshotProps)
+
         let prompt = """
         あなたはユーザーの意図を引き出すパーソナルパートナーです。以下のデータから、いま取りうる行動を**最大3つ**、JSONだけで返してください。
         ルール:
@@ -237,9 +245,18 @@ extension AppState {
         preserveDismissals: Bool,
         resetDismissals: Bool
     ) {
+        let filtered = ProductMetricsEngine.guardrailFilterCards(cards, vitalityMode: vitalityMode)
+        for card in cards where ProductMetricsEngine.isProductivityKind(card.kind)
+            && !filtered.cards.contains(where: { $0.id == card.id }) {
+            trackProductMetric(name: "guardrail.productivity_push", props: [
+                "kind": card.kind,
+                "vitality_mode": vitalityMode,
+            ])
+        }
+
         intentionVitalHint = vitalHint.isEmpty ? vitalityHintLine() : vitalHint
         intentionVitalityMode = vitalityMode
-        intentionCards = cards
+        intentionCards = filtered.cards
         intentionCardsAt = Date().timeIntervalSince1970
         if resetDismissals {
             intentionSelectedId = nil
@@ -248,6 +265,20 @@ extension AppState {
         } else if !preserveDismissals {
             intentionSelectedId = nil
             intentionDismissedIds = []
+        }
+
+        let kinds = filtered.cards.map(\.kind).joined(separator: ",")
+        trackProductMetric(name: "intention.cards_generated", props: [
+            "vitality_mode": vitalityMode,
+            "kinds": kinds,
+            "count": String(filtered.cards.count),
+        ])
+        for (idx, card) in visibleIntentionCards.enumerated() {
+            trackProductMetric(name: "intention.card_shown", props: [
+                "kind": card.kind,
+                "vitality_mode": vitalityMode,
+                "position": String(idx),
+            ])
         }
     }
 
@@ -345,6 +376,11 @@ extension AppState {
             return ["ok": false, "error": "unknown card"]
         }
         intentionSelectedId = id
+        trackProductMetric(name: "intention.card_confirmed", props: [
+            "kind": card.kind,
+            "vitality_mode": intentionVitalityMode,
+            "action_type": card.action.type,
+        ])
         var result: [String: Any] = ["ok": true, "cardId": id, "kind": card.kind]
         result.merge(applyIntentionAction(card)) { _, new in new }
         triggerToast(message: "「\(card.title)」を選びました")
@@ -442,6 +478,10 @@ extension AppState {
 
     func dismissIntentionCard(_ id: String) {
         guard let card = intentionCards.first(where: { $0.id == id }) else { return }
+        trackProductMetric(name: "intention.card_dismissed", props: [
+            "kind": card.kind,
+            "vitality_mode": intentionVitalityMode,
+        ])
         if !intentionDismissedIds.contains(id) {
             intentionDismissedIds.append(id)
         }
