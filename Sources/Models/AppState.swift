@@ -445,6 +445,13 @@ class AppState: ObservableObject {
     @Published var liveActivityStartTokens: [String] = UserDefaults.standard.stringArray(forKey: "liveActivityStartTokens") ?? [] {
         didSet { UserDefaults.standard.set(liveActivityStartTokens, forKey: "liveActivityStartTokens") }
     }
+    // Lifelog glance Live Activity tokens (lock screen, no app open required).
+    @Published var lifeLogLiveActivityPushTokens: [String] = UserDefaults.standard.stringArray(forKey: "lifeLogLiveActivityPushTokens") ?? [] {
+        didSet { UserDefaults.standard.set(lifeLogLiveActivityPushTokens, forKey: "lifeLogLiveActivityPushTokens") }
+    }
+    @Published var lifeLogLiveActivityStartTokens: [String] = UserDefaults.standard.stringArray(forKey: "lifeLogLiveActivityStartTokens") ?? [] {
+        didSet { UserDefaults.standard.set(lifeLogLiveActivityStartTokens, forKey: "lifeLogLiveActivityStartTokens") }
+    }
     private var lastPushedMessageId: Int64 = 0
     
     // Settings Form State
@@ -624,6 +631,10 @@ class AppState: ObservableObject {
         didSet { AppState.saveDailyText(text: lifelogSummary, at: lifelogSummaryAt, storeKey: "lifelogDaily") }
     }
     @Published var isGeneratingLifelogSummary = false
+
+    // Self-graph proposal batches (週次レビューのAI差分提案). Bumped when a new batch
+    // lands so views can refetch from SelfGraphProposalStore.
+    @Published var selfGraphProposalsUpdatedAt: Double = 0
 
     // Location: a privacy-light daily "足あと" summary pushed from iOS (place names + times,
     // NOT raw coordinates). Injected into the brief/coaching context. Device-local.
@@ -1255,6 +1266,7 @@ class AppState: ObservableObject {
             await self.autoBriefIfStale()
             await self.autoIntentionIfStale()
             self.startAutoBriefTimer()
+            self.startReflectionCoachTimer()   // 21:30質問生成 & 22:00リマインダー
             self.startEmployeeProactiveScheduler()
 
             // Cloud sync (can take seconds) now overlaps the above instead of gating it.
@@ -1512,6 +1524,61 @@ class AppState: ObservableObject {
         liveActivityStartTokens.append(t)
         if liveActivityStartTokens.count > 3 {
             liveActivityStartTokens.removeFirst(liveActivityStartTokens.count - 3)
+        }
+    }
+
+    func addLifeLogLiveActivityPushToken(_ token: String) {
+        let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !lifeLogLiveActivityPushTokens.contains(t) else { return }
+        lifeLogLiveActivityPushTokens.append(t)
+        if lifeLogLiveActivityPushTokens.count > 5 {
+            lifeLogLiveActivityPushTokens.removeFirst(lifeLogLiveActivityPushTokens.count - 5)
+        }
+    }
+
+    func addLifeLogLiveActivityStartToken(_ token: String) {
+        let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !lifeLogLiveActivityStartTokens.contains(t) else { return }
+        lifeLogLiveActivityStartTokens.append(t)
+        if lifeLogLiveActivityStartTokens.count > 3 {
+            lifeLogLiveActivityStartTokens.removeFirst(lifeLogLiveActivityStartTokens.count - 3)
+        }
+    }
+
+    /// Push lifelog glance to lock screen via ActivityKit (update or push-to-start).
+    func pushLifeLogLiveActivity(headline: String, detail: String = "", statusLabel: String = "今日") {
+        guard apnsEnabled, !apnsKeyId.isEmpty, !apnsKeyPath.isEmpty, !apnsTeamId.isEmpty else { return }
+        let h = String(headline.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        guard !h.isEmpty else { return }
+        let d = String(detail.trimmingCharacters(in: .whitespacesAndNewlines).prefix(72))
+        let cfg = APNsSender.Config(
+            keyPath: apnsKeyPath, keyId: apnsKeyId, teamId: apnsTeamId,
+            bundleId: apnsBundleId, useSandbox: apnsUseSandbox
+        )
+        if !lifeLogLiveActivityPushTokens.isEmpty {
+            let tokens = lifeLogLiveActivityPushTokens
+            Task { [weak self] in
+                let invalid = await APNsSender.shared.sendLifeLogLiveActivityUpdate(
+                    to: tokens, headline: h, detail: d, statusLabel: statusLabel, config: cfg
+                )
+                if !invalid.isEmpty {
+                    await MainActor.run {
+                        self?.lifeLogLiveActivityPushTokens.removeAll { invalid.contains($0) }
+                    }
+                }
+            }
+        } else if !lifeLogLiveActivityStartTokens.isEmpty {
+            let tokens = lifeLogLiveActivityStartTokens
+            Task { [weak self] in
+                let invalid = await APNsSender.shared.sendLifeLogLiveActivityStart(
+                    to: tokens, headline: h, detail: d, statusLabel: statusLabel, config: cfg
+                )
+                if !invalid.isEmpty {
+                    await MainActor.run {
+                        self?.lifeLogLiveActivityStartTokens.removeAll { invalid.contains($0) }
+                    }
+                }
+            }
         }
     }
 

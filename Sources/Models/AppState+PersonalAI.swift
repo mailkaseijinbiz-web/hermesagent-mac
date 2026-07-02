@@ -187,11 +187,12 @@ extension AppState {
         }
         isGeneratingReview = true
         defer { isGeneratingReview = false }
+        let reflections = await reflectionReviewBlock(days: 14)
         let prompt = """
         あなたはユーザー専属のメタ認知コーチです。以下は直近2週間の日次データです。ユーザーの目標・好きなもの・リソース配分を踏まえ、一歩引いて俯瞰し、日本語でまとめてください。
         ルール:
         - 挨拶や前置きは書かない。
-        - まず「気づき」として、データから読み取れるパターンや傾向（例: ある行動と睡眠/運動の相関、増減傾向）を根拠とともに2〜4点。
+        - まず「気づき」として、データから読み取れるパターンや傾向（例: ある行動と睡眠/運動の相関、増減傾向）を根拠とともに2〜4点。夜の振り返りの気分スコアや回答があれば、行動データとの関連を最優先で見る。
         - 続けて「来週への提案」として、目標に近づく具体的な行動を最大3つ。好きなことも無理なく絡める。
         - 最後に「今週の意外なつながり」として、セレンディピティ候補から1点（あれば）。押し付けない。
         - データが乏しい点は憶測で埋めない。
@@ -204,6 +205,8 @@ extension AppState {
 
         \(serendipityReviewBlock())
 
+        \(reflections)
+
         【直近2週間の日次データ】
         \(data)
         """
@@ -211,6 +214,8 @@ extension AppState {
         if !text.isEmpty && !looksLikeErrorResponse(text) {
             weeklyReview = text
             weeklyReviewAt = Date().timeIntervalSince1970
+            // レビューと同じ材料で自己グラフの差分提案も更新する（承認制）。
+            await generateSelfGraphProposals()
         } else {
             triggerToast(message: "週次レビューの生成に失敗しました（モデル応答なし/エラー）")
         }
@@ -222,7 +227,9 @@ extension AppState {
 
     /// 今日の Mac + iOS アクティビティを要約する（2〜4文）。
     /// 30分以内に生成済みなら skip（forceRefresh=true で強制再生成）。
-    func generateLifelogSummary(forceRefresh: Bool = false) async {
+    /// notifyLiveActivity=false は iOS 起点の生成用 — クライアントは応答から自分で
+    /// Live Activity を更新するので、APNs プッシュを重ねると訪問のたび通知になる。
+    func generateLifelogSummary(forceRefresh: Bool = false, notifyLiveActivity: Bool = true) async {
         guard !isGeneratingLifelogSummary else { return }
         if !Calendar.current.isDateInToday(Date(timeIntervalSince1970: lifelogSummaryAt)) {
             lifelogSummary = ""
@@ -263,9 +270,14 @@ extension AppState {
         """
         let text = await runBriefPrompt(prompt)
         if !text.isEmpty && !looksLikeErrorResponse(text) {
+            let previous = lifelogSummary
             lifelogSummary = text
             lifelogSummaryAt = Date().timeIntervalSince1970
             UserDefaults.standard.set(ctxHash, forKey: Self.lifelogSummaryContextHashKey)
+            // 内容が実際に変わったときだけ Live Activity を更新する
+            if notifyLiveActivity, text != previous {
+                pushLifeLogLiveActivity(headline: text, statusLabel: "今日")
+            }
         }
     }
 

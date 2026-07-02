@@ -23,6 +23,8 @@ struct MacNewsView: View {
     @State private var loadingStocks = false
     @State private var loadingNews = false
     @State private var newsLoadedAt: Date?
+    @State private var reflectionEntries: [ReflectionEntry] = []
+    @State private var graphProposals: [SelfGraphProposal] = []
 
     private var newsTopics: [String] {
         NewsFeedParser.topics(from: appState.personalProfile.likes)
@@ -156,6 +158,10 @@ struct MacNewsView: View {
             }
             .disabled(appState.isGeneratingReview)
         } content: {
+            if !reflectionEntries.isEmpty {
+                MoodTrendView(entries: reflectionEntries)
+                    .padding(.bottom, 12)
+            }
             if appState.isGeneratingReview && appState.weeklyReview.isEmpty {
                 Text("行動パターンを分析中…")
                     .font(.system(size: 15)).foregroundStyle(.secondary)
@@ -171,7 +177,22 @@ struct MacNewsView: View {
                         .padding(.top, 14)
                 }
             }
+            if !graphProposals.isEmpty {
+                Divider().padding(.vertical, 10)
+                SelfGraphProposalListView(proposals: graphProposals) { id, accept in
+                    Task {
+                        _ = await appState.decideSelfGraphProposal(id: id, accept: accept)
+                        await loadReflectionData()
+                    }
+                }
+            }
         }
+        .task(id: appState.selfGraphProposalsUpdatedAt) { await loadReflectionData() }
+    }
+
+    private func loadReflectionData() async {
+        reflectionEntries = await ReflectionStore.shared.recent(days: 14)
+        graphProposals = await SelfGraphProposalStore.shared.pending()
     }
 
     // MARK: - Stocks
@@ -537,5 +558,160 @@ private struct SparklineView: View {
         path.addLine(to: CGPoint(x: first.x, y: rect.maxY))
         path.closeSubpath()
         return path
+    }
+}
+
+// MARK: - 気分トレンド（夜の振り返りの moodScore を14日分表示）
+
+struct MoodTrendView: View {
+    let entries: [ReflectionEntry]
+
+    private var scored: [ReflectionEntry] { entries.filter { $0.moodScore != nil } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "face.smiling")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text("気分の推移")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let avg = averageText {
+                    Text(avg)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            if scored.isEmpty {
+                Text("夜の振り返りに答えると、ここに気分の推移が表示されます")
+                    .font(.system(size: 12)).foregroundStyle(.tertiary)
+            } else {
+                HStack(alignment: .bottom, spacing: 4) {
+                    ForEach(entries, id: \.dateKey) { e in
+                        VStack(spacing: 2) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(barColor(e.moodScore))
+                                .frame(height: barHeight(e.moodScore))
+                            Text(dayLabel(e.dateKey))
+                                .font(.system(size: 8))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: 56)
+            }
+        }
+        .padding(10)
+        .background(Color.primary.opacity(0.03))
+        .cornerRadius(10)
+    }
+
+    private var averageText: String? {
+        let scores = scored.compactMap(\.moodScore)
+        guard !scores.isEmpty else { return nil }
+        let avg = Double(scores.reduce(0, +)) / Double(scores.count)
+        return String(format: "平均 %.1f / 5", avg)
+    }
+
+    private func barHeight(_ mood: Int?) -> CGFloat {
+        guard let mood else { return 3 }   // 未回答日は薄い痕跡だけ
+        return CGFloat(mood) / 5.0 * 40 + 4
+    }
+
+    private func barColor(_ mood: Int?) -> Color {
+        guard let mood else { return Color.primary.opacity(0.08) }
+        switch mood {
+        case ..<2:  return .red.opacity(0.7)
+        case 2:     return .orange.opacity(0.7)
+        case 3:     return .yellow.opacity(0.75)
+        case 4:     return .green.opacity(0.7)
+        default:    return .green
+        }
+    }
+
+    private func dayLabel(_ dateKey: String) -> String {
+        String(dateKey.suffix(2)).hasPrefix("0")
+            ? String(dateKey.suffix(1))
+            : String(dateKey.suffix(2))
+    }
+}
+
+// MARK: - 自己グラフ差分提案（承認制）
+
+struct SelfGraphProposalListView: View {
+    let proposals: [SelfGraphProposal]
+    let onDecide: (String, Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text("自己グラフへの提案")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("\(proposals.count)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            ForEach(proposals) { p in
+                HStack(alignment: .top, spacing: 8) {
+                    Text(kindLabel(p))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.indigo)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.indigo.opacity(0.12))
+                        .cornerRadius(4)
+                        .fixedSize()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(changeSummary(p))
+                            .font(.system(size: 13, weight: .medium))
+                        Text(p.reason)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button { onDecide(p.id, true) } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.green)
+                    }
+                    .buttonStyle(.plain)
+                    .help("承認してグラフに反映")
+                    Button { onDecide(p.id, false) } label: {
+                        Image(systemName: "xmark.circle")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("却下")
+                }
+                .padding(10)
+                .background(Color.primary.opacity(0.03))
+                .cornerRadius(10)
+            }
+        }
+    }
+
+    private func kindLabel(_ p: SelfGraphProposal) -> String {
+        switch p.kind {
+        case "addNode":        return "ノード追加"
+        case "addLink":        return "リンク追加"
+        case "strengthenLink": return "リンク強化"
+        default:               return p.kind
+        }
+    }
+
+    private func changeSummary(_ p: SelfGraphProposal) -> String {
+        switch p.kind {
+        case "addNode":
+            return "「\(p.nodeLabel ?? "?")」を追加"
+        default:
+            return "「\(p.sourceLabel ?? "?")」↔「\(p.targetLabel ?? "?")」"
+        }
     }
 }

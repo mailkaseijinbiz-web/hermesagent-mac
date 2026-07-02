@@ -411,6 +411,10 @@ class MobileServer {
             handleLiveActivityPushToken(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/push/live-activity-start-token"):
             handleLiveActivityStartToken(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/push/lifelog-live-activity-token"):
+            handleLifeLogLiveActivityPushToken(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/push/lifelog-live-activity-start-token"):
+            handleLifeLogLiveActivityStartToken(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/presence"):
             handlePresence(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/badge/clear"):
@@ -466,6 +470,16 @@ class MobileServer {
             handleEveningReflectionSave(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/lifelog/evening-reflection"):
             handleEveningReflectionGet(connection: connection, dateKey: query["date"], corsHeaders: corsHeaders)
+        case ("GET", "/api/reflection/today"):
+            handleReflectionToday(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/reflection/answer"):
+            handleReflectionAnswer(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/reflection/history"):
+            handleReflectionHistory(connection: connection, days: query["days"], corsHeaders: corsHeaders)
+        case ("GET", "/api/self-graph/proposals"):
+            handleSelfGraphProposals(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/self-graph/proposals/decide"):
+            handleSelfGraphProposalDecide(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/metrics/event"):
             handleMetricsEvent(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/metrics/events"):
@@ -1055,6 +1069,32 @@ class MobileServer {
         }
     }
 
+    private nonisolated func handleLifeLogLiveActivityPushToken(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["token"] as? String, !token.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing token\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.addLifeLogLiveActivityPushToken(token)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    private nonisolated func handleLifeLogLiveActivityStartToken(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["token"] as? String, !token.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing token\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.addLifeLogLiveActivityStartToken(token)
+            self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+        }
+    }
+
     /// A device reports which session it's viewing in the foreground, so the Mac can
     /// skip pushing that session's updates to it. Body: {token, sessionId?, active}.
     private nonisolated func handlePresence(connection: NWConnection, body: String, corsHeaders: String) {
@@ -1532,13 +1572,18 @@ class MobileServer {
     private nonisolated func handleLifelogSummaryGet(connection: NWConnection, refresh: Bool, corsHeaders: String) {
         Task { @MainActor in
             if refresh {
-                await AppState.shared.generateLifelogSummary(forceRefresh: true)
+                await AppState.shared.generateLifelogSummary(forceRefresh: true, notifyLiveActivity: false)
+            } else {
+                // 古ければ裏で再生成（30分ステール＋コンテキスト変化の判定に従う）。
+                // 応答は現在値を即返し、クライアントは次回取得で新しい要約を受け取る。
+                Task { await AppState.shared.generateLifelogSummary(notifyLiveActivity: false) }
             }
             self.sendLifelogSummaryJSON(connection: connection, corsHeaders: corsHeaders)
         }
     }
 
     /// POST /api/lifelog/summary — regenerate today's summary and return it.
+    /// iOS起点なのでLive Activityプッシュはしない（クライアントが応答から自前更新する）。
     private nonisolated func handleLifelogSummaryRegenerate(connection: NWConnection, corsHeaders: String) {
         Task { @MainActor in
             if AppState.shared.isGeneratingLifelogSummary {
@@ -1546,7 +1591,7 @@ class MobileServer {
                                   body: "{\"error\":\"summary is being generated\"}", corsHeaders: corsHeaders)
                 return
             }
-            await AppState.shared.generateLifelogSummary(forceRefresh: true)
+            await AppState.shared.generateLifelogSummary(forceRefresh: true, notifyLiveActivity: false)
             self.sendLifelogSummaryJSON(connection: connection, corsHeaders: corsHeaders)
         }
     }
@@ -1636,6 +1681,84 @@ class MobileServer {
             } else {
                 sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
             }
+        }
+    }
+
+    // MARK: - 夜の振り返りコーチ（reflection coach）
+
+    /// GET /api/reflection/today — 今日のReflectionEntry（AI質問＋既存回答）を返す。
+    /// 21:30より前などで質問が未生成なら、バックグラウンドで生成を開始しつつ現状を返す
+    /// （クライアントは固定質問だけで開始でき、再取得でAI質問が現れる）。
+    private nonisolated func handleReflectionToday(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let dateKey = ReflectionStore.dateKey()
+            let entry = await ReflectionStore.shared.entry(dateKey: dateKey)
+                ?? ReflectionEntry(dateKey: dateKey)
+            if entry.questionsGeneratedAt == nil, entry.answeredAt == nil {
+                Task { await AppState.shared.generateReflectionQuestions() }
+            }
+            self.sendCodable(connection: connection, entry, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/reflection/answer — {dateKey?, moodScore?, oneLiner?, answers?: {qaId: answer}}
+    private nonisolated func handleReflectionAnswer(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body) else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid JSON\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let dateKey = (json["dateKey"] as? String) ?? ReflectionStore.dateKey()
+        let moodScore = json["moodScore"] as? Int
+        let oneLiner = json["oneLiner"] as? String
+        let answers = (json["answers"] as? [String: String]) ?? [:]
+        Task { @MainActor in
+            let entry = await AppState.shared.saveReflectionAnswers(
+                dateKey: dateKey, moodScore: moodScore, oneLiner: oneLiner, answers: answers)
+            self.sendCodable(connection: connection, entry, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/reflection/history?days=N — 直近N日（既定14・最大60）のエントリ、古い順。
+    private nonisolated func handleReflectionHistory(connection: NWConnection, days: String?, corsHeaders: String) {
+        let n = min(max(days.flatMap(Int.init) ?? 14, 1), 60)
+        Task { @MainActor in
+            let entries = await ReflectionStore.shared.recent(days: n)
+            self.sendCodable(connection: connection, entries, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/self-graph/proposals — pending中の自己グラフ差分提案。
+    private nonisolated func handleSelfGraphProposals(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            let pending = await SelfGraphProposalStore.shared.pending()
+            self.sendCodable(connection: connection, pending, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/self-graph/proposals/decide — {id, accept: Bool}
+    private nonisolated func handleSelfGraphProposalDecide(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body),
+              let id = json["id"] as? String, !id.isEmpty,
+              let accept = json["accept"] as? Bool else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"id and accept required\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            guard let updated = await AppState.shared.decideSelfGraphProposal(id: id, accept: accept) else {
+                self.sendResponse(connection: connection, status: 404, body: "{\"error\":\"proposal not found\"}", corsHeaders: corsHeaders)
+                return
+            }
+            self.sendCodable(connection: connection, updated, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// Encode any Codable as the JSON response body.
+    private nonisolated func sendCodable<T: Encodable>(connection: NWConnection, _ value: T, corsHeaders: String) {
+        if let data = try? JSONEncoder().encode(value),
+           let str = String(data: data, encoding: .utf8) {
+            sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+        } else {
+            sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
         }
     }
 
@@ -2092,6 +2215,7 @@ class MobileServer {
         }
         Task { @MainActor in
             let s = AppState.shared
+            if let title = json["title"] as? String { s.updateTaskTitle(id, title) }
             if let st = json["status"] as? String, let status = TaskStatus(rawValue: st) { s.setTaskStatus(id, status) }
             if json.keys.contains("assigneeId") { s.assignTask(id, to: json["assigneeId"] as? String) }
             self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
