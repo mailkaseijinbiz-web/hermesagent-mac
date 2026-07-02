@@ -1411,20 +1411,21 @@ class AppState: ObservableObject {
     }
 
     /// A device reported its foreground state (via POST /api/presence).
+    /// セッション未指定（ホームタブ等）でも「アプリ前面」として記録する。
     func updatePresence(token: String, sessionId: String?, active: Bool) {
         let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
-        if active, let sid = sessionId, !sid.isEmpty {
-            devicePresence[t] = (sid, Date())
+        if active {
+            devicePresence[t] = (sessionId ?? "", Date())
         } else {
             devicePresence.removeValue(forKey: t)
         }
     }
 
-    /// Is this device currently foregrounded on this session (within the freshness window)?
-    private func isForegroundedOn(token: String, sessionId: String) -> Bool {
+    /// このデバイスは今アプリを前面で使用中か（15秒ハートビート×30秒ウィンドウ）。
+    private func isForegrounded(token: String) -> Bool {
         guard let p = devicePresence[token] else { return false }
-        return p.sessionId == sessionId && Date().timeIntervalSince(p.ts) < 30
+        return Date().timeIntervalSince(p.ts) < 30
     }
 
     func sendPushIfEnabled(title: String, body: String, sessionId: String?, proactive: Bool = false) {
@@ -1434,12 +1435,9 @@ class AppState: ObservableObject {
             bundleId: apnsBundleId, useSandbox: apnsUseSandbox
         )
         let preview = String(body.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
-        // Skip devices that are already viewing this session in the foreground — they
-        // see the message live via SSE, so a banner would be redundant/annoying.
-        var tokens = pushDeviceTokens
-        if let sid = sessionId {
-            tokens = tokens.filter { !isForegroundedOn(token: $0, sessionId: sid) }
-        }
+        // アプリを前面で使用中のデバイスにはプッシュしない（画面で直接見えているため、
+        // どの種類の通知でもバナーは冗長）。バックグラウンド化後は最大30秒で解除される。
+        var tokens = pushDeviceTokens.filter { !isForegrounded(token: $0) }
         if !tokens.isEmpty {
             // Bump each receiving device's badge, and send its current count as aps.badge.
             for t in tokens { deviceBadge[t, default: 0] += 1 }
