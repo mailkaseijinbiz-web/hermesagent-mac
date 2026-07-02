@@ -246,7 +246,7 @@ struct DashboardView: View {
     // MARK: 意図カード (wide)
 
     private var intentionWidget: some View {
-        card(title: "いまの意図", icon: "sparkle",
+        card(title: "", icon: "sparkle",
              trailing: { regenButton(generating: appState.isGeneratingIntention) {
                  Task { await appState.generateIntentionCards(preserveDismissals: true) }
              } }) {
@@ -478,8 +478,7 @@ struct DashboardView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(appState.weeklyReview).font(.system(size: 13)).foregroundColor(.primary)
-                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        NewsProseView(text: appState.weeklyReview, context: .weeklyReview)
                         if appState.weeklyReviewAt > 0 {
                             Text(Self.stampFmt.string(from: Date(timeIntervalSince1970: appState.weeklyReviewAt)))
                                 .font(.system(size: 10)).foregroundColor(.secondary)
@@ -505,7 +504,7 @@ struct DashboardView: View {
                             .font(.system(size: 10))
                             .foregroundColor(e.kind == "hermes" ? .purple : .secondary)
                             .frame(width: 14)
-                        Text(e.appName).font(.system(size: 13)).lineLimit(1)
+                        Text(MacWorkFocus.workTitle(for: e)).font(.system(size: 13)).lineLimit(1)
                         Spacer()
                         Text(miniDuration(e.duration))
                             .font(.system(size: 11, design: .monospaced)).foregroundColor(.secondary)
@@ -557,7 +556,9 @@ struct DashboardView: View {
                                         @ViewBuilder content: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label(title, systemImage: icon).font(.system(size: 15, weight: .bold)).foregroundColor(.primary)
+                if !title.isEmpty {
+                    Label(title, systemImage: icon).font(.system(size: 15, weight: .bold)).foregroundColor(.primary)
+                }
                 Spacer()
                 if let more = more, let onMore = onMore {
                     Button(action: onMore) {

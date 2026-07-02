@@ -1212,6 +1212,7 @@ class AppState: ObservableObject {
     private var lastStreamingSessionRefresh: Date = .distantPast
 
     private init() {
+        PrivateStore.migrateLegacyUserDefaults()
         // Clean up child processes / timers when the app quits.
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.shutdown() }

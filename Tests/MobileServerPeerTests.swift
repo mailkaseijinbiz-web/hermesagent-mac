@@ -44,6 +44,33 @@ final class MobileServerPeerTests: XCTestCase {
         )
     }
 
+    func testListenBindAddressesIncludesLAN() {
+        XCTAssertEqual(
+            NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: nil, localLANIPv4: "192.168.1.5"),
+            ["127.0.0.1", "192.168.1.5"]
+        )
+        XCTAssertEqual(
+            NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: "100.64.0.1", localLANIPv4: "192.168.1.5"),
+            ["127.0.0.1", "100.64.0.1", "192.168.1.5"]
+        )
+    }
+
+    func testShouldRebindListenAddressesWhenTailscaleAppears() {
+        XCTAssertTrue(NetworkPeerPolicy.shouldRebindListenAddresses(
+            bound: ["127.0.0.1"],
+            tailscaleIPv4: "100.64.0.1",
+            localLANIPv4: nil
+        ))
+    }
+
+    func testShouldNotRebindListenAddressesWhenUnchanged() {
+        XCTAssertFalse(NetworkPeerPolicy.shouldRebindListenAddresses(
+            bound: ["127.0.0.1", "100.64.0.1", "192.168.1.5"],
+            tailscaleIPv4: "100.64.0.1",
+            localLANIPv4: "192.168.1.5"
+        ))
+    }
+
     func testShouldRebindWhenTailscaleAppears() {
         XCTAssertTrue(NetworkPeerPolicy.shouldRebindTailscale(bound: nil, detected: "100.64.0.1"))
     }
@@ -55,5 +82,12 @@ final class MobileServerPeerTests: XCTestCase {
     func testShouldNotRebindWhenUnchanged() {
         XCTAssertFalse(NetworkPeerPolicy.shouldRebindTailscale(bound: "100.64.0.1", detected: "100.64.0.1"))
         XCTAssertFalse(NetworkPeerPolicy.shouldRebindTailscale(bound: nil, detected: nil))
+    }
+
+    func testTailscaleIPv4RejectsCLIErrorText() {
+        let err = "The Tailscale GUI failed to start: The operation couldn't be completed. (Tailscale.CLIError error 3.)"
+        XCTAssertFalse(TailscaleIPv4.isTailscaleIPv4(err))
+        XCTAssertFalse(TailscaleIPv4.isTailscaleIPv4("192.168.1.1"))
+        XCTAssertTrue(TailscaleIPv4.isTailscaleIPv4("100.127.89.51"))
     }
 }

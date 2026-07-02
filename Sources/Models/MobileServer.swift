@@ -13,11 +13,17 @@ enum NetworkPeerPolicy {
         !isPublicIPv4Peer(raw)
     }
 
-    /// Bind targets: loopback plus optional Tailscale IPv4 (unit-testable).
-    nonisolated static func listenBindAddresses(tailscaleIPv4: String?) -> [String] {
+    /// Bind targets: loopback plus optional Tailscale / LAN IPv4 (unit-testable).
+    /// Must match what `updateDashboardURL` advertises in the QR code.
+    nonisolated static func listenBindAddresses(tailscaleIPv4: String?, localLANIPv4: String? = nil) -> [String] {
         var addrs = ["127.0.0.1"]
-        let ts = tailscaleIPv4?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !ts.isEmpty, ts.contains(".") { addrs.append(ts) }
+        func append(_ raw: String?) {
+            let ip = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !ip.isEmpty, ip.contains("."), !addrs.contains(ip) else { return }
+            addrs.append(ip)
+        }
+        append(tailscaleIPv4)
+        append(localLANIPv4)
         return addrs
     }
 
@@ -28,6 +34,16 @@ enum NetworkPeerPolicy {
         if b == d { return false }
         if d.isEmpty && b.isEmpty { return false }
         return true
+    }
+
+    /// True when the desired bind set changed (Tailscale and/or LAN).
+    nonisolated static func shouldRebindListenAddresses(
+        bound: [String],
+        tailscaleIPv4: String?,
+        localLANIPv4: String?
+    ) -> Bool {
+        let desired = listenBindAddresses(tailscaleIPv4: tailscaleIPv4, localLANIPv4: localLANIPv4)
+        return Set(bound) != Set(desired)
     }
 }
 
@@ -41,6 +57,7 @@ class MobileServer {
     private(set) var isRunning = false
     private(set) var port: UInt16 = AppConfig.mobilePort
     private(set) var boundTailscaleIPv4: String?
+    private(set) var boundListenAddresses: [String] = []
     
     // Active SSE connections for chat streaming
     private var activeStreamConnections: [NWConnection] = []
@@ -57,9 +74,13 @@ class MobileServer {
         stop()
 
         let tailscaleIP = TailscaleIPv4.lookup()
-        let bindAddresses = NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: tailscaleIP)
-        if tailscaleIP == nil {
-            print("[MobileServer] Tailscale IPv4 unavailable; binding loopback only")
+        let lanIP = HermesCLI.shared.getLocalIPAddress()
+        let bindAddresses = NetworkPeerPolicy.listenBindAddresses(
+            tailscaleIPv4: tailscaleIP,
+            localLANIPv4: lanIP
+        )
+        if bindAddresses.count == 1 {
+            print("[MobileServer] Tailscale/LAN IPv4 unavailable; binding loopback only")
         } else {
             print("[MobileServer] Binding to \(bindAddresses.joined(separator: ", "))")
         }
@@ -108,6 +129,7 @@ class MobileServer {
         }
 
         listeners = started
+        boundListenAddresses = started.isEmpty ? [] : bindAddresses
         if started.isEmpty {
             print("[MobileServer] No listeners started")
         }
@@ -118,13 +140,24 @@ class MobileServer {
         }
     }
 
-    /// Re-start listeners when Tailscale IPv4 appears or changes (e.g. Tailscale started after the hub).
-    func rebindIfTailscaleChanged(detected: String?) {
-        let normalized = detected?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmed = (normalized?.isEmpty == false) ? normalized : nil
-        guard NetworkPeerPolicy.shouldRebindTailscale(bound: boundTailscaleIPv4, detected: trimmed) else { return }
-        print("[MobileServer] Tailscale bind changed (\(boundTailscaleIPv4 ?? "none") → \(trimmed ?? "none")); rebinding")
+    /// Re-start listeners when Tailscale or LAN IPv4 appears or changes (e.g. Tailscale started after the hub).
+    func rebindIfAddressesChanged(tailscaleIPv4: String?, localLANIPv4: String?) {
+        let ts = tailscaleIPv4?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTS = (ts?.isEmpty == false) ? ts : nil
+        let lan = localLANIPv4?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLAN = (lan?.isEmpty == false) ? lan : nil
+        guard NetworkPeerPolicy.shouldRebindListenAddresses(
+            bound: boundListenAddresses,
+            tailscaleIPv4: trimmedTS,
+            localLANIPv4: trimmedLAN
+        ) else { return }
+        print("[MobileServer] Listen addresses changed (\(boundListenAddresses.joined(separator: ", ")) → \(NetworkPeerPolicy.listenBindAddresses(tailscaleIPv4: trimmedTS, localLANIPv4: trimmedLAN).joined(separator: ", "))); rebinding")
         start(port: port)
+    }
+
+    /// Back-compat wrapper used by older call sites.
+    func rebindIfTailscaleChanged(detected: String?) {
+        rebindIfAddressesChanged(tailscaleIPv4: detected, localLANIPv4: HermesCLI.shared.getLocalIPAddress())
     }
 
     func stop() {
@@ -404,10 +437,14 @@ class MobileServer {
             handleLocationUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/photos"):
             handlePhotosUpdate(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/photo/describe"):
+            handlePhotoDescribe(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("POST", "/api/memo"):
             handleMemoAdd(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/memos"):
-            handleMemosList(connection: connection, corsHeaders: corsHeaders)
+            handleMemosList(connection: connection, date: query["date"], corsHeaders: corsHeaders)
+        case ("GET", "/api/memo-image"):
+            handleMemoImage(connection: connection, file: query["file"], corsHeaders: corsHeaders)
         case ("POST", "/api/ingest"):
             handleIngest(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/collection"):
@@ -420,7 +457,21 @@ class MobileServer {
         case ("POST", "/api/review"):
             handleReviewRegenerate(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/lifelog/summary"):
-            handleLifelogSummaryGet(connection: connection, corsHeaders: corsHeaders)
+            handleLifelogSummaryGet(connection: connection, refresh: query["refresh"] == "1", corsHeaders: corsHeaders)
+        case ("POST", "/api/lifelog/summary"):
+            handleLifelogSummaryRegenerate(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/lifelog/evening-reflect"):
+            handleEveningReflect(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/lifelog/evening-reflection/save"):
+            handleEveningReflectionSave(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/lifelog/evening-reflection"):
+            handleEveningReflectionGet(connection: connection, dateKey: query["date"], corsHeaders: corsHeaders)
+        case ("POST", "/api/metrics/event"):
+            handleMetricsEvent(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("POST", "/api/metrics/events"):
+            handleMetricsEvents(connection: connection, body: body, corsHeaders: corsHeaders)
+        case ("GET", "/api/metrics/summary"):
+            handleMetricsSummary(connection: connection, days: query["days"], corsHeaders: corsHeaders)
         case ("GET", "/api/cron"):
             handleCronList(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/cron"):
@@ -507,7 +558,9 @@ class MobileServer {
         case ("GET", "/api/sauna-news"):
             handleSaunaNews(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/mac-activity"):
-            handleMacActivity(connection: connection, corsHeaders: corsHeaders)
+            handleMacActivity(connection: connection, date: query["date"], corsHeaders: corsHeaders)
+        case ("GET", "/api/history"):
+            handleHistory(connection: connection, date: query["date"], corsHeaders: corsHeaders)
         default:
             sendResponse(connection: connection, status: 404, body: "{\"error\":\"Not Found\"}", corsHeaders: corsHeaders)
         }
@@ -762,7 +815,14 @@ class MobileServer {
     /// The AI-employee roster (iOS company parity) — shared fields only.
     private nonisolated func handleEmployees(connection: NWConnection, corsHeaders: String) {
         Task { @MainActor in
-            let emps: [[String: Any]] = AppState.shared.sortedEmployees.map { e in
+            let state = AppState.shared
+            // If memory is empty but disk still has a roster (e.g. decode race at launch),
+            // reload before serving iOS so we don't return an empty list spuriously.
+            if state.activeEmployees.isEmpty {
+                let disk = AppState.loadEmployees().filter { !$0.isArchived }
+                if !disk.isEmpty { state.employees = disk }
+            }
+            let emps: [[String: Any]] = state.sortedEmployees.map { e in
                 [
                     "id": e.id,
                     "name": e.name,
@@ -777,10 +837,14 @@ class MobileServer {
                 ]
             }
             let json: [String: Any] = ["employees": emps]
+            let body: String
             if let data = try? JSONSerialization.data(withJSONObject: json),
                let str = String(data: data, encoding: .utf8) {
-                self.sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+                body = str
+            } else {
+                body = "{\"employees\":[]}"
             }
+            self.sendResponse(connection: connection, status: 200, body: body, corsHeaders: corsHeaders)
         }
     }
 
@@ -1201,6 +1265,40 @@ class MobileServer {
         }
     }
 
+    /// POST /api/photo/describe — lifelog thumbnail → Japanese caption (vision).
+    /// Body: {image: base64}. Response: {description}.
+    private nonisolated func handlePhotoDescribe(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid JSON\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let images = decodeImages(json)
+        guard let imageData = images.first else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing image\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let path = NSTemporaryDirectory() + "hermes_photo_desc_\(UUID().uuidString).jpg"
+        guard (try? imageData.write(to: URL(fileURLWithPath: path))) != nil else {
+            sendResponse(connection: connection, status: 500, body: "{\"error\":\"write failed\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            let description = await AppState.shared.describePhoto(at: path)
+            guard !description.isEmpty else {
+                self.sendResponse(connection: connection, status: 502, body: "{\"error\":\"describe failed\"}", corsHeaders: corsHeaders)
+                return
+            }
+            let resp: [String: Any] = ["description": description]
+            if let out = try? JSONSerialization.data(withJSONObject: resp),
+               let str = String(data: out, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
     /// 共有/メモ用：base64（data: 接頭辞や URL-safe も許容）配列を `[Data]` に復号。
     private nonisolated func decodeImages(_ json: [String: Any]) -> [Data] {
         var raw: [String] = []
@@ -1231,8 +1329,9 @@ class MobileServer {
             return
         }
         let source = json["source"] as? String
+        let at: Date = (json["time"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date()
         Task { @MainActor in
-            let memo = MacMemoStore.shared.addMemo(text, images: images, source: source)
+            let memo = MacMemoStore.shared.addMemo(text, images: images, source: source, at: at)
             let resp: [String: Any] = ["status": "ok", "id": memo.id, "imageCount": memo.imagePaths?.count ?? 0]
             if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
                 self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
@@ -1242,12 +1341,47 @@ class MobileServer {
         }
     }
 
-    /// GET /api/memos — 今日のメモ一覧（添付画像は枚数のみ、画像本体は配信しない）。
-    private nonisolated func handleMemosList(connection: NWConnection, corsHeaders: String) {
+    /// GET /api/memo-image?file=… — メモ添付画像（`~/.hermes/memo-images/` 配下のみ）。
+    private nonisolated func handleMemoImage(connection: NWConnection, file: String?, corsHeaders: String) {
+        guard let raw = file?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing file\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let name = (raw as NSString).lastPathComponent
+        guard name == raw, !name.contains(".."), !name.hasPrefix(".") else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid file\"}", corsHeaders: corsHeaders)
+            return
+        }
         Task { @MainActor in
-            let memos = MacMemoStore.shared.todayMemos.map { m -> [String: Any] in
+            let url = MacMemoStore.imageURL(name)
+            guard FileManager.default.fileExists(atPath: url.path),
+                  let data = try? Data(contentsOf: url) else {
+                self.sendResponse(connection: connection, status: 404, body: "{\"error\":\"Not found\"}", corsHeaders: corsHeaders)
+                return
+            }
+            let mime: String = {
+                let ext = url.pathExtension.lowercased()
+                switch ext {
+                case "png": return "image/png"
+                case "gif": return "image/gif"
+                case "webp": return "image/webp"
+                default: return "image/jpeg"
+                }
+            }()
+            self.sendBinaryResponse(connection: connection, status: 200, data: data, contentType: mime, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/memos — メモ一覧（`?date=yyyy-MM-dd`、省略時は今日）。添付画像は枚数のみ。
+    private nonisolated func handleMemosList(connection: NWConnection, date: String?, corsHeaders: String) {
+        Task { @MainActor in
+            let targetDate = date.flatMap { LifeLogDay.date(from: $0) } ?? Date()
+            let memos = MacMemoStore.shared.memos(for: targetDate).map { m -> [String: Any] in
                 ["id": m.id, "text": m.text, "time": m.time.timeIntervalSince1970,
-                 "imageCount": m.imagePaths?.count ?? 0, "source": m.source ?? ""]
+                 "imageCount": m.imagePaths?.count ?? 0,
+                 "imageNames": m.imagePaths ?? [],
+                 "source": m.source ?? "",
+                 "pageTitle": m.pageTitle ?? "", "mediaKind": m.mediaKind ?? ""]
             }
             if let d = try? JSONSerialization.data(withJSONObject: ["memos": memos]),
                let s = String(data: d, encoding: .utf8) {
@@ -1259,7 +1393,7 @@ class MobileServer {
     }
 
     /// POST /api/ingest — iOS 共有シート等から「Hermes に学習させる」対象を受け取る。
-    /// Web ページ・写真・テキストをメモ化し、パーソナル AI の文脈（今日のメモ）に取り込む。
+    /// 共有リンク (`url`) はコレクションのみ。写真・テキスト・動画はコレクションと今日のメモの両方に取り込む。
     /// Body: {kind:"url"|"image"|"text", url?, title?, text?, note?, image?/images?:[base64]}.
     private nonisolated func handleIngest(connection: NWConnection, body: String, corsHeaders: String) {
         guard let data = body.data(using: .utf8),
@@ -1274,14 +1408,36 @@ class MobileServer {
         let note    = (json["note"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let images  = decodeImages(json)
 
+        if kind == "url" {
+            guard !url.isEmpty || !note.isEmpty || !title.isEmpty || !text.isEmpty else {
+                sendResponse(connection: connection, status: 400, body: "{\"error\":\"Nothing to ingest\"}", corsHeaders: corsHeaders)
+                return
+            }
+            Task { @MainActor in
+                let collectionItem = CollectionStore.shared.add(
+                    kind: "url",
+                    title: title,
+                    note: note,
+                    url: url,
+                    text: text,
+                    images: images,
+                    source: "web"
+                )
+                Log.event("app", "INFO", "ingested url → collection \(collectionItem.id)")
+                let resp: [String: Any] = ["status": "ok", "id": collectionItem.id, "collectionId": collectionItem.id]
+                if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+                    self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+                } else {
+                    self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
+                }
+            }
+            return
+        }
+
         // 共有内容を 1 本のメモ本文に整形（先頭にユーザーのメモ書き、続いて素材）。
         var lines: [String] = []
         if !note.isEmpty { lines.append(note) }
         switch kind {
-        case "url":
-            lines.append("🔗 " + (title.isEmpty ? url : title))
-            if !url.isEmpty { lines.append(url) }
-            if !text.isEmpty { lines.append(String(text.prefix(2000))) }   // 本文抜粋は上限を設ける
         case "image":
             if note.isEmpty && title.isEmpty { lines.append("📷 共有された写真") }
             if !title.isEmpty { lines.append(title) }
@@ -1299,10 +1455,9 @@ class MobileServer {
             sendResponse(connection: connection, status: 400, body: "{\"error\":\"Nothing to ingest\"}", corsHeaders: corsHeaders)
             return
         }
-        let source = kind == "url" ? "web" : "share"
-        let mediaKind = kind == "url" ? "url" : (kind == "video" ? "video" : (kind == "image" ? "image" : "text"))
+        let source = "share"
+        let mediaKind = kind == "video" ? "video" : (kind == "image" ? "image" : "text")
         let pageTitle = title.isEmpty ? nil : title
-        let link = kind == "url" && !url.isEmpty ? url : nil
         Task { @MainActor in
             let collectionItem = CollectionStore.shared.add(
                 kind: mediaKind,
@@ -1315,7 +1470,7 @@ class MobileServer {
             )
             let memo = MacMemoStore.shared.addMemo(
                 memoText, images: images, source: source,
-                link: link, pageTitle: pageTitle, mediaKind: mediaKind
+                link: nil, pageTitle: pageTitle, mediaKind: mediaKind
             )
             Log.event("app", "INFO", "ingested \(kind) → collection \(collectionItem.id) memo \(memo.id) (\(memo.imagePaths?.count ?? 0) img)")
             let resp: [String: Any] = ["status": "ok", "id": memo.id, "collectionId": collectionItem.id]
@@ -1373,18 +1528,173 @@ class MobileServer {
     }
 
     /// GET /api/lifelog/summary — today's AI lifelog summary {summary, summaryAt}.
-    private nonisolated func handleLifelogSummaryGet(connection: NWConnection, corsHeaders: String) {
+    /// `?refresh=1` forces regeneration before returning.
+    private nonisolated func handleLifelogSummaryGet(connection: NWConnection, refresh: Bool, corsHeaders: String) {
         Task { @MainActor in
-            let resp: [String: Any] = [
-                "summary": AppState.shared.lifelogSummary,
-                "summaryAt": AppState.shared.lifelogSummaryAt
-            ]
-            if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
-                self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+            if refresh {
+                await AppState.shared.generateLifelogSummary(forceRefresh: true)
+            }
+            self.sendLifelogSummaryJSON(connection: connection, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/lifelog/summary — regenerate today's summary and return it.
+    private nonisolated func handleLifelogSummaryRegenerate(connection: NWConnection, corsHeaders: String) {
+        Task { @MainActor in
+            if AppState.shared.isGeneratingLifelogSummary {
+                self.sendResponse(connection: connection, status: 409,
+                                  body: "{\"error\":\"summary is being generated\"}", corsHeaders: corsHeaders)
+                return
+            }
+            await AppState.shared.generateLifelogSummary(forceRefresh: true)
+            self.sendLifelogSummaryJSON(connection: connection, corsHeaders: corsHeaders)
+        }
+    }
+
+    @MainActor
+    private func sendLifelogSummaryJSON(connection: NWConnection, corsHeaders: String) {
+        let resp: [String: Any] = [
+            "summary": AppState.shared.lifelogSummary,
+            "summaryAt": AppState.shared.lifelogSummaryAt
+        ]
+        if let d = try? JSONSerialization.data(withJSONObject: resp), let s = String(data: d, encoding: .utf8) {
+            self.sendResponse(connection: connection, status: 200, body: s, corsHeaders: corsHeaders)
+        } else {
+            self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/lifelog/evening-reflect — iOS evening reflection one-liner + AI prose.
+    /// Body: {pickedLabel, pickedDetail, feelingText}. Response: {oneLiner, aiReflection?}.
+    private nonisolated func handleEveningReflect(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"Invalid JSON\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let pickedLabel = (json["pickedLabel"] as? String) ?? ""
+        let pickedDetail = (json["pickedDetail"] as? String) ?? ""
+        let feelingText = (json["feelingText"] as? String) ?? ""
+        guard !feelingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"feelingText required\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            let result = await AppState.shared.generateEveningReflection(
+                pickedLabel: pickedLabel,
+                pickedDetail: pickedDetail,
+                feelingText: feelingText
+            )
+            guard let result, !result.oneLiner.isEmpty else {
+                self.sendResponse(connection: connection, status: 502, body: "{\"error\":\"generation failed\"}", corsHeaders: corsHeaders)
+                return
+            }
+            var resp: [String: Any] = ["oneLiner": result.oneLiner]
+            if !result.aiReflection.isEmpty {
+                resp["aiReflection"] = result.aiReflection
+            }
+            if let out = try? JSONSerialization.data(withJSONObject: resp),
+               let str = String(data: out, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
             } else {
                 self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
             }
         }
+    }
+
+    /// POST /api/lifelog/evening-reflection/save — persist iOS evening reflection on Mac hub.
+    /// Body: {dateKey, reflectionJSON}.
+    private nonisolated func handleEveningReflectionSave(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dateKey = json["dateKey"] as? String, !dateKey.isEmpty,
+              let reflectionJSON = json["reflectionJSON"] as? String, !reflectionJSON.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"dateKey and reflectionJSON required\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            AppState.shared.saveEveningReflectionDaily(dateKey: dateKey, jsonBody: reflectionJSON)
+            sendResponse(connection: connection, status: 200, body: "{\"ok\":true}", corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/lifelog/evening-reflection?date=yyyy-MM-dd
+    private nonisolated func handleEveningReflectionGet(connection: NWConnection, dateKey: String?, corsHeaders: String) {
+        guard let dateKey, !dateKey.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"date required\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            guard let json = AppState.shared.eveningReflectionDailyJSON(dateKey: dateKey) else {
+                sendResponse(connection: connection, status: 404, body: "{\"error\":\"not found\"}", corsHeaders: corsHeaders)
+                return
+            }
+            let payload: [String: Any] = ["dateKey": dateKey, "reflectionJSON": json]
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let str = String(data: data, encoding: .utf8) {
+                sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+            } else {
+                sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    // MARK: - Product metrics (local-only, no PII)
+
+    /// POST /api/metrics/event — { name, ts?, props?, source? }
+    private nonisolated func handleMetricsEvent(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body), let name = json["name"] as? String, !name.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"name required\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            let ev = Self.metricsEvent(from: json, defaultName: name)
+            ProductMetricsStore.shared.trackBatch([ev])
+            ProductMetricsStore.shared.recomputeAndApplyImprovements()
+            self.sendJSON(connection: connection, ["ok": true], corsHeaders: corsHeaders)
+        }
+    }
+
+    /// POST /api/metrics/events — { events: [{ name, ts?, props?, source? }, ...] }
+    private nonisolated func handleMetricsEvents(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body),
+              let raw = json["events"] as? [[String: Any]], !raw.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"events required\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            let batch = raw.compactMap { item -> ProductMetricsEvent? in
+                guard let name = item["name"] as? String, !name.isEmpty else { return nil }
+                return Self.metricsEvent(from: item, defaultName: name)
+            }
+            ProductMetricsStore.shared.trackBatch(batch)
+            ProductMetricsStore.shared.recomputeAndApplyImprovements()
+            self.sendJSON(connection: connection, ["ok": true, "count": batch.count], corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/metrics/summary?days=7
+    private nonisolated func handleMetricsSummary(connection: NWConnection, days: String?, corsHeaders: String) {
+        let window = Int(days ?? "7") ?? 7
+        Task { @MainActor in
+            let summary = ProductMetricsStore.shared.summary(windowDays: max(1, min(window, 90)))
+            if let data = try? JSONEncoder().encode(summary),
+               let str = String(data: data, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    @MainActor
+    private static func metricsEvent(from json: [String: Any], defaultName: String) -> ProductMetricsEvent {
+        let ts = (json["ts"] as? Double) ?? (json["ts"] as? Int).map(Double.init) ?? Date().timeIntervalSince1970
+        let props = (json["props"] as? [String: String])
+            ?? (json["props"] as? [String: Any])?.compactMapValues { "\($0)" }
+            ?? [:]
+        let source = json["source"] as? String ?? "ios"
+        return ProductMetricsEvent(name: defaultName, ts: ts, props: props, source: source)
     }
 
     /// POST /api/review — (re)generate the weekly review from daily history. Returns the result.
@@ -1939,19 +2249,37 @@ class MobileServer {
     // MARK: - HTTP Response Helpers
 
     private nonisolated func sendResponse(connection: NWConnection, status: Int, body: String, corsHeaders: String = "") {
-        let statusText: String
-        switch status {
-        case 200: statusText = "OK"
-        case 204: statusText = "No Content"
-        case 400: statusText = "Bad Request"
-        case 404: statusText = "Not Found"
-        case 500: statusText = "Internal Server Error"
-        default: statusText = "Unknown"
-        }
-        
+        let statusText = Self.httpStatusText(status)
         let response = "HTTP/1.1 \(status) \(statusText)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\(corsHeaders)\r\nConnection: close\r\n\r\n\(body)"
         sendRaw(connection: connection, text: response) {
             connection.cancel()
+        }
+    }
+
+    private nonisolated func sendBinaryResponse(
+        connection: NWConnection,
+        status: Int,
+        data: Data,
+        contentType: String,
+        corsHeaders: String = ""
+    ) {
+        let statusText = Self.httpStatusText(status)
+        var header = "HTTP/1.1 \(status) \(statusText)\r\nContent-Type: \(contentType)\r\nContent-Length: \(data.count)\r\n\(corsHeaders)\r\nConnection: close\r\n\r\n"
+        var packet = Data(header.utf8)
+        packet.append(data)
+        connection.send(content: packet, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+
+    private nonisolated static func httpStatusText(_ status: Int) -> String {
+        switch status {
+        case 200: return "OK"
+        case 204: return "No Content"
+        case 400: return "Bad Request"
+        case 404: return "Not Found"
+        case 500: return "Internal Server Error"
+        default: return "Unknown"
         }
     }
     
@@ -2342,11 +2670,55 @@ class MobileServer {
 
     // MARK: - Mac Activity
 
-    private nonisolated func handleMacActivity(connection: NWConnection, corsHeaders: String) {
+    private nonisolated func handleMacActivity(connection: NWConnection, date: String?, corsHeaders: String) {
         Task { @MainActor in
-            let data = MacActivityLogger.shared.todayJSON()
+            let targetDate = date.flatMap { LifeLogDay.date(from: $0) } ?? Date()
+            let entries: [MacActivityEntry] = LifeLogDay.isToday(targetDate)
+                ? MacActivityLogger.shared.todayEntries()
+                : MacActivityLogger.loadEntries(for: targetDate)
+            let data = (try? JSONEncoder().encode(entries)) ?? Data("[]".utf8)
             let body = String(data: data, encoding: .utf8) ?? "[]"
             self.sendResponse(connection: connection, status: 200, body: body, corsHeaders: corsHeaders)
+        }
+    }
+
+    /// GET /api/history?date=yyyy-MM-dd — dailyHistory row for iOS past-date lifelog display.
+    private nonisolated func handleHistory(connection: NWConnection, date: String?, corsHeaders: String) {
+        Task { @MainActor in
+            let s = AppState.shared
+            let targetDate = date.flatMap { LifeLogDay.date(from: $0) } ?? Date()
+            let key = LifeLogDay.key(targetDate)
+            var record = s.dayRecord(for: targetDate) ?? AppState.DayRecord(date: key)
+
+            if LifeLogDay.isToday(targetDate) {
+                if let h = s.latestHealth {
+                    if record.steps == nil { record.steps = h.steps }
+                    if record.activeEnergyKcal == nil, let v = h.activeEnergyKcal { record.activeEnergyKcal = Int(v) }
+                    if record.restingHeartRate == nil { record.restingHeartRate = h.restingHeartRate ?? h.heartRate }
+                    if record.sleepHours == nil { record.sleepHours = h.sleepHours }
+                    if record.bodyMassKg == nil { record.bodyMassKg = h.bodyMassKg }
+                }
+                if record.locations.isEmpty, !s.locationSummary.isEmpty {
+                    record.locations = s.locationSummary
+                }
+                if record.photos.isEmpty, !s.photoSummary.isEmpty {
+                    record.photos = s.photoSummary
+                }
+            }
+
+            let resolvedLocations = record.locations.isEmpty
+                ? ""
+                : s.resolvedLocationSummary(record.locations)
+            var dict: [String: Any] = ["date": key]
+            func put(_ k: String, _ v: Any?) { if let v = v { dict[k] = v } }
+            put("steps", record.steps)
+            put("activeEnergyKcal", record.activeEnergyKcal)
+            put("restingHeartRate", record.restingHeartRate)
+            put("sleepHours", record.sleepHours)
+            put("bodyMassKg", record.bodyMassKg)
+            dict["locations"] = resolvedLocations
+            dict["photos"] = record.photos
+            self.sendJSON(connection: connection, dict, corsHeaders: corsHeaders)
         }
     }
 

@@ -50,6 +50,23 @@ final class DayTimelineGraphTests: XCTestCase {
         XCTAssertEqual(compact.count, 2)
     }
 
+    func testSummaryContextFiltersShortMacSessions() {
+        let base: Double = 3600
+        let events = [
+            DayTimelineEvent(id: "1", time: base, kind: "mac", label: "Cursor",
+                             detail: "NextFTP — main.swift", duration: 120, sessionCount: 1),
+            DayTimelineEvent(id: "2", time: base + 2000, kind: "mac", label: "Safari",
+                             detail: "News", duration: 900, sessionCount: 1),
+            DayTimelineEvent(id: "m", time: base + 500, kind: "memo", label: "メモ", detail: "ランチ"),
+        ]
+        let filtered = DayTimelineGraph.eventsForSummaryContext(events)
+        XCTAssertFalse(filtered.contains { $0.label == "Cursor" })
+        XCTAssertTrue(filtered.contains { $0.label == "Safari" })
+        let text = DayTimelineGraph.formatForSummaryContext(events)
+        XCTAssertFalse(text.contains("NextFTP"))
+        XCTAssertTrue(text.contains("Safari"))
+    }
+
     func testCompactCapsToTopAppsWithOtherBundle() {
         let base: Double = 3600
         var events: [DayTimelineEvent] = []

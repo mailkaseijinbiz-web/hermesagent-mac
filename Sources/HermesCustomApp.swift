@@ -23,6 +23,8 @@ struct HermesCustomApp: App {
                 .frame(minWidth: 1000, minHeight: 650)
                 .background(VisualEffectView(material: .sidebar, blendingMode: .withinWindow))
                 .task {
+                    PrivateStore.migrateLegacyUserDefaults()
+                    appState.runProductMetricsLoop()
                     // Mac アプリ使用記録を開始（設定で無効化可能）
                     if MacActivityLogger.isEnabled {
                         MacActivityLogger.shared.start()

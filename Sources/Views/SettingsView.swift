@@ -13,6 +13,7 @@ struct SettingsModal: View {
     @State private var settingsSearch = ""
     @State private var agyCustomModel = ""
     @State private var agyInstalled: Bool? = nil
+    @State private var metricsSummary: ProductMetricsSummary?
     /// Set when API key / provider changes — triggers auto-apply on close (replaces the
     /// former 「設定を適用して保存」 button). Model selection already applies immediately.
     @State private var settingsDirty = false
@@ -27,6 +28,7 @@ struct SettingsModal: View {
         case cloud = "クラウド同期"
         case channels = "チャンネル"
         case management = "管理"
+        case metrics = "プロダクト指標"
         case experimental = "実験的機能"
         var id: String { rawValue }
         var icon: String {
@@ -40,6 +42,7 @@ struct SettingsModal: View {
             case .cloud: return "cloud"
             case .channels: return "bubble.left.and.bubble.right"
             case .management: return "brain.head.profile"
+            case .metrics: return "chart.bar.doc.horizontal"
             case .experimental: return "flask"
             }
         }
@@ -54,6 +57,7 @@ struct SettingsModal: View {
             case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
             case .channels: return "チャンネル channel telegram discord slack line whatsapp signal teams メール email"
             case .management: return "管理 メモリ memory スキル skill mcp soul"
+            case .metrics: return "指標 metrics プロダクト product NSM agency 成長 growth guardrail ガードレール"
             case .experimental: return "実験 experimental acp 転送 承認 自動許可 ツール"
             }
         }
@@ -174,6 +178,7 @@ struct SettingsModal: View {
                         case .cloud: cloudSection
                         case .channels: channelsSection
                         case .management: managementSection
+                        case .metrics: metricsSection
                         case .experimental: experimentalSection
                         }
                     }
@@ -239,6 +244,89 @@ struct SettingsModal: View {
         }
     }
 
+    private var metricsSection: some View {
+        card(title: "プロダクト指標（7日）") {
+            VStack(alignment: .leading, spacing: 14) {
+                if let s = metricsSummary {
+                    HStack(spacing: 24) {
+                        metricTile(label: "NSM", value: String(format: "%.0f", s.nsmPerWeek), detail: "Agency Days / 週")
+                        metricTile(label: "INT-01", value: String(format: "%.0f%%", s.intentionFitRate * 100), detail: "Fit Rate")
+                        metricTile(label: "同期", value: String(format: "%.0f%%", s.syncSuccessRate * 100), detail: "\(s.syncFailureCount) 失敗")
+                        metricTile(label: "Stage", value: s.growthStage, detail: "\(s.eventCount) events")
+                    }
+
+                    Text("ガードレール")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    ForEach(s.guardrails, id: \.id) { g in
+                        HStack(alignment: .top, spacing: 8) {
+                            Circle()
+                                .fill(guardrailColor(g.level))
+                                .frame(width: 8, height: 8)
+                                .padding(.top, 4)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(g.id) · \(g.label)")
+                                    .font(.system(size: 12, weight: .medium))
+                                Text(g.detail)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+
+                    Text("推奨アクション")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .padding(.top, 4)
+                    ForEach(Array(s.recommendations.enumerated()), id: \.offset) { _, rec in
+                        Text("• \(rec)")
+                            .font(.system(size: 12))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else {
+                    Text("指標を読み込み中…")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+
+                Button {
+                    ProductMetricsStore.shared.recomputeAndApplyImprovements()
+                    metricsSummary = ProductMetricsStore.shared.cachedSummary() ?? ProductMetricsStore.shared.summary()
+                } label: {
+                    Text("再計算")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        }
+        .onAppear {
+            metricsSummary = ProductMetricsStore.shared.cachedSummary() ?? ProductMetricsStore.shared.summary()
+        }
+    }
+
+    private func metricTile(label: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+            Text(detail)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func guardrailColor(_ level: String) -> Color {
+        switch level {
+        case "green": return .green
+        case "yellow": return .orange
+        case "red": return .red
+        default: return .secondary
+        }
+    }
+
     @State private var tailscaleIPv4: String?
 
     /// Local / Tailscale URLs for pairing the iOS client with this Mac hub.
@@ -260,9 +348,9 @@ struct SettingsModal: View {
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .frame(width: 72, alignment: .leading)
-                Text(tailscaleIPv4.map { "http://\($0):\(AppConfig.mobilePort)" } ?? "—")
+                Text(tailscaleDisplayURL)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(tailscaleIPv4 == nil ? .secondary : .primary)
+                    .foregroundColor(tailscaleDisplayURL == "—" ? .secondary : .primary)
                     .textSelection(.enabled)
             }
             Text("※ 公衆IPからの接続は拒否されます（NetworkPeerPolicy）。")
@@ -272,7 +360,19 @@ struct SettingsModal: View {
         }
         .task {
             tailscaleIPv4 = await Task.detached(priority: .utility) { TailscaleIPv4.lookup() }.value
+            await appState.updateDashboardURL()
         }
+    }
+
+    /// Matches QR / dashboard URL when Tailscale is active; otherwise best-effort IPv4.
+    private var tailscaleDisplayURL: String {
+        if appState.isUsingTailscale, !appState.dashboardURL.isEmpty {
+            return appState.dashboardURL
+        }
+        if let ip = tailscaleIPv4 {
+            return "http://\(ip):\(AppConfig.mobilePort)"
+        }
+        return "—"
     }
 
     private var modelSection: some View {
