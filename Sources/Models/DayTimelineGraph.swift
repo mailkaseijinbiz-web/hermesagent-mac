@@ -31,18 +31,44 @@ enum DayTimelineGraph {
     ) -> [DayTimelineEvent] {
         var events: [DayTimelineEvent] = []
 
-        for e in macEntries where e.duration >= 30 {
-            let start = Date(timeIntervalSince1970: e.startTime)
-            guard Calendar.current.isDate(start, inSameDayAs: day) else { continue }
+        // iOSと同一の集約規則: フォーカスグループが5種を超える日はMac作業を1枚に要約する
+        let significantMac = macEntries.filter { e in
+            e.duration >= 30 &&
+            Calendar.current.isDate(Date(timeIntervalSince1970: e.startTime), inSameDayAs: day)
+        }
+        let uniqueFocusCount = Set(significantMac.map { MacWorkFocus.focusGroupKey(for: $0) }).count
+        if uniqueFocusCount > 5 {
+            let total = significantMac.reduce(0.0) { $0 + $1.duration }
+            var byTitle: [String: Double] = [:]
+            for e in significantMac {
+                byTitle[MacWorkFocus.workTitle(for: e), default: 0] += e.duration
+            }
+            let top = byTitle.sorted { $0.value > $1.value }.prefix(3)
+                .map { "\($0.key) \(formatDuration($0.value))" }
+                .joined(separator: " · ")
+            let anchor = significantMac.map(\.startTime).min() ?? day.timeIntervalSince1970
+            let hasHermes = significantMac.contains { $0.kind == "hermes" }
             events.append(DayTimelineEvent(
-                id: "mac-\(e.id)",
-                time: e.startTime,
-                kind: e.kind == "hermes" ? "hermes" : "mac",
-                label: MacWorkFocus.workTitle(for: e),
-                detail: macEventDetail(for: e),
-                duration: e.duration,
-                sessionCount: 1
+                id: "mac-summary-\(Int(anchor))",
+                time: anchor,
+                kind: hasHermes ? "hermes" : "mac",
+                label: "Macで過ごした時間",
+                detail: "\(top)\n合計 \(formatDuration(total)) · \(significantMac.count)件を要約",
+                duration: total,
+                sessionCount: significantMac.count
             ))
+        } else {
+            for e in significantMac {
+                events.append(DayTimelineEvent(
+                    id: "mac-\(e.id)",
+                    time: e.startTime,
+                    kind: e.kind == "hermes" ? "hermes" : "mac",
+                    label: MacWorkFocus.workTitle(for: e),
+                    detail: macEventDetail(for: e),
+                    duration: e.duration,
+                    sessionCount: 1
+                ))
+            }
         }
 
         for m in memos {

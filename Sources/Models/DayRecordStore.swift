@@ -33,6 +33,7 @@ struct DayMetrics: Codable, Equatable {
     var exerciseMinutes: Int? = nil
     var distanceKm: Double? = nil
     var activeEnergyKcal: Double? = nil
+    var macHours: Double? = nil   // Mac作業合計（要約時もここが正）
 }
 
 struct DayRecord: Codable, Equatable {
@@ -205,17 +206,38 @@ enum DayRecordBuilder {
                 tags: Self.visitTags(name: name, isHome: isHome)))
         }
 
-        // Mac作業（キャッシュに前日分が残ることがあるため今日の範囲でフィルタ）
+        // Mac作業（キャッシュに前日分が残ることがあるため今日の範囲でフィルタ）。
+        // iOS/Mac表示と同一規則: フォーカスグループが5種を超える日は1イベントに要約。
         let dayStart = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
         let dayEnd = dayStart + 86400
-        for e in MacActivityLogger.shared.todayEntriesFromDisk()
-        where e.duration >= 60 && e.startTime >= dayStart && e.startTime < dayEnd {
+        let macEntries = MacActivityLogger.shared.todayEntriesFromDisk()
+            .filter { $0.duration >= 30 && $0.startTime >= dayStart && $0.startTime < dayEnd }
+        let macTotal = macEntries.reduce(0.0) { $0 + $1.duration }
+        if !macEntries.isEmpty { record.metrics.macHours = (macTotal / 360).rounded() / 10 }
+        let uniqueFocusCount = Set(macEntries.map { MacWorkFocus.focusGroupKey(for: $0) }).count
+        if uniqueFocusCount > 5 {
+            let total = macTotal
+            var byTitle: [String: Double] = [:]
+            for e in macEntries { byTitle[MacWorkFocus.workTitle(for: e), default: 0] += e.duration }
+            let top = byTitle.sorted { $0.value > $1.value }.prefix(3)
+                .map { "\($0.key) \(Int($0.value / 60))分" }.joined(separator: " · ")
+            let anchor = macEntries.map(\.startTime).min() ?? dayStart
+            let lastEnd = macEntries.map(\.endTime).max()
             events.append(LifeEvent(
-                id: "mac-\(e.id)", kind: "mac", start: e.startTime, end: e.endTime,
-                title: e.label.isEmpty ? e.appName : e.label,
-                detail: e.appName,
-                tags: Self.macTags(appName: e.appName, kind: e.kind),
-                url: e.url))
+                id: "mac-summary-\(dateKey)", kind: "macSummary",
+                start: anchor, end: lastEnd,
+                title: "Macで過ごした時間",
+                detail: "\(top)（合計\(String(format: "%.1f", total / 3600))時間・\(macEntries.count)件）",
+                tags: ["Mac"]))
+        } else {
+            for e in macEntries {
+                events.append(LifeEvent(
+                    id: "mac-\(e.id)", kind: "mac", start: e.startTime, end: e.endTime,
+                    title: e.label.isEmpty ? e.appName : e.label,
+                    detail: e.appName,
+                    tags: Self.macTags(appName: e.appName, kind: e.kind),
+                    url: e.url))
+            }
         }
 
         // メモ・写真（MacMemoStore: iOSのingest含む）
@@ -253,7 +275,11 @@ enum DayRecordBuilder {
         }
 
         record.events = events.sorted { $0.start < $1.start }
-        record.bands = Self.deriveBands(events: record.events, sleep: sleep, homeKeyword: homeKw)
+        // バンドはMac作業を要約していても粒度を保つ（生エントリから合成）
+        let bandEvents = record.events.filter { $0.kind != "macSummary" } + macEntries.map {
+            LifeEvent(id: "band-\($0.id)", kind: "mac", start: $0.startTime, end: $0.endTime, title: "")
+        }
+        record.bands = Self.deriveBands(events: bandEvents, sleep: sleep, homeKeyword: homeKw)
         if Calendar.current.isDateInToday(Date(timeIntervalSince1970: appState.lifelogSummaryAt)),
            !appState.lifelogSummary.isEmpty {
             record.summary = appState.lifelogSummary
@@ -367,11 +393,11 @@ enum DayRecordBuilder {
             }
         }
         // Mac作業合計
-        let todayMac = today.events.filter { $0.kind == "mac" }
-            .reduce(0.0) { $0 + (($1.end ?? $1.start) - $1.start) } / 3600
+        let todayMac = today.metrics.macHours ?? (today.events.filter { $0.kind == "mac" }
+            .reduce(0.0) { $0 + (($1.end ?? $1.start) - $1.start) } / 3600)
         let histMac = history.map { r in
-            r.events.filter { $0.kind == "mac" }
-                .reduce(0.0) { $0 + (($1.end ?? $1.start) - $1.start) } / 3600
+            r.metrics.macHours ?? (r.events.filter { $0.kind == "mac" }
+                .reduce(0.0) { $0 + (($1.end ?? $1.start) - $1.start) } / 3600)
         }
         if let a = avg(histMac), a > 0.5, todayMac >= a * 1.6, todayMac >= 3 {
             out.append(String(format: "Mac作業%.1f時間は普段の平均%.1f時間を大きく超過", todayMac, a))
