@@ -262,9 +262,37 @@ final class MacActivityLogger {
 
     // MARK: - ポーリング（ブラウザのタブ切り替え検知）
 
+    /// ユーザー入力からの経過秒（キー・クリック・マウス移動・スクロールの最小値）。
+    static nonisolated func secondsSinceLastInput() -> Double {
+        let types: [CGEventType] = [.keyDown, .leftMouseDown, .rightMouseDown, .mouseMoved, .scrollWheel]
+        return types.map {
+            CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0)
+        }.min() ?? 0
+    }
+
+    /// 無操作がこの秒数を超えたら「待機中」とみなしセッションを打ち切る（Mac mini常時起動対策）。
+    static let idleThreshold: Double = 300
+
     private func pollCurrentSession() {
         guard Self.isEnabled else { return }
-        guard currentStart != nil, !currentApp.isEmpty else { return }
+
+        let idle = Self.secondsSinceLastInput()
+        if idle >= Self.idleThreshold {
+            // 待機に入った: 進行中セッションを「最終入力時刻」で閉じ、以後は記録しない
+            if currentStart != nil, !currentApp.isEmpty {
+                let lastActive = Date().addingTimeInterval(-idle)
+                flushCurrentSession(endOverride: lastActive)
+            }
+            return
+        }
+        // 待機から復帰: セッションが無ければ前面アプリで開始し直す
+        if currentStart == nil || currentApp.isEmpty {
+            if let app = NSWorkspace.shared.frontmostApplication {
+                onActivate(app)
+            }
+            return
+        }
+
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == currentPID else { return }
         let pid = currentPID
         let isBrowser = browserBundles.contains(currentBundle)
@@ -290,7 +318,8 @@ final class MacActivityLogger {
         }
 
         // タブ切り替え確定 → 現在サブセッションを記録
-        let dur = Date().timeIntervalSince(start)
+        let end = Date()
+        let dur = end.timeIntervalSince(start)
         if dur >= minDuration {
             var entry = MacActivityEntry()
             entry.appName     = currentApp
@@ -299,7 +328,7 @@ final class MacActivityLogger {
             entry.url         = currentURL.isEmpty ? nil : currentURL
             entry.label       = Self.buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
             entry.startTime   = start.timeIntervalSince1970
-            entry.endTime     = Date().timeIntervalSince1970
+            entry.endTime     = end.timeIntervalSince1970
             mergeOrAppend(entry)
             saveToday()
         }
@@ -386,7 +415,7 @@ final class MacActivityLogger {
     }
 
     /// Close and persist the in-progress app session (if long enough).
-    private func flushCurrentSession() {
+    private func flushCurrentSession(endOverride: Date? = nil) {
         guard let start = currentStart, !currentApp.isEmpty else {
             currentApp = ""
             currentBundle = ""
@@ -396,7 +425,8 @@ final class MacActivityLogger {
             currentURL = ""
             return
         }
-        let dur = Date().timeIntervalSince(start)
+        let end = max(endOverride ?? Date(), start)
+        let dur = end.timeIntervalSince(start)
         if dur >= minDuration {
             var entry = MacActivityEntry()
             entry.appName     = currentApp
@@ -405,7 +435,7 @@ final class MacActivityLogger {
             entry.url         = currentURL.isEmpty ? nil : currentURL
             entry.label       = Self.buildLabel(appName: currentApp, windowTitle: currentWindowTitle)
             entry.startTime   = start.timeIntervalSince1970
-            entry.endTime     = Date().timeIntervalSince1970
+            entry.endTime     = end.timeIntervalSince1970
             mergeOrAppend(entry)
             saveToday()
         }
