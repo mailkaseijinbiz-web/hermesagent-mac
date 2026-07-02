@@ -8,9 +8,9 @@ enum WeightMemoParser {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return nil }
         let patterns = [
-            #"(?i)体重\s*[:：]?\s*(\d{2,3}(?:\.\d)?)\s*kg?"#,
+            #"(?i)体重\s*(?:は|が|も)?\s*[:：]?\s*(\d{2,3}(?:\.\d)?)\s*kg?"#,
             #"(?i)(\d{2,3}(?:\.\d)?)\s*kg"#,
-            #"体重\s*(\d{2,3}(?:\.\d)?)"#
+            #"体重\s*(?:は|が|も)?\s*(\d{2,3}(?:\.\d)?)"#
         ]
         for pattern in patterns {
             guard let re = try? NSRegularExpression(pattern: pattern),
