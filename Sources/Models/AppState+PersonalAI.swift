@@ -65,6 +65,19 @@ extension AppState {
         }.joined(separator: "\n")
     }
 
+    /// モデルが見出しを崩して出力したときの正規化（「つなぎり」「つなぎ」→「つながり」等）。
+    static func normalizeBriefHeadings(_ text: String) -> String {
+        let fixes: [String: String] = [
+            "つなぎり": "つながり", "つなぎ": "つながり", "繋がり": "つながり",
+            "振返り": "振り返り", "ふりかえり": "振り返り",
+        ]
+        return text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let fixed = fixes[trimmed] { return fixed }
+            return String(line)
+        }.joined(separator: "\n")
+    }
+
     /// Full context block for brief generation (data + lifelog + news).
     func buildDailyBriefContext() async -> String {
         var parts: [String] = [dailyBriefContext()]
@@ -129,7 +142,7 @@ extension AppState {
             let hint = looksLikeErrorResponse(text) ? "（モデルがエラーを返しました：\(String(text.prefix(80)))）" : "（モデルが応答しませんでした）"
             triggerToast(message: "簡易ブリーフを表示しました\(hint)")
         } else {
-            dailyBrief = text
+            dailyBrief = Self.normalizeBriefHeadings(text)
             dailyBriefAt = Date().timeIntervalSince1970
         }
     }

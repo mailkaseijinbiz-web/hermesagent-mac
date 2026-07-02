@@ -178,7 +178,8 @@ final class MacActivityLogger {
 
     /// 今日の全エントリ（完了済み + 進行中）を配列として返す（ライフログ UI 用）。
     func todayEntries() -> [MacActivityEntry] {
-        var all = completedEntries
+        let dayStart = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
+        var all = completedEntries.filter { $0.startTime >= dayStart }
         if let start = currentStart, !currentApp.isEmpty {
             let dur = Date().timeIntervalSince(start)
             if dur >= minDuration {
@@ -380,7 +381,8 @@ final class MacActivityLogger {
 
     /// 今日のキャッシュファイルをディスクから直接読む（ブリーフ文脈用途）。
     nonisolated func todayEntriesFromDisk() -> [MacActivityEntry] {
-        Self.loadEntries()
+        let dayStart = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
+        return Self.loadEntries().filter { $0.startTime >= dayStart }
     }
 
     /// Close and persist the in-progress app session (if long enough).
@@ -422,6 +424,13 @@ final class MacActivityLogger {
     }
 
     private func saveToday() {
+        // アプリが日をまたいで起動し続けると completedEntries に前日分が残り、
+        // そのまま保存すると「今日」のファイルが過去日で汚染される（ブリーフの
+        // 30時間問題の原因）。保存前に当日分へ刈り込む。
+        let dayStart = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
+        if completedEntries.contains(where: { $0.startTime < dayStart }) {
+            completedEntries = completedEntries.filter { $0.startTime >= dayStart }
+        }
         try? Self.saveEntries(completedEntries)
     }
 }
