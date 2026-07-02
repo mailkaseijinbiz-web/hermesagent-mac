@@ -295,6 +295,19 @@ extension AppState {
         return parts.joined(separator: "\n\n")
     }
 
+    /// 正規DayRecordベースのAIコンテキスト（構造化イベント＋指標＋普段との差分）。
+    /// 要約・振り返り質問・週次レビューはこちらを優先的に使う。
+    func dayRecordContext() async -> String {
+        let record = await DayRecordBuilder.buildToday(appState: self)
+        guard !record.events.isEmpty else { return lifelogContext() }
+        var ctx = DayRecordBuilder.aiContext(record)
+        let memoCtx = MemoContext.format(MacMemoStore.shared.todayMemos, max: 8, maxChars: 160)
+        if !memoCtx.isEmpty {
+            ctx += "\n\n【メモ・共有（詳細）】\n\(memoCtx)"
+        }
+        return ctx
+    }
+
     // MARK: - 起動時・定期実行
 
     /// 起動時に今日の振り返りがなければ自動生成する。

@@ -85,6 +85,7 @@ struct MacLifeLogView: View {
     @State private var homeKeywordDraft   = ""
     @State private var showFullTimeline   = false
     @State private var selectedDate       = LifeLogDay.startOfDay(Date())
+    @State private var dayRecord: DayRecord? = nil
     private let refreshTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     private var isViewingToday: Bool { LifeLogDay.isToday(selectedDate) }
@@ -113,6 +114,18 @@ struct MacLifeLogView: View {
 
                 summaryCard
                     .padding(.bottom, 16)
+
+                if let record = dayRecord {
+                    if !record.bands.isEmpty || isViewingToday {
+                        DayTimeBandView(bands: record.bands, day: selectedDate, showNow: isViewingToday)
+                            .padding(.bottom, 12)
+                    }
+                    metricsStrip(record.metrics)
+                    if !record.anomalies.isEmpty {
+                        anomaliesCard(record.anomalies)
+                            .padding(.bottom, 14)
+                    }
+                }
 
                 if locationTextForSelectedDay != nil {
                     locationRouteSection.padding(.bottom, 14)
@@ -188,6 +201,9 @@ struct MacLifeLogView: View {
             showFullTimeline = LifeLogDay.isToday(d)
             refresh()
         }
+        .onChange(of: appState.lifelogSummaryAt) { _, _ in
+            reloadDayRecord()
+        }
         .task(id: isViewingToday) {
             if isViewingToday {
                 await appState.generateLifelogSummary()
@@ -214,6 +230,24 @@ struct MacLifeLogView: View {
             entries = MacActivityLogger.shared.todayEntries()
         } else {
             entries = MacActivityLogger.loadEntries(for: selectedDate)
+        }
+        reloadDayRecord()
+    }
+
+    /// 正規レイヤ（DayRecord）を読み込む。今日は再構築、過去日は永続分のみ。
+    private func reloadDayRecord() {
+        let day = selectedDate
+        let viewingToday = isViewingToday
+        Task { @MainActor in
+            let record: DayRecord?
+            if viewingToday {
+                record = await DayRecordBuilder.buildToday(appState: appState)
+            } else {
+                record = await DayRecordStore.shared.persisted(dateKey: DayRecordStore.dateKey(for: day))
+            }
+            // 読み込み中に日付が切り替わっていたら破棄
+            guard LifeLogDay.startOfDay(selectedDate) == day else { return }
+            dayRecord = record
         }
     }
 
@@ -338,6 +372,104 @@ struct MacLifeLogView: View {
         let memoCount = memoStore.memos(for: selectedDate).count
         if memoCount > 0 { parts.append("メモ \(memoCount)件") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    // MARK: - メトリクスストリップ（DayRecord.metrics）
+
+    private struct MetricChip: Identifiable {
+        var id: String { label }
+        let icon: String
+        let label: String
+        let value: String
+        let tint: Color
+    }
+
+    private func metricChips(_ m: DayMetrics) -> [MetricChip] {
+        var chips: [MetricChip] = []
+        if let v = m.steps {
+            chips.append(MetricChip(icon: "figure.walk", label: "歩数", value: "\(v)歩", tint: .green))
+        }
+        if let v = m.sleepHours {
+            chips.append(MetricChip(icon: "moon.fill", label: "睡眠", value: String(format: "%.1fh", v), tint: .indigo))
+        }
+        if let v = m.moodScore {
+            let faces = ["😞", "😕", "😐", "🙂", "😄"]
+            let face = (1...5).contains(v) ? faces[v - 1] : "😐"
+            chips.append(MetricChip(icon: "face.smiling", label: "気分", value: "\(face) \(v)/5", tint: .pink))
+        }
+        if let v = m.restingHeartRate {
+            chips.append(MetricChip(icon: "heart", label: "安静心拍", value: "\(v)bpm", tint: .red))
+        }
+        if let v = m.exerciseMinutes {
+            chips.append(MetricChip(icon: "flame.fill", label: "運動", value: "\(v)分", tint: .orange))
+        }
+        return chips
+    }
+
+    @ViewBuilder
+    private func metricsStrip(_ m: DayMetrics) -> some View {
+        let chips = metricChips(m)
+        if !chips.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(chips) { chip in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(chip.label)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                            HStack(spacing: 4) {
+                                Image(systemName: chip.icon)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(chip.tint)
+                                Text(chip.value)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.primary.opacity(0.02))
+                        .cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+            .padding(.bottom, 14)
+        }
+    }
+
+    // MARK: - 普段との差分カード（DayRecord.anomalies）
+
+    private func anomaliesCard(_ anomalies: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkle.magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.orange)
+                Text("今日の気づき")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
+            ForEach(anomalies, id: \.self) { text in
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange.opacity(0.85))
+                        .padding(.top, 2)
+                    Text(text)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
+        .background(Color.orange.opacity(0.06))
+        .cornerRadius(14)
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.18), lineWidth: 1))
     }
 
     private var dateHeader: some View {
@@ -645,6 +777,65 @@ struct MacLifeLogView: View {
                 .padding(8)
         }
         .frame(width: 400)
+    }
+}
+
+// MARK: - 24時間タイムバンド（DayRecord.bands）
+
+private struct DayTimeBandView: View {
+    let bands: [TimeBand]
+    let day: Date
+    let showNow: Bool
+
+    private static func color(for kind: String) -> Color {
+        switch kind {
+        case "sleep": return .indigo
+        case "home":  return .teal
+        case "out":   return .orange
+        case "mac":   return .purple
+        default:      return .gray
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            GeometryReader { geo in
+                let w = geo.size.width
+                let dayStart = Calendar.current.startOfDay(for: day).timeIntervalSince1970
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color.gray.opacity(0.1))
+                    ForEach(Array(bands.enumerated()), id: \.offset) { _, band in
+                        let x0 = CGFloat(max(0, min(1, (band.start - dayStart) / 86400)))
+                        let x1 = CGFloat(max(0, min(1, (band.end - dayStart) / 86400)))
+                        if x1 > x0 {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Self.color(for: band.kind).opacity(0.75))
+                                .frame(width: max(2, w * (x1 - x0)), height: 26)
+                                .offset(x: w * x0)
+                        }
+                    }
+                    if showNow {
+                        let nowX = CGFloat(max(0, min(1, (Date().timeIntervalSince1970 - dayStart) / 86400)))
+                        Rectangle()
+                            .fill(Color.red)
+                            .frame(width: 1.5, height: 26)
+                            .offset(x: w * nowX)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+            .frame(height: 26)
+
+            HStack(spacing: 0) {
+                ForEach([0, 6, 12, 18, 24], id: \.self) { h in
+                    Text("\(h)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                    if h != 24 { Spacer() }
+                }
+            }
+        }
     }
 }
 

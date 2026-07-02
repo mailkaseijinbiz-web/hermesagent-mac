@@ -470,6 +470,12 @@ class MobileServer {
             handleEveningReflectionSave(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/lifelog/evening-reflection"):
             handleEveningReflectionGet(connection: connection, dateKey: query["date"], corsHeaders: corsHeaders)
+        case ("GET", "/api/lifelog/day"):
+            handleDayRecordGet(connection: connection, date: query["date"], corsHeaders: corsHeaders)
+        case ("GET", "/api/lifelog/range"):
+            handleDayRecordRange(connection: connection, days: query["days"], corsHeaders: corsHeaders)
+        case ("POST", "/api/lifelog/sleep"):
+            handleSleepPush(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/reflection/today"):
             handleReflectionToday(connection: connection, corsHeaders: corsHeaders)
         case ("POST", "/api/reflection/answer"):
@@ -1278,14 +1284,26 @@ class MobileServer {
             sendResponse(connection: connection, status: 400, body: "{\"error\":\"Missing summary\"}", corsHeaders: corsHeaders)
             return
         }
-        let points = (json["points"] as? [[String: Any]])?.compactMap { d -> AppState.LocationPoint? in
+        let rawPoints = (json["points"] as? [[String: Any]]) ?? []
+        let points = rawPoints.compactMap { d -> AppState.LocationPoint? in
             guard let name = d["name"] as? String,
                   let lat = (d["lat"] as? NSNumber)?.doubleValue,
                   let lon = (d["lon"] as? NSNumber)?.doubleValue else { return nil }
             return AppState.LocationPoint(name: name, lat: lat, lon: lon)
-        } ?? []
+        }
+        // 時刻つきの点はDayRecordの訪問イベントとしても記録する（正規ライフログの材料）
+        let timedVisits = rawPoints.compactMap { d -> DayVisit? in
+            guard let name = d["name"] as? String,
+                  let time = (d["time"] as? NSNumber)?.doubleValue else { return nil }
+            return DayVisit(name: name, time: time,
+                            lat: (d["lat"] as? NSNumber)?.doubleValue ?? 0,
+                            lon: (d["lon"] as? NSNumber)?.doubleValue ?? 0)
+        }
         Task { @MainActor in
             AppState.shared.updateLocation(summary: summary, points: points)
+            if !timedVisits.isEmpty {
+                await DayRecordStore.shared.recordVisits(timedVisits, dateKey: DayRecordStore.dateKey())
+            }
             self.sendResponse(connection: connection, status: 200, body: "{\"status\":\"ok\"}", corsHeaders: corsHeaders)
         }
     }
@@ -1681,6 +1699,74 @@ class MobileServer {
             } else {
                 sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
             }
+        }
+    }
+
+    // MARK: - 正規ライフログ（DayRecord）
+
+    /// GET /api/lifelog/day?date=YYYY-MM-DD — 正規化された1日のレコード。
+    /// 今日は全ソースから再構築、過去日は永続化済みスナップショットを返す。
+    private nonisolated func handleDayRecordGet(connection: NWConnection, date: String?, corsHeaders: String) {
+        Task { @MainActor in
+            let today = DayRecordStore.dateKey()
+            let dateKey = (date?.isEmpty == false ? date! : today)
+            if dateKey == today {
+                let record = await DayRecordBuilder.buildToday(appState: AppState.shared)
+                self.sendCodable(connection: connection, record, corsHeaders: corsHeaders)
+            } else if let record = await DayRecordStore.shared.persisted(dateKey: dateKey) {
+                self.sendCodable(connection: connection, record, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 404, body: "{\"error\":\"no record\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// GET /api/lifelog/range?days=N — ヒートマップ用の日次集計（古い順、今日含む）。
+    private nonisolated func handleDayRecordRange(connection: NWConnection, days: String?, corsHeaders: String) {
+        let n = min(max(days.flatMap(Int.init) ?? 28, 1), 92)
+        Task { @MainActor in
+            let today = DayRecordStore.dateKey()
+            var records = await DayRecordStore.shared.history(days: n - 1, before: today)
+            let todayRecord = await DayRecordBuilder.buildToday(appState: AppState.shared)
+            records.append(todayRecord)
+            let rows: [[String: Any]] = records.map { r in
+                let macHours = r.events.filter { $0.kind == "mac" }
+                    .reduce(0.0) { $0 + (($1.end ?? $1.start) - $1.start) } / 3600
+                let outCount = r.events.filter { $0.kind == "visit" && $0.place != "自宅" }.count
+                var row: [String: Any] = [
+                    "dateKey": r.dateKey,
+                    "macHours": (macHours * 10).rounded() / 10,
+                    "visits": outCount,
+                    "events": r.events.count,
+                ]
+                if let v = r.metrics.steps { row["steps"] = v }
+                if let v = r.metrics.sleepHours { row["sleepHours"] = v }
+                if let v = r.metrics.moodScore { row["moodScore"] = v }
+                return row
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: rows),
+               let str = String(data: data, encoding: .utf8) {
+                self.sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// POST /api/lifelog/sleep — iOSから睡眠スパン {dateKey?, start, end, hours}。
+    private nonisolated func handleSleepPush(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body),
+              let start = (json["start"] as? NSNumber)?.doubleValue,
+              let end = (json["end"] as? NSNumber)?.doubleValue,
+              let hours = (json["hours"] as? NSNumber)?.doubleValue else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"start/end/hours required\"}", corsHeaders: corsHeaders)
+            return
+        }
+        let dateKey = (json["dateKey"] as? String) ?? DayRecordStore.dateKey()
+        Task {
+            await DayRecordStore.shared.recordSleep(
+                HubSleepRecord(start: start, end: end, hours: hours), dateKey: dateKey)
+            self.sendResponse(connection: connection, status: 200, body: "{\"ok\":true}", corsHeaders: corsHeaders)
         }
     }
 

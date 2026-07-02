@@ -19,7 +19,7 @@ extension AppState {
             guard entry.questionsGeneratedAt == nil, entry.answeredAt == nil else { return }
         }
 
-        let ctx = lifelogContext()
+        let ctx = await dayRecordContext()
         guard !ctx.isEmpty else { return }   // データなしの日は固定質問のみで成立
 
         let prompt = """
