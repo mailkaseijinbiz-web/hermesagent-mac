@@ -215,20 +215,15 @@ enum DayRecordBuilder {
             .filter { $0.duration >= 30 && $0.startTime >= dayStart && $0.startTime < dayEnd }
         let macTotal = macEntries.reduce(0.0) { $0 + $1.duration }
         if !macEntries.isEmpty { record.metrics.macHours = (macTotal / 360).rounded() / 10 }
-        let uniqueFocusCount = Set(macEntries.map { MacWorkFocus.focusGroupKey(for: $0) }).count
-        if uniqueFocusCount > 5 {
-            let total = macTotal
-            var byTitle: [String: Double] = [:]
-            for e in macEntries { byTitle[MacWorkFocus.workTitle(for: e), default: 0] += e.duration }
-            let top = byTitle.sorted { $0.value > $1.value }.prefix(3)
-                .map { "\($0.key) \(Int($0.value / 60))分" }.joined(separator: " · ")
-            let anchor = macEntries.map(\.startTime).min() ?? dayStart
-            let lastEnd = macEntries.map(\.endTime).max()
+        if MacActivityAggregation.shouldCollapse(macEntries),
+           let sum = MacActivityAggregation.collapsedSummary(macEntries) {
+            let top = sum.topTitles
+                .map { "\($0.title) \(Int($0.duration / 60))分" }.joined(separator: " · ")
             events.append(LifeEvent(
                 id: "mac-summary-\(dateKey)", kind: "macSummary",
-                start: anchor, end: lastEnd,
+                start: sum.anchorTime, end: sum.lastEnd,
                 title: "Macで過ごした時間",
-                detail: "\(top)（合計\(String(format: "%.1f", total / 3600))時間・\(macEntries.count)件）",
+                detail: "\(top)（合計\(String(format: "%.1f", sum.totalDuration / 3600))時間・\(sum.entryCount)件）",
                 tags: ["Mac"]))
         } else {
             for e in macEntries {

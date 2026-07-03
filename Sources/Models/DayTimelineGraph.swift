@@ -32,31 +32,21 @@ enum DayTimelineGraph {
     ) -> [DayTimelineEvent] {
         var events: [DayTimelineEvent] = []
 
-        // iOSと同一の集約規則: フォーカスグループが5種を超える日はMac作業を1枚に要約する
-        let significantMac = macEntries.filter { e in
-            e.duration >= 30 &&
-            Calendar.current.isDate(Date(timeIntervalSince1970: e.startTime), inSameDayAs: day)
-        }
-        let uniqueFocusCount = Set(significantMac.map { MacWorkFocus.focusGroupKey(for: $0) }).count
-        if uniqueFocusCount > 5 {
-            let total = significantMac.reduce(0.0) { $0 + $1.duration }
-            var byTitle: [String: Double] = [:]
-            for e in significantMac {
-                byTitle[MacWorkFocus.workTitle(for: e), default: 0] += e.duration
-            }
-            let top = byTitle.sorted { $0.value > $1.value }.prefix(3)
-                .map { "\($0.key) \(formatDuration($0.value))" }
+        // 集約規則はHermesShared（MacActivityAggregation）が正
+        let significantMac = MacActivityAggregation.significantEntries(macEntries, day: day)
+        if MacActivityAggregation.shouldCollapse(significantMac),
+           let sum = MacActivityAggregation.collapsedSummary(significantMac) {
+            let top = sum.topTitles
+                .map { "\($0.title) \(formatDuration($0.duration))" }
                 .joined(separator: " · ")
-            let anchor = significantMac.map(\.startTime).min() ?? day.timeIntervalSince1970
-            let hasHermes = significantMac.contains { $0.kind == "hermes" }
             events.append(DayTimelineEvent(
-                id: "mac-summary-\(Int(anchor))",
-                time: anchor,
-                kind: hasHermes ? "hermes" : "mac",
+                id: "mac-summary-\(Int(sum.anchorTime))",
+                time: sum.anchorTime,
+                kind: sum.hasHermes ? "hermes" : "mac",
                 label: "Macで過ごした時間",
-                detail: "\(top)\n合計 \(formatDuration(total)) · \(significantMac.count)件を要約",
-                duration: total,
-                sessionCount: significantMac.count
+                detail: "\(top)\n合計 \(formatDuration(sum.totalDuration)) · \(sum.entryCount)件を要約",
+                duration: sum.totalDuration,
+                sessionCount: sum.entryCount
             ))
         } else {
             for e in significantMac {
