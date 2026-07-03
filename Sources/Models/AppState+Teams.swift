@@ -35,7 +35,6 @@ extension AppState {
         guard let idx = employees.firstIndex(where: { $0.id == empId }) else { return }
         employees[idx].teamId = teamId
         employees[idx].updatedAt = Date().timeIntervalSince1970
-        if cloudSyncEnabled { Task { await pushEmployees() } }
     }
     func setTeamManager(_ teamId: String, managerId: String?) {
         guard let idx = teams.firstIndex(where: { $0.id == teamId }) else { return }

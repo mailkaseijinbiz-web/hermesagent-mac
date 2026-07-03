@@ -12,7 +12,6 @@ extension AppState {
         employees.append(emp)
         ensureEmployeeWorkspace(emp.id)   // auto-assign a working folder on hire
         triggerToast(message: "\(emp.role.title)「\(emp.name)」を採用しました")
-        if cloudSyncEnabled { Task { await pushEmployees() } }
         return emp
     }
 
@@ -45,7 +44,6 @@ extension AppState {
         }
 
         if activeEmployeeId == id { switchEmployee(nil) }
-        if cloudSyncEnabled { Task { await deleteCloudEmployee(id) } }
         triggerToast(message: "\(removed.role.title)「\(removed.name)」を解雇しました", actionLabel: "取り消し") { [weak self] in
             guard let self = self, !self.employees.contains(where: { $0.id == removed.id }) else { return }
             self.syncTombstones[removed.id] = nil      // undo the delete: clear its tombstone
@@ -72,7 +70,6 @@ extension AppState {
                     self.events[idx].assigneeId = removed.id; self.events[idx].updatedAt = now
                 }
             }
-            if self.cloudSyncEnabled { Task { await self.pushEmployees() } }
             self.triggerToast(message: "「\(removed.name)」を戻しました")
         }
     }
@@ -105,13 +102,6 @@ extension AppState {
         triggerToast(message: on ? "「\(employees[idx].name)」が能動的に話しかけます" : "能動連絡をオフにしました")
     }
 
-    private func deleteCloudEmployee(_ id: String) async {
-        guard let base = supabaseBase,
-              let url = URL(string: "\(base)/rest/v1/employees?id=eq.\(id)") else { return }
-        var req = URLRequest(url: url); req.httpMethod = "DELETE"; req.timeoutInterval = 15; cloudHeaders(&req)
-        req.setValue("return=minimal", forHTTPHeaderField: "Prefer")
-        _ = try? await URLSession.shared.data(for: req)
-    }
 
     /// Make an employee active: apply their model/persona/mode/cwd and load THEIR
     /// isolated session. nil → back to the default single-agent (no employee).

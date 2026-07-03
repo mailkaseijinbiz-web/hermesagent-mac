@@ -1039,13 +1039,6 @@ class AppState: ObservableObject {
 
     // MARK: - Cloud sync
 
-    /// Normalized Supabase base URL (no trailing slash).
-    var supabaseBase: String? {
-        let u = supabaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !u.isEmpty else { return nil }
-        return u.hasSuffix("/") ? String(u.dropLast()) : u
-    }
-
     // Model health (model id → works?) from test pings; hides non-working models.
     @Published var modelHealth: [String: Bool] = AppState.loadModelHealth() {
         didSet { AppState.saveModelHealth(modelHealth) }
@@ -1057,24 +1050,11 @@ class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(hideBrokenModels, forKey: "hideBrokenModels") }
     }
 
-    // Cloud sync (Supabase) — full sync of employees (+later messages) across devices.
-    @Published var supabaseURL: String = UserDefaults.standard.string(forKey: "supabaseURL") ?? "" {
-        didSet { UserDefaults.standard.set(supabaseURL, forKey: "supabaseURL") }
-    }
-    @Published var supabaseAnonKey: String = UserDefaults.standard.string(forKey: "supabaseAnonKey") ?? "" {
-        didSet { UserDefaults.standard.set(supabaseAnonKey, forKey: "supabaseAnonKey") }
-    }
-    @Published var cloudSyncEnabled: Bool = UserDefaults.standard.bool(forKey: "cloudSyncEnabled") {
-        didSet {
-            UserDefaults.standard.set(cloudSyncEnabled, forKey: "cloudSyncEnabled")
-            if cloudSyncEnabled { Task { await syncEmployeesNow() } }
-        }
-    }
+    // Supabase同期はCloudKit移行完了に伴い撤去（2026-07-03）。
     /// A stable key grouping all of this user's devices (defaults to the allowed email).
     @Published var cloudWorkspace: String = UserDefaults.standard.string(forKey: "cloudWorkspace") ?? "" {
         didSet { UserDefaults.standard.set(cloudWorkspace, forKey: "cloudWorkspace") }
     }
-    @Published var cloudSyncStatus: String = ""
     @Published var isTestingCloud: Bool = false
 
     // iCloud (CloudKit) — Stage 0 foundation test. Proves the signed build can reach
@@ -1270,7 +1250,6 @@ class AppState: ObservableObject {
             self.startEmployeeProactiveScheduler()
 
             // Cloud sync (can take seconds) now overlaps the above instead of gating it.
-            if cloudSyncEnabled { await syncEmployeesNow() }
             if icloudUsable { await syncRosterNow() }
             startICloudLiveSync()
             _ = await bridge.value

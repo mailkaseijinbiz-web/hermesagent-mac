@@ -54,7 +54,7 @@ struct SettingsModal: View {
             case .automations: return "オートメーション automation cron スケジュール 定期 ジョブ タスク 自動"
             case .google: return "google gmail calendar カレンダー メール oauth 認証 連携"
             case .mobile: return "モバイル mobile スマホ iphone ipad qr ペアリング 連携 同期 sync push 通知 認証"
-            case .cloud: return "クラウド cloud 同期 sync supabase バックアップ url キー key 社員"
+            case .cloud: return "クラウド cloud 同期 sync icloud cloudkit バックアップ 社員"
             case .channels: return "チャンネル channel telegram discord slack line whatsapp signal teams メール email"
             case .management: return "管理 メモリ memory スキル skill mcp soul"
             case .metrics: return "指標 metrics プロダクト product NSM agency 成長 growth guardrail ガードレール"
@@ -912,47 +912,6 @@ struct SettingsModal: View {
                 .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
         }
     }
-
-    private var supabaseCard: some View {
-        card(title: "クラウド同期 (Supabase)") {
-            Toggle(isOn: $appState.cloudSyncEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("クラウド同期を有効化").font(.system(size: 13, weight: .medium))
-                    Text("社員（今後メッセージも）をSupabaseに保存し、全端末で同期します。")
-                        .font(.system(size: 10)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
-                }
-            }.toggleStyle(.switch)
-
-            fieldLabel("Project URL")
-            styledField(TextField("https://xxxx.supabase.co", text: $appState.supabaseURL))
-            fieldLabel("API Key (anon public)")
-            styledField(SecureField("eyJhbGciOi...", text: $appState.supabaseAnonKey))
-            fieldLabel("ワークスペース（端末グループ識別・任意）")
-            styledField(TextField("例: あなたのメール", text: $appState.cloudWorkspace))
-
-            HStack(spacing: 10) {
-                Button { Task { await appState.testCloudConnection() } } label: {
-                    HStack(spacing: 4) {
-                        if appState.isTestingCloud { ProgressView().controlSize(.small) }
-                        Text("接続テスト")
-                    }.font(.system(size: 12))
-                }.buttonStyle(.bordered)
-                Button { Task { await appState.syncEmployeesNow() } } label: {
-                    HStack(spacing: 4) { Image(systemName: "arrow.triangle.2.circlepath"); Text("社員を今すぐ同期") }
-                        .font(.system(size: 12))
-                }.buttonStyle(.bordered).disabled(!appState.cloudSyncEnabled)
-                Spacer()
-            }
-            if !appState.cloudSyncStatus.isEmpty {
-                Text(appState.cloudSyncStatus)
-                    .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(nil)
-            }
-            Text("※ Supabaseでプロジェクト作成 → テーブル作成SQLを実行 → URL と anon キーをここに入力 → 接続テスト。")
-                .font(.system(size: 9)).foregroundColor(.secondary.opacity(0.8)).lineLimit(nil)
-        }
-    }
-
-    // MARK: - Google section
 
     @ObservedObject private var gauth = GoogleOAuth.shared
     @ObservedObject private var gcal  = GoogleCalendarSync.shared

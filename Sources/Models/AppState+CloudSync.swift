@@ -2,30 +2,7 @@ import Foundation
 
 // Cloud / iCloud sync logic extracted from AppState.swift (Phase G2).
 extension AppState {
-    /// Probe the Supabase REST endpoint + employees table to verify URL/key/SQL setup.
-    func testCloudConnection() async {
-        isTestingCloud = true
-        defer { isTestingCloud = false }
-        guard let base = supabaseBase, !supabaseAnonKey.isEmpty,
-              let url = URL(string: "\(base)/rest/v1/employees?select=id&limit=1") else {
-            cloudSyncStatus = "URL と APIキーを入力してください"; return
-        }
-        var req = URLRequest(url: url); req.timeoutInterval = 12
-        req.setValue(supabaseAnonKey, forHTTPHeaderField: "apikey")
-        req.setValue("Bearer \(supabaseAnonKey)", forHTTPHeaderField: "Authorization")
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if code == 200 {
-                cloudSyncStatus = "接続OK ✓（employees テーブルを確認）"
-            } else {
-                let body = String(data: data, encoding: .utf8)?.prefix(140) ?? ""
-                cloudSyncStatus = "失敗 HTTP \(code): \(body)"
-            }
-        } catch {
-            cloudSyncStatus = "接続エラー: \(error.localizedDescription)"
-        }
-    }
+    // Supabase同期はCloudKit移行完了に伴い撤去（2026-07-03）。同期の正はCloudKitSync。
 
     /// The workspace key grouping this user's devices (explicit, else allowed email, else default).
     var effectiveCloudWorkspace: String {
@@ -34,104 +11,6 @@ extension AppState {
         return mobileAllowedEmail.isEmpty ? "default" : mobileAllowedEmail
     }
 
-    func cloudHeaders(_ req: inout URLRequest) {
-        req.setValue(supabaseAnonKey, forHTTPHeaderField: "apikey")
-        req.setValue("Bearer \(supabaseAnonKey)", forHTTPHeaderField: "Authorization")
-    }
-
-    /// Shared (cross-device) fields only — session/workspace/avatar stay device-local.
-    private func employeeRow(_ e: Employee) -> [String: Any] {
-        [
-            "id": e.id,
-            "workspace": effectiveCloudWorkspace,
-            "name": e.name,
-            "role": e.role.rawValue,
-            "provider": e.provider,
-            "model": e.model,
-            "mode": e.mode.rawValue,
-            "persona_override": e.personaOverride ?? NSNull(),
-            "created_at": e.createdAt,
-            "client_updated": e.updatedAt ?? e.createdAt
-        ]
-    }
-
-    /// Pull cloud employees, merge (last-write-wins on shared fields), then push local.
-    func syncEmployeesNow() async {
-        guard cloudSyncEnabled, supabaseBase != nil, !supabaseAnonKey.isEmpty else {
-            cloudSyncStatus = "クラウド同期がオフ、またはURL/キー未設定です"; return
-        }
-        if let rows = await fetchCloudEmployees() { mergeCloudEmployees(rows) }
-        await pushEmployees()
-        if !cloudSyncStatus.hasPrefix("取得") && !cloudSyncStatus.hasPrefix("push") {
-            cloudSyncStatus = "社員を同期しました（\(employees.count)名）"
-        }
-    }
-
-    private func fetchCloudEmployees() async -> [[String: Any]]? {
-        guard let base = supabaseBase else { return nil }
-        let ws = effectiveCloudWorkspace.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? effectiveCloudWorkspace
-        guard let url = URL(string: "\(base)/rest/v1/employees?workspace=eq.\(ws)&select=*") else { return nil }
-        var req = URLRequest(url: url); req.timeoutInterval = 15; cloudHeaders(&req)
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard (resp as? HTTPURLResponse)?.statusCode == 200,
-                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                cloudSyncStatus = "取得失敗: \(String(data: data, encoding: .utf8)?.prefix(120) ?? "")"
-                return nil
-            }
-            return arr
-        } catch { cloudSyncStatus = "取得エラー: \(error.localizedDescription)"; return nil }
-    }
-
-    private func mergeCloudEmployees(_ rows: [[String: Any]]) {
-        for row in rows {
-            guard let id = row["id"] as? String,
-                  let roleStr = row["role"] as? String, let role = EmployeeRole(rawValue: roleStr) else { continue }
-            let cloudUpdated = (row["client_updated"] as? Double) ?? (row["created_at"] as? Double) ?? 0
-            let name = row["name"] as? String ?? role.title
-            let provider = row["provider"] as? String ?? role.defaultProvider
-            let model = row["model"] as? String ?? role.defaultModel
-            let mode = AgentMode(rawValue: row["mode"] as? String ?? "") ?? role.defaultMode
-            let persona = row["persona_override"] as? String
-            if let idx = employees.firstIndex(where: { $0.id == id }) {
-                let localUpdated = employees[idx].updatedAt ?? employees[idx].createdAt
-                if cloudUpdated > localUpdated {
-                    employees[idx].name = name
-                    employees[idx].provider = provider
-                    employees[idx].model = model
-                    employees[idx].mode = mode
-                    employees[idx].personaOverride = persona
-                    employees[idx].updatedAt = cloudUpdated
-                }
-            } else {
-                var e = Employee(name: name, role: role, provider: provider, model: model, mode: mode)
-                e.id = id
-                e.personaOverride = persona
-                e.createdAt = (row["created_at"] as? Double) ?? Date().timeIntervalSince1970
-                e.updatedAt = cloudUpdated
-                employees.append(e)
-            }
-        }
-    }
-
-    // internal (not private): called from AppState+Teams.swift (assignEmployee) and other domain extensions.
-    func pushEmployees() async {
-        guard let base = supabaseBase, !employees.isEmpty,
-              let url = URL(string: "\(base)/rest/v1/employees?on_conflict=id") else { return }
-        let rows = employees.map { employeeRow($0) }
-        guard let body = try? JSONSerialization.data(withJSONObject: rows) else { return }
-        var req = URLRequest(url: url); req.httpMethod = "POST"; req.timeoutInterval = 15; cloudHeaders(&req)
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("resolution=merge-duplicates,return=minimal", forHTTPHeaderField: "Prefer")
-        req.httpBody = body
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if !(200...299).contains(code) {
-                cloudSyncStatus = "push失敗 HTTP \(code): \(String(data: data, encoding: .utf8)?.prefix(120) ?? "")"
-            }
-        } catch { cloudSyncStatus = "pushエラー: \(error.localizedDescription)" }
-    }
     /// Write+read+delete one probe record in CloudKit to verify entitlements + account.
     func testICloud() async {
         isTestingICloud = true

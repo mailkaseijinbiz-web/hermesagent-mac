@@ -111,7 +111,6 @@ extension AppState {
             employees[idx].provider = provider
             employees[idx].model = model
             employees[idx].updatedAt = Date().timeIntervalSince1970
-            if cloudSyncEnabled { Task { await pushEmployees() } }
         }
         triggerToast(message: "モデルを変更しました: \(model)")
     }

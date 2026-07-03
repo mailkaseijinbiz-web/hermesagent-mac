@@ -152,7 +152,6 @@ extension AppState {
         guard !n.isEmpty, employees[idx].name != n else { return }
         employees[idx].name = n
         employees[idx].updatedAt = Date().timeIntervalSince1970
-        if cloudSyncEnabled { Task { await pushEmployees() } }
     }
 
     /// Reorder employees (sidebar drag-and-drop): move `id` to just before `targetId`
