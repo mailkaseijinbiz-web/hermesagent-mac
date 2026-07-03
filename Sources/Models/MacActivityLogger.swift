@@ -449,5 +449,8 @@ final class MacActivityLogger {
             completedEntries = completedEntries.filter { $0.startTime >= dayStart }
         }
         try? Self.saveEntries(completedEntries)
+        // H1二重書き: 統一イベントストアへ冪等ミラー（読み手は旧経路のまま）
+        let mirror = completedEntries.map(HermesEvent.from)
+        Task { await EventStore.shared.upsert(mirror) }
     }
 }

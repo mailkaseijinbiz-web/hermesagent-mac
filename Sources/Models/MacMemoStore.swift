@@ -108,6 +108,8 @@ final class MacMemoStore: ObservableObject {
         }
         todayMemos.append(memo)
         saveToday()
+        let ev = HermesEvent.from(memo)
+        Task { await EventStore.shared.upsert([ev]) }
         if let kg = WeightMemoParser.parse(text) {
             AppState.shared.recordWeightFromMemo(kg: kg, at: time, memoId: memo.id, source: "memo")
         }
@@ -120,6 +122,8 @@ final class MacMemoStore: ObservableObject {
         todayMemos[i].text = text
         todayMemos[i].editedAt = Date()
         saveToday()
+        let ev = HermesEvent.from(todayMemos[i])
+        Task { await EventStore.shared.upsert([ev]) }
         if let kg = WeightMemoParser.parse(text) {
             AppState.shared.recordWeightFromMemo(kg: kg, at: todayMemos[i].time, memoId: id, source: "memo")
         }
@@ -131,6 +135,10 @@ final class MacMemoStore: ObservableObject {
             for name in m.imagePaths ?? [] {
                 try? FileManager.default.removeItem(at: Self.imageURL(name))
             }
+        }
+        if let m = todayMemos.first(where: { $0.id == id }) {
+            let ts = m.time.timeIntervalSince1970
+            Task { await EventStore.shared.tombstone(id: "memo:\(id)", start: ts) }
         }
         todayMemos.removeAll { $0.id == id }
         saveToday()
