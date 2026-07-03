@@ -1,3 +1,4 @@
+import HermesShared
 import Foundation
 
 /// One event on today's reconstructed timeline (multimodal context for intention AI).

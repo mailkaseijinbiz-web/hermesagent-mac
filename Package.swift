@@ -9,9 +9,13 @@ let package = Package(
     products: [
         .executable(name: "HermesCustom", targets: ["HermesCustom"])
     ],
+    dependencies: [
+        .package(path: "../HermesShared")
+    ],
     targets: [
         .executableTarget(
             name: "HermesCustom",
+            dependencies: [.product(name: "HermesShared", package: "HermesShared")],
             path: "Sources"
         ),
         .testTarget(
