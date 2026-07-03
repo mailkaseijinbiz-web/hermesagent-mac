@@ -30,6 +30,7 @@ extension AppState {
         lines.append("社員数: \(employees.count)人" + (busyEmployees.isEmpty ? "" : "（作業中: \(busyEmployees.map { $0.name }.joined(separator: "、"))）"))
         if monthlyBudgetUSD > 0 { lines.append(String(format: "今月のコスト: $%.2f / 予算 $%.2f", totalCostUSD, monthlyBudgetUSD)) }
         if let hl = healthSummaryLine { lines.append(hl) }
+        if let wp = WeightProgress.line(history: dailyHistory) { lines.append(wp) }
         let prof = personalProfileContext
         if !prof.isEmpty { lines.append("【ユーザーの目標・嗜好】\n" + prof) }
         let selfCtx = selfModelContext
