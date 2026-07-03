@@ -17,6 +17,10 @@ settings:
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
 
+packages:
+  HermesShared:
+    path: ../HermesShared
+
 targets:
   HermesCustom:
     type: application
@@ -25,6 +29,7 @@ targets:
       - path: Sources
       - path: Assets.xcassets          # app icon (AppIcon set, compiled into Assets.car)
     dependencies:
+      - package: HermesShared
       - sdk: libsqlite3.tbd            # StateDB links SQLite3 directly
     settings:
       base:
