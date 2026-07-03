@@ -88,6 +88,11 @@ extension AppState {
            Calendar.current.isDateInToday(Date(timeIntervalSince1970: lifelogSummaryAt)) {
             parts.append("【活動要約】\n\(lifelogSummary)")
         }
+        let trendHistory = await DayRecordStore.shared.history(days: 14, before: DayRecordStore.dateKey())
+        let trends = WeeklyTrends.lines(history: trendHistory)
+        if !trends.isEmpty {
+            parts.append("【過去7日の傾向（自動計測）】\n" + trends.map { "・" + $0 }.joined(separator: "\n"))
+        }
         let news = await dailyBriefNewsContext()
         if !news.isEmpty {
             parts.append("【関心トピックのニュース（関連があれば1〜2件だけ触れる）】\n\(news)")

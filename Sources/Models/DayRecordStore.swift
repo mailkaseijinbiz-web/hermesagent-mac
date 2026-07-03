@@ -436,3 +436,54 @@ enum DayRecordBuilder {
         return lines.joined(separator: "\n")
     }
 }
+
+
+// MARK: - 週次傾向（今週7日 vs 先週7日の方向性。ブリーフ/振り返りへ還流）
+
+enum WeeklyTrends {
+    /// 過去14日のDayRecord（昇順）から「先週→今週」の傾向行を作る。
+    static func lines(history: [DayRecord]) -> [String] {
+        guard history.count >= 4 else { return [] }
+        let recent = Array(history.suffix(7))
+        let previous = Array(history.dropLast(7).suffix(7))
+        return lines(recent: recent, previous: previous)
+    }
+
+    static func lines(recent: [DayRecord], previous: [DayRecord]) -> [String] {
+        var out: [String] = []
+        func avg(_ v: [Double]) -> Double? { v.count >= 2 ? v.reduce(0, +) / Double(v.count) : nil }
+
+        if let r = avg(recent.compactMap(\.metrics.sleepHours)) {
+            var line = String(format: "睡眠 平均%.1fh", r)
+            if let p = avg(previous.compactMap(\.metrics.sleepHours)) {
+                let d = r - p
+                line += abs(d) >= 0.4 ? String(format: "（前週%.1fh、%+.1fh）", p, d) : "（前週から横ばい）"
+            }
+            out.append(line)
+        }
+        if let r = avg(recent.compactMap(\.metrics.macHours)) {
+            var line = String(format: "Mac作業 平均%.1fh/日", r)
+            if let p = avg(previous.compactMap(\.metrics.macHours)) {
+                let d = r - p
+                line += abs(d) >= 0.7 ? String(format: "（前週%.1fh、%+.1fh）", p, d) : "（前週から横ばい）"
+            }
+            out.append(line)
+        }
+        if let r = avg(recent.compactMap { $0.metrics.steps.map(Double.init) }), r > 0 {
+            var line = "歩数 平均\(Int(r))歩"
+            if let p = avg(previous.compactMap { $0.metrics.steps.map(Double.init) }), p > 500 {
+                let ratio = r / p - 1
+                line += abs(ratio) >= 0.2 ? String(format: "（前週比%+.0f%%）", ratio * 100) : "（前週から横ばい）"
+            }
+            out.append(line)
+        }
+        if let r = avg(recent.compactMap { $0.metrics.moodScore.map(Double.init) }),
+           let p = avg(previous.compactMap { $0.metrics.moodScore.map(Double.init) }) {
+            let d = r - p
+            if abs(d) >= 0.7 {
+                out.append(String(format: "気分スコア 平均%.1f（前週%.1f、%@）", r, p, d > 0 ? "上向き" : "下向き"))
+            }
+        }
+        return out
+    }
+}

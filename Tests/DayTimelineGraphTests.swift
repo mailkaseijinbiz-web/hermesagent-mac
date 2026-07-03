@@ -1,3 +1,4 @@
+import HermesShared
 import XCTest
 @testable import HermesCustom
 
