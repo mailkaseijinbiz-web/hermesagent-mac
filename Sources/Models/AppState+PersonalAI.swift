@@ -1,3 +1,4 @@
+import HermesShared
 import Foundation
 
 // パーソナルAI（デイリーブリーフ・週次レビュー）の生成ロジックを AppState 本体から分離（#3 継続）。

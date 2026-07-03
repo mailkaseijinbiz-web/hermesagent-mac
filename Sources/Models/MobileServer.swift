@@ -1,3 +1,4 @@
+import HermesShared
 import Foundation
 import Network
 

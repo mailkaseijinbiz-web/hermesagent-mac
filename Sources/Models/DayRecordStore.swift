@@ -1,3 +1,4 @@
+import HermesShared
 import Foundation
 
 // MARK: - 正規ライフログ（DayRecord）

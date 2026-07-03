@@ -1,23 +1,10 @@
+import HermesShared
 import AppKit
 import ApplicationServices
 import Foundation
 
 /// Mac で行っていることを記録するエントリ。
 /// kind: "app" = 一般アプリセッション、"hermes" = Hermes チャットセッション
-struct MacActivityEntry: Codable, Identifiable {
-    var id: String           = UUID().uuidString
-    var kind: String         = "app"        // "app" | "hermes"
-    var appName: String      = ""           // アプリ名 or 社員名
-    var bundleId: String?    = nil          // バンドルID（Optionalでバックコンパット）
-    var label: String        = ""           // 表示ラベル
-    var windowTitle: String? = nil          // ウィンドウタイトル（Optionalでバックコンパット）
-    var url: String?         = nil          // ブラウザURL（Optionalでバックコンパット）
-    var startTime: Double    = 0            // epoch seconds
-    var endTime: Double      = 0            // epoch seconds
-    var duration: Double     { endTime - startTime }
-    var startDate: Date      { Date(timeIntervalSince1970: startTime) }
-}
-
 /// NSWorkspace のアプリ切り替えを監視し「アプリセッション」として記録する。
 /// ブラウザ（Chrome等）では 8 秒ポーリングでタブ切り替えも検知し URL を記録する。
 /// Hermes チャットも同じ JSON に混在させる（MobileServer が /api/mac-activity で配信）。
