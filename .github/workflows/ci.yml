@@ -11,6 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Package.swift が ../HermesShared をpath依存で参照する（共有純粋ロジック）
+      - name: Checkout HermesShared (sibling)
+        run: git clone --depth 1 https://github.com/mailkaseijinbiz-web/HermesShared.git ../HermesShared
+
       # The SwiftPM package builds the Mac app in Swift 5 language mode (matching the
       # shipping config) and runs the pure-logic unit tests in Tests/.
       - name: Swift version
