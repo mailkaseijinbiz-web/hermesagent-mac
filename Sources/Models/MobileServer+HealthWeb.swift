@@ -36,6 +36,32 @@ extension MobileServer {
         }
     }
 
+    /// HbA1c記録の追加（検査結果の取り込み用）。{percent, date?: "yyyy-MM-dd"}
+    nonisolated func handleHbA1cAdd(connection: NWConnection, body: String, corsHeaders: String) {
+        guard let json = parseBody(body), let percent = json["percent"] as? Double else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"percent required\"}", corsHeaders: corsHeaders); return
+        }
+        Task { @MainActor in
+            var at = Date()
+            if let ds = json["date"] as? String {
+                let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
+                if let d = f.date(from: ds) { at = d.addingTimeInterval(9 * 3600) }
+            }
+            // 同日の重複は上書きしない（既存があればスキップ）
+            let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
+            let key = f.string(from: at)
+            let exists = HbA1cRecordStore.all().contains {
+                f.string(from: Date(timeIntervalSince1970: $0.recordedAt)) == key
+            }
+            if exists {
+                self.sendJSON(connection: connection, ["status": "skipped", "reason": "同日の記録あり"], corsHeaders: corsHeaders)
+                return
+            }
+            let rec = HbA1cRecordStore.append(percent: percent, at: at, source: json["source"] as? String ?? "import")
+            self.sendJSON(connection: connection, ["status": rec != nil ? "ok" : "rejected"], corsHeaders: corsHeaders)
+        }
+    }
+
     nonisolated func handleHealthWebPage(connection: NWConnection, corsHeaders: String) {
         let html = Self.healthDashboardHTML
         let data = Data(html.utf8)

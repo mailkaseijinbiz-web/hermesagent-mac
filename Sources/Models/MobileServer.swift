@@ -508,6 +508,8 @@ class MobileServer {
         // MARK: iOS parity — Dashboard / Schedule / Apps / EmployeeDetail / Gmail
         case ("GET", "/health"):
             handleHealthWebPage(connection: connection, corsHeaders: corsHeaders)
+        case ("POST", "/api/health/hba1c"):
+            handleHbA1cAdd(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/health/dashboard"):
             handleHealthDashboardJSON(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/dashboard"):
@@ -2038,7 +2040,7 @@ class MobileServer {
     }
 
     /// Parse a POST/PUT JSON body into a dict (nil on failure).
-    private nonisolated func parseBody(_ body: String) -> [String: Any]? {
+    nonisolated func parseBody(_ body: String) -> [String: Any]? {
         guard let data = body.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return json
@@ -2488,7 +2490,7 @@ class MobileServer {
 
     // MARK: - HTTP Response Helpers
 
-    private nonisolated func sendResponse(connection: NWConnection, status: Int, body: String, corsHeaders: String = "") {
+    nonisolated func sendResponse(connection: NWConnection, status: Int, body: String, corsHeaders: String = "") {
         let statusText = Self.httpStatusText(status)
         let response = "HTTP/1.1 \(status) \(statusText)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\(corsHeaders)\r\nConnection: close\r\n\r\n\(body)"
         sendRaw(connection: connection, text: response) {
