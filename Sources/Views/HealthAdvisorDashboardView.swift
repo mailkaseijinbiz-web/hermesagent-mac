@@ -16,6 +16,30 @@ struct HealthAdvisorDashboardView: View {
 
     @State private var showHbA1cEntry = false
     @State private var hba1cInput = ""
+    @State private var detailMetric: MetricKind? = nil
+
+    enum MetricKind: String, Identifiable {
+        case weight, hba1c, heart, steps
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .weight: return "体重"; case .hba1c: return "HbA1c"
+            case .heart: return "安静時心拍"; case .steps: return "歩数"
+            }
+        }
+        var unit: String {
+            switch self {
+            case .weight: return "kg"; case .hba1c: return "%"
+            case .heart: return "bpm"; case .steps: return "歩"
+            }
+        }
+        var color: Color {
+            switch self {
+            case .weight: return .purple; case .hba1c: return .red
+            case .heart: return .pink; case .steps: return .green
+            }
+        }
+    }
 
     private struct TrendPoint: Identifiable {
         let id = UUID()
@@ -34,13 +58,48 @@ struct HealthAdvisorDashboardView: View {
                 .foregroundColor(.primary)
 
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
-                weightCard
-                hba1cCard
-                heartRateCard
-                stepsCard
+                tappable(weightCard, .weight)
+                tappable(hbA1cCardTappable, .hba1c)
+                tappable(heartRateCard, .heart)
+                tappable(stepsCard, .steps)
             }
         }
         .frame(maxWidth: 640)
+        .sheet(item: $detailMetric) { kind in
+            HealthMetricDetailSheet(kind: kind, points: fullPoints(for: kind))
+        }
+    }
+
+    private func tappable<V: View>(_ view: V, _ kind: MetricKind) -> some View {
+        view
+            .contentShape(Rectangle())
+            .onTapGesture { detailMetric = kind }
+            .help("クリックで推移の詳細を表示")
+    }
+
+    /// hba1cCardの＋ボタンはタップと干渉しないようそのまま（ボタンが優先される）
+    private var hbA1cCardTappable: some View { hba1cCard }
+
+    /// 詳細用の全履歴（カードのsuffix(14)制限なし。心拍/歩数はdailyHistory全量=~60日）
+    private func fullPoints(for kind: MetricKind) -> [HealthMetricDetailSheet.Point] {
+        switch kind {
+        case .weight:
+            return WeightRecordStore.all().sorted { $0.recordedAt < $1.recordedAt }
+                .map { .init(date: Date(timeIntervalSince1970: $0.recordedAt), value: $0.kg) }
+        case .hba1c:
+            return HbA1cRecordStore.all().sorted { $0.recordedAt < $1.recordedAt }
+                .map { .init(date: Date(timeIntervalSince1970: $0.recordedAt), value: $0.percent) }
+        case .heart:
+            return appState.dailyHistory.compactMap { d in
+                guard let v = d.restingHeartRate, let date = Self.dayFmt.date(from: d.date) else { return nil }
+                return .init(date: date, value: Double(v))
+            }
+        case .steps:
+            return appState.dailyHistory.compactMap { d in
+                guard let v = d.steps, let date = Self.dayFmt.date(from: d.date) else { return nil }
+                return .init(date: date, value: Double(v))
+            }
+        }
     }
 
     // MARK: 体重
@@ -176,5 +235,103 @@ struct HealthAdvisorDashboardView: View {
         .background(Color.primary.opacity(0.03))
         .cornerRadius(14)
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.07), lineWidth: 0.5))
+    }
+}
+
+
+/// メトリクスの推移詳細（大きいチャート＋履歴リスト・前回比つき）。
+struct HealthMetricDetailSheet: View {
+    let kind: HealthAdvisorDashboardView.MetricKind
+    let points: [Point]
+    @Environment(\.dismiss) private var dismiss
+
+    struct Point: Identifiable {
+        let id = UUID()
+        let date: Date
+        let value: Double
+    }
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ja_JP"); f.dateFormat = "yyyy/M/d(E)"; return f
+    }()
+
+    private var valueFormat: String { kind == .steps ? "%.0f" : "%.1f" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("\(kind.title)の推移", systemImage: "chart.xyaxis.line")
+                    .font(.system(size: 14, weight: .bold))
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundColor(.secondary)
+                }.buttonStyle(.plain)
+            }
+
+            if points.count >= 2 {
+                Chart(points) { pt in
+                    AreaMark(x: .value("日付", pt.date), y: .value("値", pt.value))
+                        .foregroundStyle(LinearGradient(colors: [kind.color.opacity(0.2), kind.color.opacity(0)],
+                                                         startPoint: .top, endPoint: .bottom))
+                    LineMark(x: .value("日付", pt.date), y: .value("値", pt.value))
+                        .foregroundStyle(kind.color)
+                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineJoin: .round))
+                    PointMark(x: .value("日付", pt.date), y: .value("値", pt.value))
+                        .foregroundStyle(kind.color)
+                        .symbolSize(28)
+                }
+                .chartYScale(domain: yDomain)
+                .frame(height: 220)
+            } else {
+                Text("データが2件未満のためチャートを表示できません")
+                    .font(.system(size: 12)).foregroundColor(.secondary)
+                    .frame(height: 120).frame(maxWidth: .infinity)
+            }
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(Array(points.enumerated().reversed()), id: \.element.id) { i, pt in
+                        HStack {
+                            Text(Self.dateFmt.string(from: pt.date))
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text(String(format: valueFormat, pt.value) + " " + kind.unit)
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            deltaLabel(i)
+                                .frame(width: 72, alignment: .trailing)
+                        }
+                        .padding(.vertical, 7)
+                        Divider().opacity(0.4)
+                    }
+                }
+            }
+            .frame(maxHeight: 240)
+        }
+        .padding(20)
+        .frame(width: 480)
+    }
+
+    private var yDomain: ClosedRange<Double> {
+        let vs = points.map(\.value)
+        let lo = vs.min() ?? 0, hi = vs.max() ?? 1
+        let pad = max((hi - lo) * 0.25, hi * 0.02, 0.1)
+        return (lo - pad)...(hi + pad)
+    }
+
+    @ViewBuilder
+    private func deltaLabel(_ index: Int) -> some View {
+        if index > 0 {
+            let d = points[index].value - points[index - 1].value
+            // 体重/HbA1c/心拍は減少=改善（緑）、歩数は増加=改善
+            let goodWhenDown = kind != .steps
+            Text(String(format: d >= 0 ? "+" + valueFormat : valueFormat, d))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(abs(d) < 0.001 ? .secondary : ((d < 0) == goodWhenDown ? .green : .orange))
+        } else {
+            Text("").font(.system(size: 11))
+        }
     }
 }
