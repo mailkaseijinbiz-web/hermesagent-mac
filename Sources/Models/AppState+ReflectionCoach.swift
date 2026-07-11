@@ -99,21 +99,9 @@ extension AppState {
             await generateReflectionQuestions()
         }
 
-        // 22:00〜: 未回答ならリマインダー（1日1回）
-        if hour >= 22 {
-            let dateKey = ReflectionStore.dateKey()
-            var entry = await ReflectionStore.shared.entry(dateKey: dateKey)
-                ?? ReflectionEntry(dateKey: dateKey)
-            guard entry.answeredAt == nil, entry.reminderSentAt == nil else { return }
-            entry.reminderSentAt = now.timeIntervalSince1970
-            await ReflectionStore.shared.upsert(entry)
-            sendPushIfEnabled(
-                title: "今日の振り返り",
-                body: "今夜の質問が届いています。1分だけ、今日を振り返りませんか？",
-                sessionId: nil,
-                proactive: true
-            )
-        }
+        // 22:00のAPNsリマインダーは廃止（通知ダイエット 2026-07-11）。
+        // iOS側の21:00ローカル通知（EveningReflectionScheduler）と二重になっていた。
+        // 夜のリマインドはiOSローカル通知に一本化。
     }
 
     // MARK: - 週次レビューへの還流

@@ -1342,8 +1342,11 @@ class AppState: ObservableObject {
         // (cli) chats and only push cron/slack/whatsapp-originated replies — except
         // proactive employee check-ins (flagged before streaming starts).
         let isProactive = m.sessionId == proactivePushSessionId
+        let source = StateDB.shared.sessions().first { $0.id == m.sessionId }?.source ?? ""
+        // 通知ダイエット: cron結果はジョブのLINE配送で、LINE発チャットはLINE返信で
+        // 既に本人へ届くため、APNsミラーは送らない（同一内容の二重通知になっていた）。
+        if !isProactive && (source == "cron" || source == "line") { return }
         if pushOnlyAutomations && !isProactive {
-            let source = StateDB.shared.sessions().first { $0.id == m.sessionId }?.source ?? ""
             if source.isEmpty || source == "cli" { return }
         }
         if isProactive { proactivePushSessionId = nil }

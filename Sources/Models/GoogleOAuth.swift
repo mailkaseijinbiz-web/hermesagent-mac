@@ -222,7 +222,18 @@ final class GoogleOAuth: ObservableObject {
 
         let (data, _) = try await URLSession.shared.data(for: req)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let access = json["access_token"] as? String else { throw OAuthError.invalidResponse }
+              let access = json["access_token"] as? String else {
+            // invalid_grant = リフレッシュトークン失効（テスト状態のOAuthアプリは7日で失効）。
+            // 汎用「無効なレスポンス」に埋もれると数日気づけないため、明示的に切断状態へ落とす。
+            if let err = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String,
+               err == "invalid_grant" {
+                isConnected = false
+                errorMessage = "Google連携の有効期限が切れました。設定 → Google連携 から再接続してください"
+                Log.failure("sync", "Googleリフレッシュトークン失効（再認証が必要）", OAuthError.notAuthenticated)
+                throw OAuthError.notAuthenticated
+            }
+            throw OAuthError.invalidResponse
+        }
         accessToken = access
         let expiresIn = (json["expires_in"] as? Int) ?? 3600
         tokenExpiry = Date().addingTimeInterval(Double(expiresIn))

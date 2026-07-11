@@ -277,9 +277,8 @@ class MobileServer {
         guard let headerStr = String(data: headerData, encoding: .utf8) else { return false }
 
         let lines = headerStr.components(separatedBy: "\r\n")
-        let isPost = (lines.first ?? "").uppercased().hasPrefix("POST")
-        if !isPost { return true }
-
+        // POST/PUT/PATCH/DELETE いずれもボディを持ちうる。Content-Length宣言があれば
+        // メソッドに関わらず全量到着を待つ（PUTのボディ欠落 = iOSタスク更新400の原因）
         var contentLength = 0
         for line in lines where line.lowercased().hasPrefix("content-length:") {
             contentLength = Int(line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) ?? 0
@@ -332,12 +331,10 @@ class MobileServer {
         let method = String(parts[0])
         let path = String(parts[1])
         
-        // Extract body for POST requests
+        // ボディ抽出（メソッド不問。PUT/DELETEもボディを持ちうる）
         var body = ""
-        if method == "POST" {
-            if let bodyStart = raw.range(of: "\r\n\r\n") {
-                body = String(raw[bodyStart.upperBound...])
-            }
+        if let bodyStart = raw.range(of: "\r\n\r\n") {
+            body = String(raw[bodyStart.upperBound...])
         }
         
         // CORS: echo the request Origin only when it's trusted (loopback / Tailscale / LAN),
@@ -475,6 +472,8 @@ class MobileServer {
             handleDayRecordGet(connection: connection, date: query["date"], corsHeaders: corsHeaders)
         case ("GET", "/api/lifelog/range"):
             handleDayRecordRange(connection: connection, days: query["days"], corsHeaders: corsHeaders)
+        case ("GET", "/api/lifelog/week-summary"):
+            handleWeekSummary(connection: connection, start: query["start"], force: query["force"] == "1", corsHeaders: corsHeaders)
         case ("POST", "/api/lifelog/sleep"):
             handleSleepPush(connection: connection, body: body, corsHeaders: corsHeaders)
         case ("GET", "/api/reflection/today"):
@@ -1750,6 +1749,22 @@ class MobileServer {
                 self.sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
             } else {
                 self.sendResponse(connection: connection, status: 500, body: "{\"error\":\"encode failed\"}", corsHeaders: corsHeaders)
+            }
+        }
+    }
+
+    /// GET /api/lifelog/week-summary?start=YYYY-MM-DD&force=1 — 週サマリー（統計＋AI分析）。
+    /// キャッシュ規則は WeekSummaryRules（過去週は恒久・今週はTTL・force で再生成）。
+    private nonisolated func handleWeekSummary(connection: NWConnection, start: String?, force: Bool, corsHeaders: String) {
+        guard let start, !start.isEmpty else {
+            sendResponse(connection: connection, status: 400, body: "{\"error\":\"start required\"}", corsHeaders: corsHeaders)
+            return
+        }
+        Task { @MainActor in
+            if let summary = await AppState.shared.weekSummary(startKey: start, force: force) {
+                self.sendCodable(connection: connection, summary, corsHeaders: corsHeaders)
+            } else {
+                self.sendResponse(connection: connection, status: 400, body: "{\"error\":\"invalid start\"}", corsHeaders: corsHeaders)
             }
         }
     }
