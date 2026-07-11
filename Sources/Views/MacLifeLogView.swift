@@ -86,6 +86,7 @@ struct MacLifeLogView: View {
     @State private var homeKeywordDraft   = ""
     @State private var showFullTimeline   = false
     @State private var selectedDate       = LifeLogDay.startOfDay(Date())
+    @State private var scope: LifeLogScope = .day
     @State private var dayRecord: DayRecord? = nil
     private let refreshTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
@@ -110,6 +111,16 @@ struct MacLifeLogView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                Picker("", selection: $scope) {
+                    ForEach(LifeLogScope.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 260)
+                .padding(.bottom, 14)
+
+                if scope != .day {
+                    MacLifeLogScopeView(scope: scope, anchor: $selectedDate)
+                } else {
                 dateHeader
                     .padding(.bottom, 16)
 
@@ -175,6 +186,7 @@ struct MacLifeLogView: View {
                             }
                         )
                     }
+                }
                 }
             }
             .padding(.horizontal, 32)
