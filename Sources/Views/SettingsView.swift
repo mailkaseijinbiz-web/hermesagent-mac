@@ -357,11 +357,66 @@ struct SettingsModal: View {
                 .font(.system(size: 9))
                 .foregroundColor(.secondary.opacity(0.85))
                 .lineLimit(nil)
+
+            Divider().padding(.vertical, 4)
+
+            Text("健康ダッシュボード（Web）")
+                .font(.system(size: 12, weight: .semibold))
+            Text("スマホのカメラでスキャンすると、ブラウザで健康ダッシュボードが開きます（Tailscale内のみ）。")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            if let qr = healthQRImage {
+                HStack(alignment: .top, spacing: 14) {
+                    Image(nsImage: qr)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 132, height: 132)
+                        .background(Color.white)
+                        .cornerRadius(8)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(healthDashboardURLMasked)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                        Button("URLをコピー") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(healthDashboardURL, forType: .string)
+                            appState.triggerToast(message: "健康ダッシュボードのURLをコピーしました")
+                        }
+                        .font(.system(size: 11))
+                    }
+                }
+            } else {
+                Text("QRを生成できません（Tailscale未接続、またはローカルAPIキー未設定）")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
         }
         .task {
             tailscaleIPv4 = await Task.detached(priority: .utility) { TailscaleIPv4.lookup() }.value
             await appState.updateDashboardURL()
         }
+    }
+
+    /// 健康ダッシュボード（/health）の共有URL。鍵はローカル自動化キー。
+    private var healthDashboardURL: String {
+        let base = appState.isUsingTailscale && !appState.dashboardURL.isEmpty
+            ? appState.dashboardURL
+            : "http://127.0.0.1:\(AppConfig.mobilePort)"
+        let key = appState.localAutomationKey
+        return key.isEmpty ? "" : "\(base)/health?key=\(key)"
+    }
+
+    /// 表示用（キー部分を伏せる）。
+    private var healthDashboardURLMasked: String {
+        guard !healthDashboardURL.isEmpty else { return "" }
+        return healthDashboardURL.replacingOccurrences(
+            of: appState.localAutomationKey, with: String(appState.localAutomationKey.prefix(8)) + "…")
+    }
+
+    private var healthQRImage: NSImage? {
+        guard !healthDashboardURL.isEmpty, appState.isUsingTailscale else { return nil }
+        return QRCodeGenerator.generate(from: healthDashboardURL)
     }
 
     /// Matches QR / dashboard URL when Tailscale is active; otherwise best-effort IPv4.
