@@ -94,6 +94,11 @@ extension AppState {
         if !trends.isEmpty {
             parts.append("【過去7日の傾向（自動計測）】\n" + trends.map { "・" + $0 }.joined(separator: "\n"))
         }
+        if let today = await DayRecordStore.shared.persisted(dateKey: DayRecordStore.dateKey()),
+           let sh = today.metrics.sleepHours {
+            let est = today.events.contains { $0.kind == "sleep" && $0.title.contains("推定") }
+            parts.append(String(format: "【昨夜の睡眠】%.1f時間%@", sh, est ? "（操作履歴からの推定・参考値）" : ""))
+        }
         let news = await dailyBriefNewsContext()
         if !news.isEmpty {
             parts.append("【関心トピックのニュース（関連があれば1〜2件だけ触れる）】\n\(news)")

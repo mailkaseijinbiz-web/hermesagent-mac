@@ -271,6 +271,38 @@ enum DayRecordBuilder {
         }
 
         record.events = events.sorted { $0.start < $1.start }
+
+        // 睡眠の推定（実測が無い日）: 「寝た/起きた」メモ > 行動シグナル推定
+        if record.metrics.sleepHours == nil {
+            let dayStart = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
+            let yesterKey = DayRecordStore.dateKey(for: Date().addingTimeInterval(-86400))
+            let yesterEvents = await DayRecordStore.shared.persisted(dateKey: yesterKey)?.events ?? []
+            let all = (yesterEvents + record.events).filter { $0.kind != "sleep" && $0.kind != "macSummary" }
+
+            let sleepWords: Set<String> = ["寝た", "寝る", "就寝", "おやすみ"]
+            let wakeWords: Set<String> = ["起きた", "起床", "おはよう"]
+            var sleepMemoAt: Double? = nil
+            var wakeMemoAt: Double? = nil
+            var signals: [Double] = []
+            for e in all {
+                signals.append(e.start)
+                if let end = e.end { signals.append(end) }
+                guard e.kind == "memo" else { continue }
+                let title = e.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if sleepWords.contains(title) { sleepMemoAt = max(sleepMemoAt ?? e.start, e.start) }
+                if wakeWords.contains(title) { wakeMemoAt = min(wakeMemoAt ?? e.start, e.start) }
+            }
+            let est = SleepEstimator.fromMemoPair(sleepAt: sleepMemoAt, wokeAt: wakeMemoAt, dayStart: dayStart)
+                ?? SleepEstimator.estimate(signals: signals, dayStart: dayStart)
+            if let est {
+                record.metrics.sleepHours = est.hours
+                record.events.append(LifeEvent(
+                    id: "sleep-est-\(dateKey)", kind: "sleep", start: est.start, end: est.end,
+                    title: "睡眠（推定）", detail: String(format: "%.1f時間（操作履歴から推定）", est.hours),
+                    tags: ["健康"]))
+                record.events.sort { $0.start < $1.start }
+            }
+        }
         // バンドはMac作業を要約していても粒度を保つ（生エントリから合成）
         let bandEvents = record.events.filter { $0.kind != "macSummary" } + macEntries.map {
             LifeEvent(id: "band-\($0.id)", kind: "mac", start: $0.startTime, end: $0.endTime, title: "")
