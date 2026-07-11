@@ -506,6 +506,10 @@ class MobileServer {
             handleDeleteSession(connection: connection, sessionId: sessionId, corsHeaders: corsHeaders)
 
         // MARK: iOS parity — Dashboard / Schedule / Apps / EmployeeDetail / Gmail
+        case ("GET", "/health"):
+            handleHealthWebPage(connection: connection, corsHeaders: corsHeaders)
+        case ("GET", "/api/health/dashboard"):
+            handleHealthDashboardJSON(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/dashboard"):
             handleDashboard(connection: connection, corsHeaders: corsHeaders)
         case ("GET", "/api/calendar"):
@@ -609,6 +613,16 @@ class MobileServer {
              AppState.shared.localAutomationKey)
         }
         guard require else { return true }
+        // ブラウザから /health を開く用: 最初の行の ?key=<ローカルキー> を Bearer 相当として受け付ける
+        // （対象は /health 配下のみ。Tailscale内の自分のハブに限る運用）
+        if let firstLine = raw.components(separatedBy: "\r\n").first,
+           firstLine.contains(" /health"),
+           let range = firstLine.range(of: "key="),
+           !localKey.isEmpty {
+            let after = String(firstLine[range.upperBound...])
+            let key = after.prefix { $0 != "&" && $0 != " " }
+            if Self.constantTimeEquals(String(key), localKey) { return true }
+        }
         guard let token = extractBearerToken(raw) else { return false }
         // ローカル自動化キー（同一マシンの cron）— 一致なら Google 検証をスキップ。
         // 比較は定数時間で（== の早期 return による文字単位のタイミング側チャネルを防ぐ）。
@@ -2014,7 +2028,7 @@ class MobileServer {
     // MARK: - iOS parity handlers (Dashboard / Calendar / Apps / Tasks / Artifacts / Files / Gmail)
 
     /// Shared JSON 200 responder (encodes a dict; 500 on failure).
-    private nonisolated func sendJSON(connection: NWConnection, _ obj: [String: Any], corsHeaders: String) {
+    nonisolated func sendJSON(connection: NWConnection, _ obj: [String: Any], corsHeaders: String) {
         if let data = try? JSONSerialization.data(withJSONObject: obj),
            let str = String(data: data, encoding: .utf8) {
             sendResponse(connection: connection, status: 200, body: str, corsHeaders: corsHeaders)
