@@ -14,6 +14,7 @@ struct MacLifeLogScopeView: View {
     @Binding var anchor: Date
 
     @State private var records: [String: DayRecord] = [:]   // dateKey → record
+    @State private var prevWeekRecords: [String: DayRecord] = [:]   // 前週分（週比較用）
     @State private var weekSummaryText: String = ""
 
     private static let dayKeyFmt: DateFormatter = {
@@ -102,6 +103,17 @@ struct MacLifeLogScopeView: View {
             } else {
                 weekSummaryText = ""
             }
+            // 前週分も読み、統計チップに前週比を出せるようにする（変化に気づきやすく）。
+            let prevWeekStart = cal.date(byAdding: .day, value: -7, to: weekStart)!
+            let prevKeys = (0..<7).map { Self.dayKeyFmt.string(from: cal.date(byAdding: .day, value: $0, to: prevWeekStart)!) }
+            var prevOut: [String: DayRecord] = [:]
+            for k in prevKeys {
+                if let r = await DayRecordStore.shared.persisted(dateKey: k) { prevOut[k] = r }
+            }
+            prevWeekRecords = prevOut
+        } else {
+            weekSummaryText = ""
+            prevWeekRecords = [:]
         }
     }
 
@@ -110,7 +122,13 @@ struct MacLifeLogScopeView: View {
     // MARK: - 週
 
     private var weekView: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let days = (0..<7).compactMap { record(cal.date(byAdding: .day, value: $0, to: weekStart)!) }
+        let prevWeekStart = cal.date(byAdding: .day, value: -7, to: weekStart)!
+        let prevDays = (0..<7).compactMap { prevWeekRecords[Self.dayKeyFmt.string(from: cal.date(byAdding: .day, value: $0, to: prevWeekStart)!)] }
+        let maxSteps = Double(days.compactMap(\.metrics.steps).max() ?? 0)
+        let maxSleep = days.compactMap(\.metrics.sleepHours).max() ?? 0
+        let maxMac = days.compactMap(\.metrics.macHours).max() ?? 0
+        return VStack(alignment: .leading, spacing: 12) {
             if !weekSummaryText.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("週の要約", systemImage: "sparkles").font(.system(size: 12, weight: .semibold)).foregroundStyle(.purple)
@@ -120,36 +138,59 @@ struct MacLifeLogScopeView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.purple.opacity(0.07)))
             }
-            statRow(days: (0..<7).compactMap { record(cal.date(byAdding: .day, value: $0, to: weekStart)!) })
+            statRow(days: days, previous: prevDays)
             HStack(alignment: .top, spacing: 8) {
                 ForEach(0..<7, id: \.self) { i in
                     let d = cal.date(byAdding: .day, value: i, to: weekStart)!
-                    dayMiniCard(d, record(d))
+                    dayMiniCard(d, record(d), maxSteps: maxSteps, maxSleep: maxSleep, maxMac: maxMac)
                 }
             }
         }
     }
 
-    private func dayMiniCard(_ date: Date, _ r: DayRecord?) -> some View {
+    private func dayMiniCard(_ date: Date, _ r: DayRecord?, maxSteps: Double, maxSleep: Double, maxMac: Double) -> some View {
         let f = DateFormatter(); f.locale = Locale(identifier: "ja_JP"); f.dateFormat = "E\nd"
+        let isToday = cal.isDateInToday(date)
         return VStack(spacing: 6) {
             Text(f.string(from: date)).font(.system(size: 11, weight: .semibold)).multilineTextAlignment(.center)
-                .foregroundStyle(cal.isDateInToday(date) ? Color.accentColor : .secondary)
+                .foregroundStyle(isToday ? Color.accentColor : .secondary)
             if let m = r?.metrics {
-                miniMetric("👟", m.steps.map { "\($0 / 1000)k" })
-                miniMetric("🌙", m.sleepHours.map { String(format: "%.1f", $0) })
-                miniMetric("💻", m.macHours.map { String(format: "%.1f", $0) })
+                metricBar("👟", value: m.steps.map(Double.init), maxValue: maxSteps,
+                           display: m.steps.map { "\($0 / 1000)k" }, color: .green)
+                metricBar("🌙", value: m.sleepHours, maxValue: maxSleep,
+                           display: m.sleepHours.map { String(format: "%.1f", $0) }, color: .indigo)
+                metricBar("💻", value: m.macHours, maxValue: maxMac,
+                           display: m.macHours.map { String(format: "%.1f", $0) }, color: .purple)
             } else {
-                Text("—").font(.system(size: 11)).foregroundStyle(.tertiary)
+                Text("記録なし").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, minHeight: 56)
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+        .padding(.vertical, 10).padding(.horizontal, 6)
+        .background(RoundedRectangle(cornerRadius: 10).fill(isToday ? Color.accentColor.opacity(0.09) : Color.primary.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(isToday ? Color.accentColor.opacity(0.5) : .clear, lineWidth: 1.5))
     }
 
-    private func miniMetric(_ icon: String, _ v: String?) -> some View {
-        Text("\(icon) \(v ?? "–")").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
+    /// その週の最大値を基準にした横棒＋数値。7枚の日カードを並べたときに棒の長さで
+    /// 一目で増減がわかるようにする（数値の羅列だけでは変化に気づきにくいため）。
+    private func metricBar(_ icon: String, value: Double?, maxValue: Double, display: String?, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Text(icon).font(.system(size: 9))
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2).fill(Color.primary.opacity(0.07))
+                    if let v = value, v > 0, maxValue > 0 {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(color.opacity(0.85))
+                            .frame(width: max(2, geo.size.width * min(1, v / maxValue)))
+                    }
+                }
+            }
+            .frame(height: 5)
+            Text(display ?? "–").font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                .frame(width: 26, alignment: .trailing)
+        }
     }
 
     // MARK: - 月
@@ -230,24 +271,53 @@ struct MacLifeLogScopeView: View {
 
     // MARK: - 共通統計行
 
-    private func statRow(days: [DayRecord]) -> some View {
+    /// `previous`（週ビューのみ、前週分）を渡すと各チップに前週比の▲▼を添える。
+    private func statRow(days: [DayRecord], previous: [DayRecord] = []) -> some View {
         let steps = days.compactMap { $0.metrics.steps }
         let sleep = days.compactMap { $0.metrics.sleepHours }
         let macH = days.compactMap { $0.metrics.macHours }
-        func chip(_ label: String, _ value: String) -> some View {
+        let prevStepsAvg = avgInt(previous.compactMap { $0.metrics.steps })
+        let prevSleepAvg = avgDouble(previous.compactMap { $0.metrics.sleepHours })
+        let prevMacSum = previous.compactMap { $0.metrics.macHours }.reduce(0, +)
+
+        func chip(_ label: String, _ value: String, delta: Int? = nil) -> some View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
-                Text(value).font(.system(size: 15, weight: .semibold, design: .rounded))
+                HStack(spacing: 4) {
+                    Text(value).font(.system(size: 15, weight: .semibold, design: .rounded))
+                    if let d = delta, d != 0 {
+                        Text("\(d > 0 ? "▲" : "▼")\(abs(d))%")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(d > 0 ? .green : .red)
+                    }
+                }
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.05)))
         }
+
+        let stepsAvg = steps.isEmpty ? nil : steps.reduce(0, +) / steps.count
+        let sleepAvg = sleep.isEmpty ? nil : sleep.reduce(0, +) / Double(sleep.count)
+        let macSum = macH.reduce(0, +)
+
         return HStack(spacing: 8) {
             chip("記録日数", "\(days.count)日")
-            chip("歩数 平均", steps.isEmpty ? "–" : "\(steps.reduce(0, +) / steps.count)歩")
-            chip("睡眠 平均", sleep.isEmpty ? "–" : String(format: "%.1fh", sleep.reduce(0, +) / Double(sleep.count)))
-            chip("Mac作業 計", macH.isEmpty ? "–" : String(format: "%.0fh", macH.reduce(0, +)))
+            chip("歩数 平均", stepsAvg.map { "\($0)歩" } ?? "–",
+                 delta: deltaPct(stepsAvg.map(Double.init), prevStepsAvg))
+            chip("睡眠 平均", sleepAvg.map { String(format: "%.1fh", $0) } ?? "–",
+                 delta: deltaPct(sleepAvg, prevSleepAvg))
+            chip("Mac作業 計", macH.isEmpty ? "–" : String(format: "%.0fh", macSum),
+                 delta: previous.isEmpty ? nil : deltaPct(macSum, prevMacSum))
             Spacer()
         }
+    }
+
+    private func avgInt(_ xs: [Int]) -> Double? { xs.isEmpty ? nil : Double(xs.reduce(0, +)) / Double(xs.count) }
+    private func avgDouble(_ xs: [Double]) -> Double? { xs.isEmpty ? nil : xs.reduce(0, +) / Double(xs.count) }
+
+    /// `cur`の`prev`に対する変化率(%、四捨五入)。どちらか欠損か`prev`が0なら判定不能としてnil。
+    private func deltaPct(_ cur: Double?, _ prev: Double?) -> Int? {
+        guard let c = cur, let p = prev, p > 0 else { return nil }
+        return Int(((c - p) / p * 100).rounded())
     }
 }
