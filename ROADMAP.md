@@ -22,12 +22,22 @@
 - `TODO/FIXME/HACK` は **3 箇所のみ**（すべてコメント/文字列リテラルで実害なし、07-10 と同じ）。
 - テスト：Mac **188 test funcs**（07-10 の 180 から +8。うち **`EventStoreTests` / `WeekSummaryServiceTests` の 2 ファイルは未コミット**）、iOS **46 funcs**（横ばい）。
 
+**今日この場で対応した事項**
+- ✅ **未コミットのテストをコミット**：`EventStoreTests.swift` / `WeekSummaryServiceTests.swift`（+ROADMAP更新）を1コミットに。`.agents/`（skills-manager由来のツール群）と`skills-lock.json`はアプリのソースではないため対象外のまま保留（要判断は別途）。
+- ✅ **`/health` の URL クエリ鍵漏洩を修正**：`GET /health?key=...`は初回ブートストラップのみに限定し、`handleHealthWebPage`が`Set-Cookie: hermes_health_key=...; HttpOnly; SameSite=Strict`を発行するよう変更（`MobileServer.swift`, `MobileServer+HealthWeb.swift`）。フロントJSは`history.replaceState`でURLからキーを即座に消し、`/api/health/dashboard`はCookie経由（`credentials: "same-origin"`）で認証——Bearerヘッダの手動付与をやめた。`authorize()`に`extractCookie(_:name:)`を追加し定数時間比較で検証。QRコード自体は変更なし（初回スキャンのブートストラップ用途としては妥当）。
+- ✅ **`EventStore.cache`の無効化API追加**：`EventStore.invalidate(on:)`を新設し、`PrivateStore.remove()`等でファイルを外部削除した際にactor内cacheが残留する問題（07-10発見）に対処。回帰テスト`testInvalidateClearsStaleCacheAfterExternalFileRemoval`を追加（cache残留の既知動作→invalidate後に正しく空になることの両方を確認）。`EventStoreTests`の`cleanup`ヘルパーもfile削除+cache無効化の両方を行うよう更新。
+- ✅ **同期系`try?`を精査** — 結果、心配していた「デコード失敗の握り潰し」パターンは**再現しなかった**：
+  - `CloudKitSync.swift`の実デコードは全て`try`（`try?`ではない）で例外が呼び出し元まで伝播し、`AppState+CloudSync.swift`側で`icloudStatus`にユーザー可視のエラー文言として surface 済み。
+  - `MobileServer.swift`の83箇所中、大半（22+8+8+...）は**リクエストボディのパース**で、失敗時は`guard...else`から400/500をクライアントへ返しており沈黙していない。ポートフォリオ履歴キャッシュの`try? JSONDecoder().decode(HistCache...)`もキャッシュミス→再取得という正しいフォールバック。
+  - 唯一の実質的な穴は`pullRosterOnly()`のcatchが完全無ログだったこと（コメントのみ）→ `Log.failure("cloudsync", "pullRosterOnly", error)`を追加（一時的なオフライン/スロットリングと持続的なデコード異常を区別できるように）。
+  - **副産物の発見**：`try? JSONSerialization.jsonObject(with: data) as? [String: Any]`のリクエストボディパースパターンが、既存の`parseBody()`ヘルパーを使わず**21箇所に手書きで重複**している（`MobileServer.swift:908`他）。バグではないが簡素化余地——`parseBody()`への統一は別タスクとして残す（**S、`/simplify`向き**）。
+- ✅ **回帰確認**：`run_tests.sh` 189 test funcs 全green（EventStoreTests+1件増）。ビルドは既存警告のみで新規エラーなし。
+
 **今日見つかった懸念（要対応・優先度順）**
-- 🟠 **`/health` の認証が URL クエリに鍵を載せている**（新規セキュリティ課題）：`GET /health?key=<localAutomationKey>` を Bearer 相当として受理している（`MobileServer.swift:618-627`）。比較は定数時間・Tailscale 限定運用だが、**秘密をクエリ文字列に置くのはアンチパターン**——ブラウザ履歴・Referer ヘッダ・（将来入る可能性のある）アクセスログに平文の鍵が残る。QR にも鍵入り URL が焼かれる。→ **初回認証後に Set-Cookie（HttpOnly）へ移す or 短命の署名付きトークン**に置換すべき（**M**）。[google-token-file-storage] と同じ「秘密の取り回し」系。
-- 🟡 **未コミットの作業が 2 日滞留**：`EventStoreTests.swift` / `WeekSummaryServiceTests.swift`（07-10 のログでは「追加して green」と記載済みなのに **git 上は未追跡**）、`.agents/`、`skills-lock.json` がワーキングツリーに残存。テストは CI で回らず、消失リスク。→ **コヒーレントな単位でコミット**（**S**）。
-- 🟡 **EventStore H2（リーダー切替）が未着手のまま**：`upsert`/`tombstone` の二重書きは `MacActivityLogger`/`MacMemoStore` から継続しているが、読み手は依然旧経路。07-10 に発見した **`EventStore.cache` が `PrivateStore.remove()` で無効化されない**問題も未対応。H2 = 差分監視 → リーダー切替 → 旧経路撤去 → cache 無効化 API、の順で着手（**M**）。
-- 🟡 **`try?` が再び微増（295→298）**：CloudKit 同期経路と MobileServer レスポンス系の沈黙失敗は依然未精査。移行直後のデコード失敗は名簿全消え（[codable-persisted-fields-rule]）に直結するため優先精査（**M**）。
-- 🟡 **iOS ネイティブ・パリティの方針決定が必要**：健康は「Web ダッシュボード」で当面パリティを取れたが、これは**恒久策か暫定策か**が未定。ネイティブ実装に進むなら `HermesShared` の iOS 取り込み（EventStore/DayRecord/振り返り系）が前提。Web 路線で行くなら iOS アプリの位置づけ（薄クライアント→Web ラッパー化）を [personal-ai-direction] に明記（**M〜L**）。
+- 🟡 **iOS ネイティブ・パリティの方針決定が必要**（唯一の未着手項目・製品判断のため保留）：健康は「Web ダッシュボード」で当面パリティを取れたが、これは**恒久策か暫定策か**が未定。ネイティブ実装に進むなら `HermesShared` の iOS 取り込み（EventStore/DayRecord/振り返り系）が前提。Web 路線で行くなら iOS アプリの位置づけ（薄クライアント→Web ラッパー化）を [personal-ai-direction] に明記（**M〜L**）。ユーザー判断待ち。
+- 🟡 **EventStore H2（リーダー切替）本体は依然未着手**：cache無効化APIは追加したが、`upsert`/`tombstone`の二重書きは継続中で読み手は旧経路のまま。差分監視→リーダー切替→旧経路撤去の順で着手が必要（**M**）。
+- ⬜ **`parseBody()`未使用の21箇所重複**（今日発見・軽微）：`MobileServer.swift`内の手書き`try? JSONSerialization.jsonObject`を`parseBody()`呼び出しに統一する機械的リファクタ（**S**）。
+- ⬜ **`.agents/` / `skills-lock.json`の扱い未決定**：アプリソースではなくツール設定なので今回はコミット対象外としたが、`.gitignore`に載せるか意図的にコミットするか方針化されていない（**S**）。
 
 ---
 
