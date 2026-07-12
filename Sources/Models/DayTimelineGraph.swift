@@ -32,33 +32,37 @@ enum DayTimelineGraph {
     ) -> [DayTimelineEvent] {
         var events: [DayTimelineEvent] = []
 
-        // 集約規則はHermesShared（MacActivityAggregation）が正
+        // 集約規則はHermesShared（MacActivityAggregation）が正。
+        // 日単位ではなくセッション単位(空白30分超で区切り)でcollapse判定し、要約カードが
+        // 実際の活動時刻から離れた時刻(例: その日最初のセッション開始時刻)に出てしまうのを防ぐ。
         let significantMac = MacActivityAggregation.significantEntries(macEntries, day: day)
-        if MacActivityAggregation.shouldCollapse(significantMac),
-           let sum = MacActivityAggregation.collapsedSummary(significantMac) {
-            let top = sum.topTitles
-                .map { "\($0.title) \(formatDuration($0.duration))" }
-                .joined(separator: " · ")
-            events.append(DayTimelineEvent(
-                id: "mac-summary-\(Int(sum.anchorTime))",
-                time: sum.anchorTime,
-                kind: sum.hasHermes ? "hermes" : "mac",
-                label: "Macで過ごした時間",
-                detail: "\(top)\n合計 \(formatDuration(sum.totalDuration)) · \(sum.entryCount)件を要約",
-                duration: sum.totalDuration,
-                sessionCount: sum.entryCount
-            ))
-        } else {
-            for e in significantMac {
+        for cluster in MacActivityAggregation.sessionClusters(significantMac) {
+            if MacActivityAggregation.shouldCollapse(cluster),
+               let sum = MacActivityAggregation.collapsedSummary(cluster) {
+                let top = sum.topTitles
+                    .map { "\($0.title) \(formatDuration($0.duration))" }
+                    .joined(separator: " · ")
                 events.append(DayTimelineEvent(
-                    id: "mac-\(e.id)",
-                    time: e.startTime,
-                    kind: e.kind == "hermes" ? "hermes" : "mac",
-                    label: MacWorkFocus.workTitle(for: e),
-                    detail: macEventDetail(for: e),
-                    duration: e.duration,
-                    sessionCount: 1
+                    id: "mac-summary-\(Int(sum.anchorTime))",
+                    time: sum.anchorTime,
+                    kind: sum.hasHermes ? "hermes" : "mac",
+                    label: "Macで過ごした時間",
+                    detail: "\(top)\n合計 \(formatDuration(sum.totalDuration)) · \(sum.entryCount)件を要約",
+                    duration: sum.totalDuration,
+                    sessionCount: sum.entryCount
                 ))
+            } else {
+                for e in cluster {
+                    events.append(DayTimelineEvent(
+                        id: "mac-\(e.id)",
+                        time: e.startTime,
+                        kind: e.kind == "hermes" ? "hermes" : "mac",
+                        label: MacWorkFocus.workTitle(for: e),
+                        detail: macEventDetail(for: e),
+                        duration: e.duration,
+                        sessionCount: 1
+                    ))
+                }
             }
         }
 

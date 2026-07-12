@@ -215,24 +215,28 @@ enum DayRecordBuilder {
             .filter { $0.duration >= 30 && $0.startTime >= dayStart && $0.startTime < dayEnd }
         let macTotal = macEntries.reduce(0.0) { $0 + $1.duration }
         if !macEntries.isEmpty { record.metrics.macHours = (macTotal / 360).rounded() / 10 }
-        if MacActivityAggregation.shouldCollapse(macEntries),
-           let sum = MacActivityAggregation.collapsedSummary(macEntries) {
-            let top = sum.topTitles
-                .map { "\($0.title) \(Int($0.duration / 60))分" }.joined(separator: " · ")
-            events.append(LifeEvent(
-                id: "mac-summary-\(dateKey)", kind: "macSummary",
-                start: sum.anchorTime, end: sum.lastEnd,
-                title: "Macで過ごした時間",
-                detail: "\(top)（合計\(String(format: "%.1f", sum.totalDuration / 3600))時間・\(sum.entryCount)件）",
-                tags: ["Mac"]))
-        } else {
-            for e in macEntries {
+        // 日単位ではなくセッション単位(空白30分超で区切り)でcollapse判定することで、
+        // 1日分がまるごと1枚の要約カードになって実際の活動時刻からずれるのを防ぐ。
+        for cluster in MacActivityAggregation.sessionClusters(macEntries) {
+            if MacActivityAggregation.shouldCollapse(cluster),
+               let sum = MacActivityAggregation.collapsedSummary(cluster) {
+                let top = sum.topTitles
+                    .map { "\($0.title) \(Int($0.duration / 60))分" }.joined(separator: " · ")
                 events.append(LifeEvent(
-                    id: "mac-\(e.id)", kind: "mac", start: e.startTime, end: e.endTime,
-                    title: e.label.isEmpty ? e.appName : e.label,
-                    detail: e.appName,
-                    tags: Self.macTags(appName: e.appName, kind: e.kind),
-                    url: e.url))
+                    id: "mac-summary-\(Int(sum.anchorTime))", kind: "macSummary",
+                    start: sum.anchorTime, end: sum.lastEnd,
+                    title: "Macで過ごした時間",
+                    detail: "\(top)（合計\(String(format: "%.1f", sum.totalDuration / 3600))時間・\(sum.entryCount)件）",
+                    tags: ["Mac"]))
+            } else {
+                for e in cluster {
+                    events.append(LifeEvent(
+                        id: "mac-\(e.id)", kind: "mac", start: e.startTime, end: e.endTime,
+                        title: e.label.isEmpty ? e.appName : e.label,
+                        detail: e.appName,
+                        tags: Self.macTags(appName: e.appName, kind: e.kind),
+                        url: e.url))
+                }
             }
         }
 
