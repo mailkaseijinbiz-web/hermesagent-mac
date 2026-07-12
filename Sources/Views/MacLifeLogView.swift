@@ -810,6 +810,23 @@ private struct DayTimeBandView: View {
         }
     }
 
+    /// 表示順とラベル。バーに実際に登場する種類だけを凡例に出す（毎日同じ4種が揃うとは限らない）。
+    private static let legendOrder: [(kind: String, label: String)] = [
+        ("sleep", "睡眠"), ("home", "自宅"), ("out", "外出"), ("mac", "Mac作業")
+    ]
+
+    private var legendItems: [(label: String, color: Color, opacity: Double)] {
+        let present = Set(bands.map(\.kind))
+        var items = Self.legendOrder
+            .filter { present.contains($0.kind) }
+            .map { (label: $0.label, color: Self.color(for: $0.kind), opacity: 0.75) }
+        if present.contains(where: { kind in !Self.legendOrder.contains { $0.kind == kind } }) {
+            items.append((label: "その他", color: Self.color(for: "?"), opacity: 0.75))
+        }
+        if showNow { items.append((label: "現在時刻", color: .red, opacity: 1.0)) }
+        return items
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             GeometryReader { geo in
@@ -847,6 +864,22 @@ private struct DayTimeBandView: View {
                         .foregroundStyle(.tertiary)
                     if h != 24 { Spacer() }
                 }
+            }
+
+            if !legendItems.isEmpty {
+                HStack(spacing: 10) {
+                    ForEach(legendItems, id: \.label) { item in
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(item.color.opacity(item.opacity))
+                                .frame(width: 7, height: 7)
+                            Text(item.label)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                .padding(.top, 2)
             }
         }
     }
