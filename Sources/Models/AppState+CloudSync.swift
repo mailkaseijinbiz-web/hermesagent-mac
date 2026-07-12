@@ -299,7 +299,9 @@ extension AppState {
                 mergeRoster(cloud)
             }
         } catch {
-            // transient (offline / throttled) — the next tick retries
+            // 大半は一時的（オフライン/スロットリング）で次tickが再試行するが、デコード失敗など
+            // 持続的な原因は無ログだと気づけない（社員名簿全消失の教訓）。ログにだけ残す。
+            Log.failure("cloudsync", "pullRosterOnly", error)
         }
     }
 
