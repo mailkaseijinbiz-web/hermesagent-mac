@@ -61,6 +61,13 @@ actor EventStore {
     func rawCount(on day: Date) -> Int {
         load(Self.dayKey(for: day)).count
     }
+
+    /// `PrivateStore.remove()`等でファイルを外部から削除/移行した際に呼ぶ。
+    /// actor内cacheは`load()`のメモ化で残留するため、これを呼ばないと削除後も
+    /// 同一プロセス内では古いデータが返り続ける。
+    func invalidate(on day: Date) {
+        cache.removeValue(forKey: Self.dayKey(for: day))
+    }
 }
 
 // MARK: - 既存モデル→HermesEvent 変換（二重書きフックから使用）
