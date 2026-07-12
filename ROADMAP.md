@@ -2,6 +2,60 @@
 
 両リポジトリ（[hermesagent-mac](https://github.com/mailkaseijinbiz-web/hermesagent-mac) / [hermesagent-ios](https://github.com/mailkaseijinbiz-web/hermesagent-ios)）を **6観点（アーキテクチャ / セキュリティ / コード品質 / 信頼性 / テスト&CI / プロダクト）** で監査した結果に基づく、優先度つきの長期計画。
 
+> 役割分担：本ファイル（root）＝**技術負債/監査の日次ログ**、[docs/ROADMAP.md](docs/ROADMAP.md)＝**プロダクト方向（認知拡張ビジョン＋EVENT-STORE-DESIGN）**。（07-10 で挙げた二重管理の懸念に対する暫定線）
+
+---
+
+## 📅 2026-07-12 更新ログ
+
+**前回（07-10）から進んだこと — 健康の閉ループが「Web ダッシュボード」で外部化**
+- ✅ **健康ダッシュボードの Web 切り出し**（`345f24d`）：`GET /health` で Tailscale 内の任意ブラウザ（iPhone/iPad/他PC）から閲覧できる読み取り専用ビュー（`MobileServer+HealthWeb.swift`）。ネイティブ iOS を待たずに全デバイスから体重/HbA1c 等を見られる**現実的なパリティ手段**。設定画面に QR コードも追加（`c639678`）。
+- ✅ **HbA1c 取り込み API**（`fe2a685`）：`POST /api/health/hba1c`、同日重複はスキップ。カードタップで推移詳細（`7dea85d`）。
+- ✅ **睡眠時間の毎日推定 → DayRecord＋ブリーフ**（`d247b9b`）：健康コンテキスト還流の一環。
+- ✅ **Mac ライフログに日/週/月/年スコープ**（`cf38272`, `MacLifeLogScopeViews.swift` +253）：iOS の HomeDateHelpers に合わせたスコープ切替を Mac 側にも実装（**逆方向のパリティ**）。
+- ✅ **信頼性修正**（`b995c28`）：PUT/DELETE ボディの欠落を修正し、Google トークン失効を可視化。
+- ✅ **CI**：`HermesShared` を兄弟ディレクトリに clone してからビルド（`cc10f04`）。
+
+**現状メトリクス（2026-07-12）**
+- `AppState.swift` **2,214 行**（07-10 の 2,211 とほぼ横ばい）。本体 `@Published` **157**／Sources 全体 **197**（07-10 と同数 = 状態集中の逆行は**止まった**が未反転）。
+- `try?` は Sources 全体で **298 箇所**（07-10 の 295 から微増）。
+- `TODO/FIXME/HACK` は **3 箇所のみ**（すべてコメント/文字列リテラルで実害なし、07-10 と同じ）。
+- テスト：Mac **188 test funcs**（07-10 の 180 から +8。うち **`EventStoreTests` / `WeekSummaryServiceTests` の 2 ファイルは未コミット**）、iOS **46 funcs**（横ばい）。
+
+**今日見つかった懸念（要対応・優先度順）**
+- 🟠 **`/health` の認証が URL クエリに鍵を載せている**（新規セキュリティ課題）：`GET /health?key=<localAutomationKey>` を Bearer 相当として受理している（`MobileServer.swift:618-627`）。比較は定数時間・Tailscale 限定運用だが、**秘密をクエリ文字列に置くのはアンチパターン**——ブラウザ履歴・Referer ヘッダ・（将来入る可能性のある）アクセスログに平文の鍵が残る。QR にも鍵入り URL が焼かれる。→ **初回認証後に Set-Cookie（HttpOnly）へ移す or 短命の署名付きトークン**に置換すべき（**M**）。[google-token-file-storage] と同じ「秘密の取り回し」系。
+- 🟡 **未コミットの作業が 2 日滞留**：`EventStoreTests.swift` / `WeekSummaryServiceTests.swift`（07-10 のログでは「追加して green」と記載済みなのに **git 上は未追跡**）、`.agents/`、`skills-lock.json` がワーキングツリーに残存。テストは CI で回らず、消失リスク。→ **コヒーレントな単位でコミット**（**S**）。
+- 🟡 **EventStore H2（リーダー切替）が未着手のまま**：`upsert`/`tombstone` の二重書きは `MacActivityLogger`/`MacMemoStore` から継続しているが、読み手は依然旧経路。07-10 に発見した **`EventStore.cache` が `PrivateStore.remove()` で無効化されない**問題も未対応。H2 = 差分監視 → リーダー切替 → 旧経路撤去 → cache 無効化 API、の順で着手（**M**）。
+- 🟡 **`try?` が再び微増（295→298）**：CloudKit 同期経路と MobileServer レスポンス系の沈黙失敗は依然未精査。移行直後のデコード失敗は名簿全消え（[codable-persisted-fields-rule]）に直結するため優先精査（**M**）。
+- 🟡 **iOS ネイティブ・パリティの方針決定が必要**：健康は「Web ダッシュボード」で当面パリティを取れたが、これは**恒久策か暫定策か**が未定。ネイティブ実装に進むなら `HermesShared` の iOS 取り込み（EventStore/DayRecord/振り返り系）が前提。Web 路線で行くなら iOS アプリの位置づけ（薄クライアント→Web ラッパー化）を [personal-ai-direction] に明記（**M〜L**）。
+
+---
+
+## 📅 2026-07-10 更新ログ
+
+**前回（07-01）から進んだこと — フェーズ1「基盤の信頼性」がほぼ着地**
+- ✅ **重複ロジックの一元化（`../HermesShared` 共有パッケージ）**：`WeightMemoParser` / `MacWorkFocus` / `MacActivityEntry` / `MacActivityAggregation` / `MacActivitySummarizer` / `HermesEvent`(+`HermesEventRules`) を Mac 本体から共有パッケージへ移管。**iOS も `project.yml` で `HermesShared` を依存追加**（`f95a24c`）。長年の「両リポにコピー」課題（[duplicated-logic-both-repos]）に構造的な解決線。
+- ✅ **CloudKit 移行完了**：Supabase 経路を全撤去（`e4a87b1`）。同期の正は CloudKit のみ。デプロイは `build_signed.sh`。
+- ✅ **健康・ライフログの閉ループ**：`WeeklyTrends`（今週7日 vs 先週7日）と `WeightProgress`（7日/30日前比）をデイリーブリーフ文脈へ還流（`59e355c` / `4019a2f`）。
+- ✅ **統一イベントストア H1 着地**（`51af5d3`）：`EventStore` actor が `PrivateStore events-<day>`（暗号化）に1日1ファイルで保存。冪等 upsert（LWW＋墓石）、当日フィルタ込みでしか返さない `events(on:)`、`MacActivityLogger.saveToday` / `MacMemoStore` の add/update/delete から**二重書き**。読み手は旧経路のまま（H2 で差分監視後に切替）。
+- ✅ **テスト網羅が大幅前進**：Mac **174 test funcs**（07-01 時点 115 → +59）、iOS **46 funcs**（07-01 時点 4 → +42）。`DayTimelineGraphTests` / `MacActivityLoggerTests` / `MacWorkFocusTests` / `MobileServerPeerTests` / `LiveActivityPushPayloadTests` など純粋ロジックの回帰が着実に増加。
+- ✅ **信頼性の細かい修正**：アプリ前面デバイスへのプッシュ抑制（`f95a24c`）、アイドル検知で常時起動の待機を作業から除外（`f4be4ef`）、Mac 活動ログの日またぎ汚染修正（`62055e7`）、体重パーサーの助詞対応（`84e87c5`）。
+
+**現状メトリクス（2026-07-10）**
+- `AppState.swift` **2,211 行**（07-01 の 3,267 から縮小）。ただし本体 `@Published` は **157**（Sources 全体 **197**）で状態集中は横ばい〜微増。
+- `try?` は Sources 全体で **295 箇所**（06-28 の 179 から増加）。
+- `Sources/` の `TODO/FIXME/HACK` は 3 箇所のみ（いずれもコメント／文字列リテラルで実害なし）。
+
+**今日この場で対応した事項**
+- ✅ **`EventStoreTests.swift` を新設**（`Tests/`、6 funcs）：`HermesEventRules` 自体は `../HermesShared/Tests/HermesSharedTests/HermesEventTests.swift` に既存（merge/tombstone/normalized/dayKey は当初の懸念と異なりテスト済みだった）。未カバーだったのは actor `EventStore` 本体（`PrivateStore` 経由の暗号化ラウンドトリップ・冪等 upsert・`tombstone` 後の `events(on:)` 除外と `rawCount` 残存・日付跨ぎの隔離・`MacActivityLogger`/`MacMemoStore` からの二重書き変換）。テスト実装中に **actor の `cache` が `PrivateStore.remove()` では invalidate されない**（テスト分離のため隣接日付を使うと汚染する）ことを実発見。全 180 funcs green（`run_tests.sh`）。
+
+**今日見つかった懸念（要対応・優先度順）**
+- 🟡 **`EventStore.cache` はプロセス生存中クリアされない**：`PrivateStore.remove(key:)` は暗号化ファイルを消すだけで actor 内 `cache` dict は残留する。テストは日付を分離することで回避したが、**長時間起動したアプリで同日のデータを外部から削除/移行した場合にも同じ理由で古いキャッシュが残る**可能性がある。実害はまだ未確認だが、H2 着手時に cache 無効化 API の要否を検討（**S**）。
+- 🟠 **状態集中の逆行が止まらない**：本体行数は縮小したが `@Published` 157。EventStore/lifelog/MacActivity 系の新状態が本体直書きの疑い。`AppState+Lifelog`（または `+Events`）extension への隔離で再描画範囲を絞る（**M**）。
+- 🟡 **`try?` の精査が同期系で未完（295 箇所）**：永続化系は surface 化済みだが、CloudKit 移行で増えた同期経路と MobileServer レスポンス系の沈黙失敗は未点検。移行直後こそデコード失敗が名簿全消え（[codable-persisted-fields-rule]）に直結するため、CloudKit デコードの `try?` を優先精査（**M**）。
+- 🟡 **ロードマップが二重管理**：本ファイル（root、6観点監査版）と `docs/ROADMAP.md`（認知拡張ビジョン＋`EVENT-STORE-DESIGN.md`）が併存し、進捗表現が乖離。[roadmap-event-store] は「docs が正」とするが、日次ログは root に付いている。→ **役割分担を両ファイル冒頭に明記**（root＝技術負債/監査、docs＝プロダクト方向）か一本化（**S**）。
+- 🟡 **iOS パリティ**：`HermesShared` 依存は追加したが iOS Source 側は未 import で、EventStore/DayRecord/振り返りコーチ系は依然 Mac 先行。共有ロジックの iOS 取り込みと新機能の閲覧 UI が次の差分（**M〜L**）。
+
 ---
 
 ## 📅 2026-07-01 更新ログ
