@@ -63,13 +63,21 @@ extension MobileServer {
     }
 
     nonisolated func handleHealthWebPage(connection: NWConnection, corsHeaders: String) {
-        let html = Self.healthDashboardHTML
-        let data = Data(html.utf8)
-        var header = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(data.count)\r\n\(corsHeaders)\r\nConnection: close\r\n\r\n"
-        header += ""
-        var payload = Data(header.utf8)
-        payload.append(data)
-        connection.send(content: payload, completion: .contentProcessed { _ in connection.cancel() })
+        Task { @MainActor in
+            let localKey = AppState.shared.localAutomationKey
+            let html = Self.healthDashboardHTML
+            let data = Data(html.utf8)
+            // authorize()を通過した時点で正規のアクセスなので、以後はURLの?key=ではなく
+            // HttpOnly Cookieで認証を維持する（ブラウザ履歴/QR画像にキーが平文で残り続けるのを防ぐ）。
+            var cookieHeader = ""
+            if !localKey.isEmpty {
+                cookieHeader = "Set-Cookie: \(Self.healthCookieName)=\(localKey); Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000\r\n"
+            }
+            let header = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(data.count)\r\n\(corsHeaders)\r\n\(cookieHeader)Connection: close\r\n\r\n"
+            var payload = Data(header.utf8)
+            payload.append(data)
+            connection.send(content: payload, completion: .contentProcessed { _ in connection.cancel() })
+        }
     }
 
     // 自己完結HTML（外部CDNなし・SVGスパークライン手描き・60秒自動更新）
@@ -101,7 +109,8 @@ extension MobileServer {
 <div class="grid" id="grid">読み込み中…</div>
 <div class="updated" id="updated"></div>
 <script>
-const KEY = new URLSearchParams(location.search).get("key") || "";
+// 初回訪問(?key=...)はCookieに移行済み(HttpOnly)。URLからキーを消して履歴/共有に残さない。
+if (location.search) history.replaceState(null, "", location.pathname);
 
 function spark(points, color) {
   if (!points || points.length < 2) return '<div class="nodata">データなし</div>';
@@ -129,7 +138,7 @@ function card(icon, label, value, unit, points, color, sub) {
 
 async function load() {
   try {
-    const r = await fetch("/api/health/dashboard", { headers: { Authorization: "Bearer " + KEY } });
+    const r = await fetch("/api/health/dashboard", { credentials: "same-origin" });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const d = await r.json();
     const L = d.latest || {};
@@ -141,7 +150,7 @@ async function load() {
     document.getElementById("updated").textContent =
       "更新 " + new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }) + "（60秒ごと自動更新）";
   } catch (e) {
-    document.getElementById("grid").innerHTML = `<div class="card"><div class="nodata">取得エラー: ${e.message}<br>URLの key= を確認してください</div></div>`;
+    document.getElementById("grid").innerHTML = `<div class="card"><div class="nodata">取得エラー: ${e.message}<br>Macアプリの設定からQRコードを再度読み込んでください</div></div>`;
   }
 }
 load();

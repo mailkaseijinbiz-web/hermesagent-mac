@@ -615,8 +615,9 @@ class MobileServer {
              AppState.shared.localAutomationKey)
         }
         guard require else { return true }
-        // ブラウザから /health を開く用: 最初の行の ?key=<ローカルキー> を Bearer 相当として受け付ける
-        // （対象は /health 配下のみ。Tailscale内の自分のハブに限る運用）
+        // ブラウザから /health を開くための初回ブートストラップのみ: 最初の行の ?key=<ローカルキー> を
+        // Bearer相当として受け付ける（対象は /health 単体のみ）。認証後はCookieに移行するため、
+        // このクエリキーはQRスキャン直後の1回だけ使われ、以降はURLに残らない（handleHealthWebPage参照）。
         if let firstLine = raw.components(separatedBy: "\r\n").first,
            firstLine.contains(" /health"),
            let range = firstLine.range(of: "key="),
@@ -625,6 +626,9 @@ class MobileServer {
             let key = after.prefix { $0 != "&" && $0 != " " }
             if Self.constantTimeEquals(String(key), localKey) { return true }
         }
+        // Cookie経由（/health のJSが初回訪問後にこれへ移行、URLにキーを残さない）。
+        if !localKey.isEmpty, let cookieVal = extractCookie(raw, name: Self.healthCookieName),
+           Self.constantTimeEquals(cookieVal, localKey) { return true }
         guard let token = extractBearerToken(raw) else { return false }
         // ローカル自動化キー（同一マシンの cron）— 一致なら Google 検証をスキップ。
         // 比較は定数時間で（== の早期 return による文字単位のタイミング側チャネルを防ぐ）。
@@ -634,6 +638,20 @@ class MobileServer {
             allowedEmail: email,
             allowedClientID: clientID
         )
+    }
+
+    static let healthCookieName = "hermes_health_key"
+
+    private nonisolated func extractCookie(_ raw: String, name: String) -> String? {
+        for line in raw.components(separatedBy: "\r\n") {
+            guard line.lowercased().hasPrefix("cookie:") else { continue }
+            let value = line.dropFirst("cookie:".count).trimmingCharacters(in: .whitespaces)
+            for pair in value.split(separator: ";") {
+                let kv = pair.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                if kv.count == 2, kv[0] == name { return kv[1] }
+            }
+        }
+        return nil
     }
 
     /// Length-independent, early-exit-free byte comparison for secret tokens.
