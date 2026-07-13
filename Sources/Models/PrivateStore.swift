@@ -80,14 +80,37 @@ enum PrivateStore {
 
     // MARK: - Keychain
 
+    /// ラップ鍵ファイル（0600）。devビルドは再署名のたびにキーチェーンACLダイアログが出て、
+    /// 未応答の間ライフログ全体が読めなくなるため、Googleトークンと同じファイル方式に移行
+    /// （[[google-token-file-storage]]と同判断）。既存キーチェーン鍵は初回にファイルへ移行する。
+    private static var keyFileURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".hermes/private/.store-key")
+    }
+
     private static func symmetricKey() throws -> SymmetricKey {
+        // 1. ファイル鍵（ダイアログなし・ビルド非依存）
+        if let data = try? Data(contentsOf: keyFileURL), data.count == 32 {
+            return SymmetricKey(data: data)
+        }
+        // 2. キーチェーンから移行（初回のみダイアログが出る。以後はファイル）
         if let existing = keychainRead() {
+            writeKeyFile(existing)
             return SymmetricKey(data: existing)
         }
+        // 3. 新規生成（ファイルに保存。キーチェーンにも冗長保存しておく）
         let key = SymmetricKey(size: .bits256)
         let raw = key.withUnsafeBytes { Data($0) }
-        guard keychainWrite(raw) else { throw StoreError.keychainFailed }
+        writeKeyFile(raw)
+        _ = keychainWrite(raw)
+        guard (try? Data(contentsOf: keyFileURL)) != nil else { throw StoreError.keychainFailed }
         return key
+    }
+
+    private static func writeKeyFile(_ data: Data) {
+        let dir = keyFileURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? data.write(to: keyFileURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyFileURL.path)
     }
 
     private static func keychainWrite(_ data: Data) -> Bool {
