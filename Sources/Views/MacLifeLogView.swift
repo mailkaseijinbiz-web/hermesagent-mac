@@ -111,11 +111,11 @@ struct MacLifeLogView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                Picker("", selection: $scope) {
-                    ForEach(LifeLogScope.allCases) { Text($0.rawValue).tag($0) }
+                HStack {
+                    Spacer()
+                    GlassScopePicker(scope: $scope)
+                    Spacer()
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 260)
                 .padding(.bottom, 14)
 
                 if scope != .day {
@@ -489,37 +489,32 @@ struct MacLifeLogView: View {
         let df = DateFormatter()
         df.locale = Locale(identifier: "ja_JP")
         df.dateFormat = "M月d日(EEEE)"
-        return HStack(spacing: 12) {
-            Button { shiftDay(-1) } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 16, weight: .semibold))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(canGoBack ? Color.primary : Color.secondary.opacity(0.35))
-            .disabled(!canGoBack)
+        return HStack {
+            // 右のrefreshボタンと同じ幅を左に確保し、中央の塊を真に中央寄せする。
+            Color.clear.frame(width: 28)
+            Spacer()
 
-            HStack(spacing: 8) {
-                Text(df.string(from: selectedDate))
-                    .font(.system(size: 28, weight: .bold))
-                if isViewingToday {
-                    Text("今日")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.accentColor.opacity(0.12))
-                        .cornerRadius(4)
+            HStack(spacing: 12) {
+                GlassChevronButton(systemName: "chevron.left", enabled: canGoBack) { shiftDay(-1) }
+
+                HStack(spacing: 8) {
+                    Text(df.string(from: selectedDate))
+                        .font(.system(size: 20, weight: .bold))
+                    if isViewingToday {
+                        Text("今日")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.15))
+                            .clipShape(Capsule())
+                    }
+                    lifelogRecordingIndicator
                 }
-                lifelogRecordingIndicator
-            }
+                .glassCapsuleBackground(padH: 14, padV: 6)
 
-            Button { shiftDay(1) } label: {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 16, weight: .semibold))
+                GlassChevronButton(systemName: "chevron.right", enabled: canGoForward) { shiftDay(1) }
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(canGoForward ? Color.primary : Color.secondary.opacity(0.35))
-            .disabled(!canGoForward)
 
             Spacer()
 
@@ -529,6 +524,7 @@ struct MacLifeLogView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .frame(width: 28)
         }
     }
 
@@ -793,69 +789,154 @@ struct MacLifeLogView: View {
     }
 }
 
+// MARK: - Liquid Glass風の共通パーツ（タブ・期間ナビで共有）
+
+extension View {
+    /// 半透明カプセル背景（すりガラス風）。期間ラベルや日付表示に使う。
+    func glassCapsuleBackground(padH: CGFloat = 16, padV: CGFloat = 7) -> some View {
+        self
+            .padding(.horizontal, padH).padding(.vertical, padV)
+            .background(Capsule().fill(.ultraThinMaterial))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+    }
+}
+
+/// 丸いすりガラス風の前後ボタン（日/週/月/年ナビゲーションで共有）。
+struct GlassChevronButton: View {
+    let systemName: String
+    var enabled: Bool = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(.ultraThinMaterial))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(enabled ? Color.primary : Color.secondary.opacity(0.35))
+        .disabled(!enabled)
+    }
+}
+
+/// 日/週/月/年の切替タブ。ネイティブsegmented styleの代わりに、選択ピルが滑らかに
+/// 移動するliquid glass風のカプセルにする（前後に切り替えやすいよう、指の置き場が明確）。
+struct GlassScopePicker: View {
+    @Binding var scope: LifeLogScope
+    @Namespace private var ns
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(LifeLogScope.allCases) { s in
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { scope = s }
+                } label: {
+                    Text(s.rawValue)
+                        .font(.system(size: 13, weight: scope == s ? .semibold : .regular))
+                        .foregroundStyle(scope == s ? Color.primary : Color.secondary)
+                        .frame(width: 48, height: 28)
+                        .background {
+                            if scope == s {
+                                Capsule()
+                                    .fill(.regularMaterial)
+                                    .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+                                    .matchedGeometryEffect(id: "scopePill", in: ns)
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Capsule().fill(.ultraThinMaterial))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+    }
+}
+
 // MARK: - 24時間タイムバンド（DayRecord.bands）
+
+// MARK: - タイムバンド共通スタイル（日ビュー・週ビューで共有）
+
+/// バンド種別→色、および実際に登場する種類だけの凡例を組み立てる。
+enum TimeBandStyle {
+    static func color(for kind: String) -> Color {
+        switch kind {
+        case "sleep":   return .indigo
+        case "home":    return .teal
+        case "out":     return .orange
+        case "transit": return .yellow
+        case "mac":     return .purple   // 過去に保存された帯との互換用（今は生成しない）
+        default:        return .gray
+        }
+    }
+
+    /// 表示順とラベル。バーに実際に登場する種類だけを凡例に出す（毎日同じ種類が揃うとは限らない）。
+    private static let legendOrder: [(kind: String, label: String)] = [
+        ("home", "自宅"), ("out", "外出"), ("transit", "移動"), ("sleep", "睡眠"), ("mac", "Mac作業")
+    ]
+
+    static func legendItems(for bands: [TimeBand], showNow: Bool) -> [(label: String, color: Color, opacity: Double)] {
+        let present = Set(bands.map(\.kind))
+        var items = legendOrder
+            .filter { present.contains($0.kind) }
+            .map { (label: $0.label, color: color(for: $0.kind), opacity: 0.75) }
+        if present.contains(where: { kind in !legendOrder.contains { $0.kind == kind } }) {
+            items.append((label: "その他", color: color(for: "?"), opacity: 0.75))
+        }
+        if showNow { items.append((label: "現在時刻", color: .red, opacity: 1.0)) }
+        return items
+    }
+}
+
+/// 24時間ぶんの色付き帯1本（日ビューの本体・週ビューの各行から共有）。
+struct DayBandStrip: View {
+    let bands: [TimeBand]
+    let day: Date
+    let showNow: Bool
+    var height: CGFloat = 26
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let dayStart = Calendar.current.startOfDay(for: day).timeIntervalSince1970
+            let radius = min(7, height / 2)
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: radius)
+                    .fill(Color.gray.opacity(0.1))
+                ForEach(Array(bands.enumerated()), id: \.offset) { _, band in
+                    let x0 = CGFloat(max(0, min(1, (band.start - dayStart) / 86400)))
+                    let x1 = CGFloat(max(0, min(1, (band.end - dayStart) / 86400)))
+                    if x1 > x0 {
+                        RoundedRectangle(cornerRadius: min(4, radius))
+                            .fill(TimeBandStyle.color(for: band.kind).opacity(0.75))
+                            .frame(width: max(2, w * (x1 - x0)), height: height)
+                            .offset(x: w * x0)
+                    }
+                }
+                if showNow {
+                    let nowX = CGFloat(max(0, min(1, (Date().timeIntervalSince1970 - dayStart) / 86400)))
+                    Rectangle()
+                        .fill(Color.red)
+                        .frame(width: 1.5, height: height)
+                        .offset(x: w * nowX)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: radius))
+        }
+        .frame(height: height)
+    }
+}
 
 private struct DayTimeBandView: View {
     let bands: [TimeBand]
     let day: Date
     let showNow: Bool
 
-    private static func color(for kind: String) -> Color {
-        switch kind {
-        case "sleep": return .indigo
-        case "home":  return .teal
-        case "out":   return .orange
-        case "mac":   return .purple
-        default:      return .gray
-        }
-    }
-
-    /// 表示順とラベル。バーに実際に登場する種類だけを凡例に出す（毎日同じ4種が揃うとは限らない）。
-    private static let legendOrder: [(kind: String, label: String)] = [
-        ("sleep", "睡眠"), ("home", "自宅"), ("out", "外出"), ("mac", "Mac作業")
-    ]
-
-    private var legendItems: [(label: String, color: Color, opacity: Double)] {
-        let present = Set(bands.map(\.kind))
-        var items = Self.legendOrder
-            .filter { present.contains($0.kind) }
-            .map { (label: $0.label, color: Self.color(for: $0.kind), opacity: 0.75) }
-        if present.contains(where: { kind in !Self.legendOrder.contains { $0.kind == kind } }) {
-            items.append((label: "その他", color: Self.color(for: "?"), opacity: 0.75))
-        }
-        if showNow { items.append((label: "現在時刻", color: .red, opacity: 1.0)) }
-        return items
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            GeometryReader { geo in
-                let w = geo.size.width
-                let dayStart = Calendar.current.startOfDay(for: day).timeIntervalSince1970
-                ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(Color.gray.opacity(0.1))
-                    ForEach(Array(bands.enumerated()), id: \.offset) { _, band in
-                        let x0 = CGFloat(max(0, min(1, (band.start - dayStart) / 86400)))
-                        let x1 = CGFloat(max(0, min(1, (band.end - dayStart) / 86400)))
-                        if x1 > x0 {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Self.color(for: band.kind).opacity(0.75))
-                                .frame(width: max(2, w * (x1 - x0)), height: 26)
-                                .offset(x: w * x0)
-                        }
-                    }
-                    if showNow {
-                        let nowX = CGFloat(max(0, min(1, (Date().timeIntervalSince1970 - dayStart) / 86400)))
-                        Rectangle()
-                            .fill(Color.red)
-                            .frame(width: 1.5, height: 26)
-                            .offset(x: w * nowX)
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 7))
-            }
-            .frame(height: 26)
+            DayBandStrip(bands: bands, day: day, showNow: showNow, height: 26)
 
             HStack(spacing: 0) {
                 ForEach([0, 6, 12, 18, 24], id: \.self) { h in
@@ -866,6 +947,7 @@ private struct DayTimeBandView: View {
                 }
             }
 
+            let legendItems = TimeBandStyle.legendItems(for: bands, showNow: showNow)
             if !legendItems.isEmpty {
                 HStack(spacing: 10) {
                     ForEach(legendItems, id: \.label) { item in

@@ -21,7 +21,7 @@ struct LifeEvent: Codable, Identifiable, Equatable {
 
 /// 24時間バンド（1日の構造を色帯で見せる）。
 struct TimeBand: Codable, Equatable {
-    var kind: String   // sleep | home | out | mac
+    var kind: String   // sleep | home | out | transit（"mac"は過去データ互換のみ、新規には出さない）
     var start: Double
     var end: Double
 }
@@ -185,8 +185,9 @@ enum DayRecordBuilder {
         var record = DayRecord(dateKey: dateKey)
         var events: [LifeEvent] = []
 
-        // 睡眠（iOSプッシュ）
+        // 睡眠（iOSプッシュ）。実測が無い日は後段（推定）でbandSleepを差し替える。
         let sleep = await DayRecordStore.shared.sleep(dateKey: dateKey)
+        var bandSleep = sleep
         if let s = sleep {
             events.append(LifeEvent(
                 id: "sleep-\(dateKey)", kind: "sleep", start: s.start, end: s.end,
@@ -276,8 +277,11 @@ enum DayRecordBuilder {
 
         record.events = events.sorted { $0.start < $1.start }
 
-        // 睡眠の推定（実測が無い日）: 「寝た/起きた」メモ > 行動シグナル推定
-        if record.metrics.sleepHours == nil {
+        // 睡眠区間の推定（実測pushが無い日）: 「寝た/起きた」メモ > 行動シグナル推定。
+        // HealthKitの合計時間（`h.sleepHours`）は数値だけでstart/endを持たないため、
+        // メトリクス表示にHealthKitの値が先に入っていてもバンド用の区間は別途推定する
+        // （そうしないと訪問記録の「次の訪問まで持続」ロジックが睡眠中を外出扱いし続ける）。
+        if sleep == nil {
             let dayStart = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
             let yesterKey = DayRecordStore.dateKey(for: Date().addingTimeInterval(-86400))
             let yesterEvents = await DayRecordStore.shared.persisted(dateKey: yesterKey)?.events ?? []
@@ -299,7 +303,8 @@ enum DayRecordBuilder {
             let est = SleepEstimator.fromMemoPair(sleepAt: sleepMemoAt, wokeAt: wakeMemoAt, dayStart: dayStart)
                 ?? SleepEstimator.estimate(signals: signals, dayStart: dayStart)
             if let est {
-                record.metrics.sleepHours = est.hours
+                if record.metrics.sleepHours == nil { record.metrics.sleepHours = est.hours }
+                bandSleep = HubSleepRecord(start: est.start, end: est.end, hours: est.hours)
                 record.events.append(LifeEvent(
                     id: "sleep-est-\(dateKey)", kind: "sleep", start: est.start, end: est.end,
                     title: "睡眠（推定）", detail: String(format: "%.1f時間（操作履歴から推定）", est.hours),
@@ -311,7 +316,8 @@ enum DayRecordBuilder {
         let bandEvents = record.events.filter { $0.kind != "macSummary" } + macEntries.map {
             LifeEvent(id: "band-\($0.id)", kind: "mac", start: $0.startTime, end: $0.endTime, title: "")
         }
-        record.bands = Self.deriveBands(events: bandEvents, sleep: sleep, homeKeyword: homeKw)
+        // 推定睡眠も含めたbandSleepを渡す（実測が無い日はvisit帯だけで自宅時間が過小評価されるため）。
+        record.bands = Self.deriveBands(events: bandEvents, sleep: bandSleep, homeKeyword: homeKw)
         if Calendar.current.isDateInToday(Date(timeIntervalSince1970: appState.lifelogSummaryAt)),
            !appState.lifelogSummary.isEmpty {
             record.summary = appState.lifelogSummary
@@ -346,22 +352,28 @@ enum DayRecordBuilder {
         return tags
     }
 
+    /// 駅・空港・バス等、移動中とみなす場所名か（visitTags・deriveBandsで共有）。
+    static func isTransit(_ name: String) -> Bool {
+        let transit = ["駅", "空港", "バス"]
+        return transit.contains { name.contains($0) }
+    }
+
     static func visitTags(name: String, isHome: Bool) -> [String] {
         if isHome { return ["自宅"] }
         var tags = ["外出"]
         let food = ["店", "レストラン", "カフェ", "食堂", "餃子", "ラーメン", "寿司", "焼", "居酒屋", "バル", "食"]
         let sauna = ["サウナ", "温泉", "湯", "スパ"]
-        let transit = ["駅", "空港", "バス"]
         let fitness = ["ジム", "フィットネス", "プール"]
         if sauna.contains(where: { name.contains($0) }) { tags.append("サウナ") }
         else if food.contains(where: { name.contains($0) }) { tags.append("食事") }
-        else if transit.contains(where: { name.contains($0) }) { tags.append("移動") }
+        else if isTransit(name) { tags.append("移動") }
         else if fitness.contains(where: { name.contains($0) }) { tags.append("運動") }
         return tags
     }
 
     // MARK: - 24時間バンド
 
+    /// 自宅/外出/移動/睡眠の4種で1日を分類する（Mac作業は別次元の指標のため、この帯には出さない）。
     static func deriveBands(events: [LifeEvent], sleep: HubSleepRecord?, homeKeyword: String) -> [TimeBand] {
         var bands: [TimeBand] = []
         let dayStart = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
@@ -369,29 +381,26 @@ enum DayRecordBuilder {
         if let s = sleep {
             bands.append(TimeBand(kind: "sleep", start: max(s.start, dayStart), end: min(s.end, dayEnd)))
         }
-        // 訪問: 自宅=home、それ以外=out。次の訪問（または今）まで続くとみなす
+        // 訪問: 自宅=home、駅/空港/バス等=transit、それ以外=out。次の訪問（または今）まで続くとみなす
         let visits = events.filter { $0.kind == "visit" }
+        // 「移動」帯の上限。駅名visitは通過点にすぎず、次の訪問まで何時間も
+        // 「移動中」扱いになると実態と乖離する（新中野駅→4時間移動 問題）。
+        let transitCap: Double = 30 * 60
         for v in visits {
             let end = v.end ?? min(Date().timeIntervalSince1970, dayEnd)
-            let kind = (v.place == "自宅" || isHome(v.title, keyword: homeKeyword)) ? "home" : "out"
-            if end > v.start {
+            guard end > v.start else { continue }
+            let kind: String
+            if v.place == "自宅" || isHome(v.title, keyword: homeKeyword) { kind = "home" }
+            else if isTransit(v.title) { kind = "transit" }
+            else { kind = "out" }
+            if kind == "transit", end - v.start > transitCap {
+                // 移動は最大30分。残りはその先の滞在（外出）として扱う
+                bands.append(TimeBand(kind: "transit", start: v.start, end: v.start + transitCap))
+                bands.append(TimeBand(kind: "out", start: v.start + transitCap, end: end))
+            } else {
                 bands.append(TimeBand(kind: kind, start: v.start, end: end))
             }
         }
-        // Mac作業（隣接10分以内は結合）
-        let macs = events.filter { $0.kind == "mac" }.sorted { $0.start < $1.start }
-        var current: TimeBand?
-        for m in macs {
-            let end = m.end ?? m.start
-            if var c = current, m.start - c.end <= 600 {
-                c.end = max(c.end, end)
-                current = c
-            } else {
-                if let c = current, c.end - c.start >= 300 { bands.append(c) }
-                current = TimeBand(kind: "mac", start: m.start, end: end)
-            }
-        }
-        if let c = current, c.end - c.start >= 300 { bands.append(c) }
         return bands.sorted { $0.start < $1.start }
     }
 

@@ -52,10 +52,15 @@ struct MacLifeLogScopeView: View {
     }
 
     private var periodHeader: some View {
-        HStack(spacing: 10) {
-            Button { shift(-1) } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain)
-            Text(periodTitle).font(.system(size: 15, weight: .semibold))
-            Button { shift(1) } label: { Image(systemName: "chevron.right") }.buttonStyle(.plain)
+        HStack {
+            Spacer()
+            HStack(spacing: 12) {
+                GlassChevronButton(systemName: "chevron.left") { shift(-1) }
+                Text(periodTitle)
+                    .font(.system(size: 14, weight: .semibold))
+                    .glassCapsuleBackground()
+                GlassChevronButton(systemName: "chevron.right") { shift(1) }
+            }
             Spacer()
         }
         .foregroundStyle(.primary)
@@ -139,12 +144,27 @@ struct MacLifeLogScopeView: View {
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.purple.opacity(0.07)))
             }
             statRow(days: days, previous: prevDays)
+            weekBandStack
             HStack(alignment: .top, spacing: 8) {
                 ForEach(0..<7, id: \.self) { i in
                     let d = cal.date(byAdding: .day, value: i, to: weekStart)!
                     dayMiniCard(d, record(d), maxSteps: maxSteps, maxSleep: maxSleep, maxMac: maxMac)
                 }
             }
+        }
+    }
+
+    /// 日ビューの24時間タイムバンド（DayBandStrip）を7日分積み重ね、1週間の活動パターンを
+    /// 縦に並べて見比べられるようにする。数値の羅列だけの統計チップでは気づきにくい
+    /// 「毎日この時間帯に外出している」等のパターンが一目で見える。
+    private var weekBandStack: some View {
+        let items: [(date: Date, bands: [TimeBand])] = (0..<7).map { i in
+            let d = cal.date(byAdding: .day, value: i, to: weekStart)!
+            return (date: d, bands: record(d)?.bands ?? [])
+        }
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("週間タイムバンド").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+            WeekBandStackView(days: items)
         }
     }
 
@@ -319,5 +339,57 @@ struct MacLifeLogScopeView: View {
     private func deltaPct(_ cur: Double?, _ prev: Double?) -> Int? {
         guard let c = cur, let p = prev, p > 0 else { return nil }
         return Int(((c - p) / p * 100).rounded())
+    }
+}
+
+// MARK: - 週間タイムバンド（DayBandStripを7行積み重ね）
+
+private struct WeekBandStackView: View {
+    let days: [(date: Date, bands: [TimeBand])]
+
+    private var cal: Calendar { Calendar.current }
+    private var todayIndex: Int? { days.firstIndex { cal.isDateInToday($0.date) } }
+    private var unionBands: [TimeBand] { days.flatMap(\.bands) }
+
+    private static let labelWidth: CGFloat = 28
+
+    private static func weekdayLabel(_ d: Date) -> String {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ja_JP"); f.dateFormat = "E"
+        return f.string(from: d)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(days.enumerated()), id: \.offset) { i, d in
+                HStack(spacing: 8) {
+                    Text(Self.weekdayLabel(d.date))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(i == todayIndex ? Color.accentColor : .secondary)
+                        .frame(width: Self.labelWidth, alignment: .leading)
+                    DayBandStrip(bands: d.bands, day: d.date, showNow: i == todayIndex, height: 16)
+                }
+            }
+            HStack(spacing: 8) {
+                Color.clear.frame(width: Self.labelWidth, height: 1)
+                HStack(spacing: 0) {
+                    ForEach([0, 6, 12, 18, 24], id: \.self) { h in
+                        Text("\(h)").font(.system(size: 9)).foregroundStyle(.tertiary)
+                        if h != 24 { Spacer() }
+                    }
+                }
+            }
+            let legendItems = TimeBandStyle.legendItems(for: unionBands, showNow: todayIndex != nil)
+            if !legendItems.isEmpty {
+                HStack(spacing: 10) {
+                    ForEach(legendItems, id: \.label) { item in
+                        HStack(spacing: 4) {
+                            Circle().fill(item.color.opacity(item.opacity)).frame(width: 7, height: 7)
+                            Text(item.label).font(.system(size: 9)).foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                .padding(.top, 2).padding(.leading, Self.labelWidth + 8)
+            }
+        }
     }
 }
