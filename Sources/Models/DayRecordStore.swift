@@ -401,6 +401,25 @@ enum DayRecordBuilder {
                 bands.append(TimeBand(kind: kind, start: v.start, end: end))
             }
         }
+
+        // 帰宅補正: 訪問は「次の訪問まで続く」とみなすため、iOSの帰宅検知が遅い/来ないと
+        // 外出帯が現在まで伸び続ける。Mac（自宅据え置きのMac mini）での操作セッションは
+        // 在宅の確実な証拠なので、外出帯の途中でMac作業が始まっていたらそこで打ち切り、
+        // 以降を自宅帯に切り替える。
+        let macSessions = events
+            .filter { ($0.kind == "mac" || $0.kind == "hermes") && (($0.end ?? $0.start) - $0.start) >= 5 * 60 }
+            .sorted { $0.start < $1.start }
+        if !macSessions.isEmpty {
+            var fixed: [TimeBand] = []
+            for band in bands {
+                guard band.kind == "out" || band.kind == "transit",
+                      let mac = macSessions.first(where: { $0.start > band.start + 10 * 60 && $0.start < band.end })
+                else { fixed.append(band); continue }
+                fixed.append(TimeBand(kind: band.kind, start: band.start, end: mac.start))
+                fixed.append(TimeBand(kind: "home", start: mac.start, end: band.end))
+            }
+            bands = fixed
+        }
         return bands.sorted { $0.start < $1.start }
     }
 
